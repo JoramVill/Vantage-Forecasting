@@ -1,6 +1,6 @@
 // Database schema definitions
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;  // Updated for outage tables
 
 export const CREATE_TABLES_SQL = `
 -- Schema version tracking
@@ -73,6 +73,59 @@ CREATE TABLE IF NOT EXISTS training_runs (
   duration_ms INTEGER
 );
 
+-- Outage records (unified planned and unplanned)
+CREATE TABLE IF NOT EXISTS outage_records (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id TEXT NOT NULL,
+  unit_id TEXT NOT NULL,
+  site_id TEXT,
+  region TEXT NOT NULL,
+  fuel_type TEXT NOT NULL,
+  outage_type TEXT NOT NULL,  -- 'planned' or 'unplanned'
+  start_time TEXT NOT NULL,
+  end_time TEXT NOT NULL,
+  duration_minutes REAL NOT NULL,
+  capacity_mw REAL,
+  capacity_lost_mw REAL,
+  severity TEXT,
+  time_period TEXT,
+  day_of_week INTEGER,
+  hour INTEGER,
+  month INTEGER,
+  is_weekend INTEGER DEFAULT 0,
+  source_file TEXT,
+  imported_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(event_id, unit_id, start_time)
+);
+
+-- Unit metadata (for capacity and fuel type lookups)
+CREATE TABLE IF NOT EXISTS unit_metadata (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  unit_id TEXT UNIQUE NOT NULL,
+  site_id TEXT,
+  region TEXT NOT NULL,
+  fuel_type TEXT,
+  capacity_mw REAL,
+  commissioned_date TEXT,
+  notes TEXT,
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Outage probability models
+CREATE TABLE IF NOT EXISTS outage_models (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  training_start TEXT,
+  training_end TEXT,
+  total_outages INTEGER,
+  planned_outages INTEGER,
+  unplanned_outages INTEGER,
+  model_data TEXT,  -- JSON with probability multipliers
+  is_active INTEGER DEFAULT 1,
+  notes TEXT
+);
+
 -- Indexes for faster queries
 CREATE INDEX IF NOT EXISTS idx_demand_datetime ON demand_records(datetime);
 CREATE INDEX IF NOT EXISTS idx_demand_region ON demand_records(region);
@@ -84,6 +137,12 @@ CREATE INDEX IF NOT EXISTS idx_weather_datetime_region ON weather_records(dateti
 
 CREATE INDEX IF NOT EXISTS idx_models_active ON models(is_active);
 CREATE INDEX IF NOT EXISTS idx_models_type ON models(model_type);
+
+CREATE INDEX IF NOT EXISTS idx_outage_unit ON outage_records(unit_id);
+CREATE INDEX IF NOT EXISTS idx_outage_region ON outage_records(region);
+CREATE INDEX IF NOT EXISTS idx_outage_type ON outage_records(outage_type);
+CREATE INDEX IF NOT EXISTS idx_outage_start ON outage_records(start_time);
+CREATE INDEX IF NOT EXISTS idx_outage_region_type ON outage_records(region, outage_type);
 `;
 
 export const REGION_MAPPING: Record<string, string> = {

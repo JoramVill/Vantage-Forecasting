@@ -4,7 +4,7 @@ import { DateTime } from 'luxon';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { parse } from 'csv-parse/sync';
-import { parseDemandCsv, parseWeatherCsv } from './parsers/index.js';
+import { parseDemandCsv, parseWeatherCsv, type ParsedDemandData } from './parsers/index.js';
 import { mergeData } from './utils/index.js';
 import { buildTrainingSamples, buildFeatureVector } from './features/index.js';
 import { RegressionModel } from './models/regressionModel.js';
@@ -17,6 +17,9 @@ import { createWeatherService, DEFAULT_LOCATIONS, capacityFactorService, Cluster
 import { getDatabase, closeDatabase, DatabaseStats, StoredModel } from './database/index.js';
 import { ModelRouter } from './models/capacityFactor/index.js';
 import { CFacWeatherFeatures, StationType, getStationTypeFromCode, CFacForecastResult } from './types/capacityFactor.js';
+import { parseOutageDirectory } from './parsers/index.js';
+import { generateAnalysisReport, formatProbability, getRiskColor } from './services/outageAnalysisService.js';
+import { OutageSeverity, TimePeriod, GridRegion, OutageRecord } from './types/outage.js';
 
 // Default API key (can be overridden by env or config)
 const DEFAULT_API_KEY = 'BJYBHG8K3YS8EFK46233M8L75';
@@ -189,7 +192,7 @@ program
 program
   .command('forecast')
   .description('Generate demand forecast (auto-fetches weather data from Visual Crossing API)')
-  .requiredOption('-d, --demand <file>', 'Historical demand CSV file')
+  .option('-d, --demand <file>', 'Historical demand CSV file (optional if using database)')
   .requiredOption('-s, --start <date>', 'Forecast start date (YYYY-MM-DD)')
   .requiredOption('-e, --end <date>', 'Forecast end date (YYYY-MM-DD)')
   .requiredOption('-o, --output <file>', 'Output forecast CSV file')
@@ -198,18 +201,43 @@ program
   .option('--scale <percent>', 'Scale forecast by percentage (e.g., 5 for +5%, -3 for -3%)', '0')
   .option('--growth <percent>', 'Daily demand growth rate for hybrid model (e.g., 0.01 for 0.01%/day)', '0')
   .option('--cache <dir>', 'Weather cache directory', './weather_cache')
+  .option('--use-db', 'Use demand data from database instead of file')
+  .option('--train-days <days>', 'Number of days of historical data to use for training (default: 90)', '90')
   .action(async (options) => {
     try {
       const apiKey = getApiKey();
       const weatherService = createWeatherService(apiKey, options.cache);
 
-      // Parse demand data (supports single file or folder)
+      // Parse demand data (from file or database)
       console.log('\n🔄 Loading demand data...');
-      const demandData = parseDemandCsv(options.demand);
-      if (demandData.filesProcessed && demandData.filesProcessed > 1) {
-        console.log(`  📊 Demand: ${demandData.records.length} records from ${demandData.filesProcessed} files`);
+      let demandData: ParsedDemandData;
+
+      if (options.useDb || !options.demand) {
+        // Load demand data from database
+        const db = getDatabase();
+        const trainDays = parseInt(options.trainDays) || 90;
+        const forecastStart = DateTime.fromISO(options.start);
+        const trainEnd = forecastStart.minus({ days: 1 }).toISODate()!;
+        const trainStart = forecastStart.minus({ days: trainDays }).toISODate()!;
+
+        console.log(`  📂 Loading from database: ${trainStart} to ${trainEnd}`);
+        demandData = db.getDemandData(trainStart, trainEnd);
+        closeDatabase();
+
+        if (demandData.records.length === 0) {
+          console.error('❌ No demand data found in database for the specified period');
+          console.error('   Try importing data first with: iload db import -t demand -f <file>');
+          process.exit(1);
+        }
+        console.log(`  📊 Demand: ${demandData.records.length} records from database`);
       } else {
-        console.log(`  📊 Demand: ${demandData.records.length} records`);
+        // Parse demand data from file (supports single file or folder)
+        demandData = parseDemandCsv(options.demand);
+        if (demandData.filesProcessed && demandData.filesProcessed > 1) {
+          console.log(`  📊 Demand: ${demandData.records.length} records from ${demandData.filesProcessed} files`);
+        } else {
+          console.log(`  📊 Demand: ${demandData.records.length} records`);
+        }
       }
       console.log(`  📅 Range: ${DateTime.fromJSDate(demandData.startDate).toISODate()} to ${DateTime.fromJSDate(demandData.endDate).toISODate()}`);
 
@@ -1046,6 +1074,15 @@ dbCommand
         console.log('\n🌤️  Weather Date Range:');
         console.log(`  • Start: ${stats.weatherDateRange.start}`);
         console.log(`  • End: ${stats.weatherDateRange.end}`);
+
+        // Show weather data breakdown (historical vs forecast)
+        const weatherStats = db.getWeatherDataStats();
+        console.log('\n📊 Weather Data Breakdown:');
+        console.log(`  • Historical: ${weatherStats.historicalRecords.toLocaleString()} records (permanent)`);
+        console.log(`  • Forecast: ${weatherStats.forecastRecords.toLocaleString()} records`);
+        if (weatherStats.staleForecastRecords > 0) {
+          console.log(`  • Stale Forecast: ${weatherStats.staleForecastRecords.toLocaleString()} records (>24h old, will refresh)`);
+        }
       }
 
       if (stats.regions.length > 0) {
@@ -1860,6 +1897,1031 @@ cfacCommand
       }
 
       console.log('✅ Info complete!');
+
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+// FORECAST-ALL command - Generate both demand and capacity factor forecasts
+program
+  .command('forecast-all')
+  .description('Generate both demand and capacity factor forecasts in a single command')
+  .requiredOption('-d, --demand <file>', 'Historical demand CSV file or directory')
+  .requiredOption('-c, --cfac <path>', 'Capacity factor training data: MRHCFac CSV file or directory')
+  .requiredOption('-s, --start <date>', 'Forecast start date (YYYY-MM-DD)')
+  .requiredOption('-e, --end <date>', 'Forecast end date (YYYY-MM-DD)')
+  .option('-o, --output <dir>', 'Output directory for forecast files', './output')
+  .option('--model <type>', 'Demand model type: regression, xgboost, or hybrid', 'regression')
+  .option('--stations <file>', 'Stations JSON file for cfac', 'src/data/stations.json')
+  .option('--cache <dir>', 'Weather cache directory', './weather_cache')
+  .action(async (options) => {
+    try {
+      const apiKey = getApiKey();
+      const weatherService = createWeatherService(apiKey, options.cache);
+
+      console.log('\n════════════════════════════════════════════════════════════════');
+      console.log('              COMBINED DEMAND & CAPACITY FACTOR FORECAST          ');
+      console.log('════════════════════════════════════════════════════════════════\n');
+
+      // Ensure output directory exists
+      if (!existsSync(options.output)) {
+        mkdirSync(options.output, { recursive: true });
+      }
+
+      // Generate output filenames
+      const demandOutputFile = join(options.output, `demand_forecast_${options.start}_${options.end}.csv`);
+      const cfacOutputFile = join(options.output, `cfac_forecast_${options.start}_${options.end}.csv`);
+
+      // ==================== PART 1: DEMAND FORECAST ====================
+      console.log('╔══════════════════════════════════════════════════════════════╗');
+      console.log('║                    PART 1: DEMAND FORECAST                   ║');
+      console.log('╚══════════════════════════════════════════════════════════════╝\n');
+
+      // Parse demand data
+      console.log('🔄 Loading demand data...');
+      const demandData = parseDemandCsv(options.demand);
+      if (demandData.filesProcessed && demandData.filesProcessed > 1) {
+        console.log(`  📊 Demand: ${demandData.records.length} records from ${demandData.filesProcessed} files`);
+      } else {
+        console.log(`  📊 Demand: ${demandData.records.length} records`);
+      }
+      console.log(`  📅 Range: ${DateTime.fromJSDate(demandData.startDate).toISODate()} to ${DateTime.fromJSDate(demandData.endDate).toISODate()}`);
+
+      // Determine training date range
+      const trainStart = DateTime.fromJSDate(demandData.startDate).toISODate()!;
+      const trainEnd = DateTime.fromJSDate(demandData.endDate).toISODate()!;
+
+      // Fetch weather data for training period
+      console.log('\n🌤️  Fetching weather data for training...');
+      const trainWeatherFiles = await weatherService.saveWeatherFiles(
+        trainStart,
+        trainEnd,
+        join(options.cache, 'combined'),
+        (msg) => console.log(`  ${msg}`)
+      );
+
+      if (trainWeatherFiles.length === 0) {
+        console.error('❌ Failed to fetch weather data for training');
+        process.exit(1);
+      }
+
+      // Parse weather data and merge
+      const weatherDatasets = trainWeatherFiles.map(file => parseWeatherCsv(file));
+      console.log('\n🔧 Engineering features...');
+      const merged = mergeData(demandData, weatherDatasets);
+      const samples = buildTrainingSamples(merged.records, false);
+      console.log(`  📐 Training samples: ${samples.length}`);
+
+      if (samples.length === 0) {
+        console.error('❌ No training samples available');
+        process.exit(1);
+      }
+
+      // Train demand model
+      console.log(`\n🎯 Training ${options.model} model...`);
+      let model: RegressionModel | XGBoostModel | HybridModel;
+      if (options.model === 'regression') {
+        model = new RegressionModel();
+        const result = (model as RegressionModel).train(samples);
+        console.log(`  R² = ${result.r2Score.toFixed(4)}, MAPE = ${result.mape.toFixed(2)}%`);
+      } else if (options.model === 'hybrid') {
+        model = new HybridModel({ growthFactor: 0, recentDaysCount: 7 });
+        const result = await (model as HybridModel).train(samples);
+        console.log(`  R² = ${result.r2Score.toFixed(4)}, MAPE = ${result.mape.toFixed(2)}%`);
+      } else {
+        model = new XGBoostModel();
+        const result = await (model as XGBoostModel).train(samples);
+        console.log(`  R² = ${result.r2Score.toFixed(4)}, MAPE = ${result.mape.toFixed(2)}%`);
+      }
+
+      // Fetch weather for forecast period
+      console.log('\n🌤️  Fetching weather data for forecast period...');
+      const forecastWeatherFiles = await weatherService.saveWeatherFiles(
+        options.start,
+        options.end,
+        join(options.cache, 'combined'),
+        (msg) => console.log(`  ${msg}`)
+      );
+
+      // Parse forecast weather and prepare historical data for lags
+      const forecastWeatherDatasets = forecastWeatherFiles.map(file => parseWeatherCsv(file));
+      const forecastMerged = mergeData(demandData, forecastWeatherDatasets);
+
+      // Last known values per region
+      const lastKnownValues: Map<string, { demand: number; datetime: Date }> = new Map();
+      for (const record of demandData.records) {
+        const existing = lastKnownValues.get(record.region);
+        if (!existing || record.datetime > existing.datetime) {
+          lastKnownValues.set(record.region, { demand: record.demand, datetime: record.datetime });
+        }
+      }
+
+      console.log(`  📊 Historical data loaded: ${demandData.records.length} demand records, ${forecastMerged.records.length} temp records`);
+      for (const [region, val] of lastKnownValues) {
+        console.log(`  📌 Last known ${region}: ${val.demand} MW at ${DateTime.fromJSDate(val.datetime).toISO()}`);
+      }
+
+      // Generate demand forecasts
+      console.log('\n🔮 Generating demand forecasts...');
+      const forecastStart = DateTime.fromISO(options.start);
+      const forecastEnd = DateTime.fromISO(options.end);
+      const demandForecasts: ForecastResult[] = [];
+
+      // Create a map of weather data by datetime and region
+      const weatherMap: Map<string, Map<string, RawWeatherData>> = new Map();
+      for (const dataset of forecastWeatherDatasets) {
+        const regionMapping = REGION_MAPPINGS[dataset.city.toLowerCase()];
+        const region = regionMapping ? regionMapping.demandColumn : 'CLUZ';
+        for (const record of dataset.records) {
+          const dt = DateTime.fromISO(record.datetime);
+          const key = dt.plus({ hours: 1 }).toISO()!;
+          if (!weatherMap.has(key)) {
+            weatherMap.set(key, new Map());
+          }
+          weatherMap.get(key)!.set(region, record);
+        }
+      }
+
+      // Build predictions for each hour
+      let currentHour = forecastStart;
+      const regions = demandData.regions;
+
+      while (currentHour <= forecastEnd) {
+        const weatherKey = currentHour.toISO()!;
+        const regionWeather = weatherMap.get(weatherKey);
+
+        if (regionWeather) {
+          for (const region of regions) {
+            const weather = regionWeather.get(region);
+            if (weather) {
+              const lastVal = lastKnownValues.get(region);
+              const demandLag24h = lastVal?.demand || 10000;
+
+              // Build a mock record for buildFeatureVector
+              const mockRecord = {
+                datetime: currentHour.toJSDate(),
+                region,
+                demand: 0,
+                weather
+              };
+              const lagData = {
+                demandLag1h: demandLag24h,
+                demandLag24h: demandLag24h,
+                demandLag168h: demandLag24h,
+                tempLag1h: weather.temp,
+                tempLag24h: weather.temp,
+                demandRolling24h: demandLag24h,
+                tempRolling24h: weather.temp,
+                tempMax24h: weather.temp
+              };
+              const featureVector = buildFeatureVector(mockRecord, lagData);
+
+              let predicted: number;
+              if (options.model === 'xgboost') {
+                predicted = await (model as XGBoostModel).predict(featureVector);
+              } else if (options.model === 'hybrid') {
+                predicted = (model as HybridModel).predict(featureVector, region) ?? 0;
+              } else {
+                predicted = (model as RegressionModel).predict(featureVector);
+              }
+
+              demandForecasts.push({
+                datetime: currentHour.toJSDate(),
+                region,
+                predictedDemand: predicted
+              });
+            }
+          }
+        }
+
+        currentHour = currentHour.plus({ hours: 1 });
+      }
+
+      // Write demand forecast
+      writeForecastCsv(demandForecasts, demandOutputFile);
+      console.log(`\n✅ Demand forecast written to: ${demandOutputFile}`);
+      console.log(`   📊 ${demandForecasts.length} predictions across ${regions.length} regions`);
+
+      // ==================== PART 2: CAPACITY FACTOR FORECAST ====================
+      console.log('\n╔══════════════════════════════════════════════════════════════╗');
+      console.log('║               PART 2: CAPACITY FACTOR FORECAST               ║');
+      console.log('╚══════════════════════════════════════════════════════════════╝\n');
+
+      // Load station metadata
+      console.log('🔄 Loading station metadata...');
+      await capacityFactorService.loadStations(options.stations);
+      const stations = capacityFactorService.getAllStations();
+      const clusters = capacityFactorService.getClusters();
+      console.log(`   Loaded ${stations.size} stations`);
+      console.log(`   Loaded ${clusters.length} weather clusters`);
+
+      // Parse capacity factor training data
+      console.log('\n🔄 Parsing capacity factor training data...');
+      const cfacData = await capacityFactorService.parseCapacityFactorDirectory(
+        options.cfac,
+        (msg) => console.log(`   ${msg}`)
+      );
+
+      const trainingStations = capacityFactorService.getStationCodes(cfacData);
+      console.log(`   Found ${trainingStations.length} stations in training data`);
+
+      // Categorize stations by type
+      const stationsByType = new Map<StationType, string[]>();
+      for (const stationType of Object.values(StationType)) {
+        stationsByType.set(stationType as StationType, []);
+      }
+      for (const code of trainingStations) {
+        const type = getStationTypeFromCode(code);
+        stationsByType.get(type)!.push(code);
+      }
+
+      console.log('\n📋 Station types in training data:');
+      for (const [type, codes] of stationsByType) {
+        if (codes.length > 0) {
+          console.log(`   ${type}: ${codes.length} stations`);
+        }
+      }
+
+      // Identify wind clusters
+      const windStations = stationsByType.get(StationType.WIND) || [];
+      const windClusterIds = new Set<string>();
+      for (const stationCode of windStations) {
+        const clusterId = capacityFactorService.getClusterForStation(stationCode);
+        if (clusterId) {
+          windClusterIds.add(clusterId);
+        }
+      }
+      if (windClusterIds.size > 0) {
+        console.log(`\n🌬️  Identified ${windClusterIds.size} wind clusters for 100m hub-height data`);
+      }
+
+      // Get cfac training date range
+      const sortedCfac = [...cfacData].sort((a, b) => a.datetime.getTime() - b.datetime.getTime());
+      const cfacTrainStart = DateTime.fromJSDate(sortedCfac[0].datetime).toISODate()!;
+      const cfacTrainEnd = DateTime.fromJSDate(sortedCfac[sortedCfac.length - 1].datetime).toISODate()!;
+      console.log(`\n📅 Training data range: ${cfacTrainStart} to ${cfacTrainEnd}`);
+
+      // Fetch cluster weather for training
+      console.log('\n🌤️  Fetching cluster weather data for training period...');
+      const clusterWeatherCsv = await weatherService.fetchAllClusters(
+        clusters,
+        cfacTrainStart,
+        cfacTrainEnd,
+        (msg) => console.log(`   ${msg}`),
+        windClusterIds
+      );
+      console.log(`   Fetched weather data for ${clusterWeatherCsv.size} clusters`);
+
+      // Helper to parse CSV line
+      const parseCSVLine = (line: string): string[] => {
+        const result: string[] = [];
+        let current = '';
+        let inQuotes = false;
+        for (let i = 0; i < line.length; i++) {
+          const char = line[i];
+          if (char === '"') {
+            inQuotes = !inQuotes;
+          } else if (char === ',' && !inQuotes) {
+            result.push(current.trim());
+            current = '';
+          } else {
+            current += char;
+          }
+        }
+        result.push(current.trim());
+        return result;
+      };
+
+      // Parse cluster weather data
+      const clusterWeatherData = new Map<string, Map<string, CFacWeatherFeatures>>();
+      for (const [clusterId, csvData] of clusterWeatherCsv) {
+        const datetimeMap = new Map<string, CFacWeatherFeatures>();
+        const lines = csvData.split('\n').filter(l => l.trim());
+        if (lines.length < 2) continue;
+
+        const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+        const colIdx = (name: string) => headers.indexOf(name);
+
+        for (let i = 1; i < lines.length; i++) {
+          const values = parseCSVLine(lines[i]);
+          const datetimeStr = values[colIdx('datetime')];
+          if (!datetimeStr) continue;
+
+          const dt = DateTime.fromISO(datetimeStr);
+          if (!dt.isValid) continue;
+
+          const key = dt.plus({ hours: 1 }).toFormat('yyyy-MM-dd HH:mm');
+
+          const weatherFeatures: CFacWeatherFeatures = {
+            windSpeed: parseFloat(values[colIdx('windspeed')]) || 0,
+            windGust: parseFloat(values[colIdx('windgust')]) || 0,
+            solarRadiation: parseFloat(values[colIdx('solarradiation')]) || 0,
+            cloudCover: parseFloat(values[colIdx('cloudcover')]) || 0,
+            temperature: parseFloat(values[colIdx('temp')]) || 0,
+            precipitation: parseFloat(values[colIdx('precip')]) || 0
+          };
+
+          const windSpeed100Idx = colIdx('windspeed100');
+          const windDir100Idx = colIdx('winddir100');
+          if (windSpeed100Idx >= 0 && values[windSpeed100Idx]) {
+            weatherFeatures.windSpeed100 = parseFloat(values[windSpeed100Idx]) || undefined;
+          }
+          if (windDir100Idx >= 0 && values[windDir100Idx]) {
+            weatherFeatures.windDirection100 = parseFloat(values[windDir100Idx]) || undefined;
+          }
+
+          datetimeMap.set(key, weatherFeatures);
+        }
+        clusterWeatherData.set(clusterId, datetimeMap);
+      }
+
+      // Build training weather map
+      const cfacWeatherMap = new Map<string, CFacWeatherFeatures>();
+      const trainDatetimes = new Set<string>();
+      for (const record of cfacData) {
+        const dt = DateTime.fromJSDate(record.datetime);
+        trainDatetimes.add(dt.toFormat('yyyy-MM-dd HH:mm'));
+      }
+
+      for (const datetimeKey of trainDatetimes) {
+        let sumTemp = 0, sumWind = 0, sumGust = 0, sumSolar = 0, sumCloud = 0, sumPrecip = 0;
+        let count = 0;
+
+        for (const [, datetimeMapInner] of clusterWeatherData) {
+          const weather = datetimeMapInner.get(datetimeKey);
+          if (weather) {
+            sumTemp += weather.temperature;
+            sumWind += weather.windSpeed;
+            sumGust += weather.windGust;
+            sumSolar += weather.solarRadiation;
+            sumCloud += weather.cloudCover;
+            sumPrecip += weather.precipitation || 0;
+            count++;
+          }
+        }
+
+        if (count > 0) {
+          cfacWeatherMap.set(datetimeKey, {
+            windSpeed: sumWind / count,
+            windGust: sumGust / count,
+            solarRadiation: sumSolar / count,
+            cloudCover: sumCloud / count,
+            temperature: sumTemp / count,
+            precipitation: sumPrecip / count
+          });
+        }
+      }
+      console.log(`   Built weather map with ${cfacWeatherMap.size} hourly records from ${clusterWeatherData.size} clusters`);
+
+      // Build training samples
+      console.log('\n🔧 Building training samples...');
+      const cfacTrainingSamples = await capacityFactorService.buildTrainingSamples(
+        cfacData,
+        cfacWeatherMap,
+        (msg) => console.log(`   ${msg}`)
+      );
+
+      // Train capacity factor models
+      console.log('\n🎯 Training capacity factor models...');
+      const modelRouter = new ModelRouter();
+      await modelRouter.trainAllModels(cfacTrainingSamples, (msg) => console.log(`   ${msg}`));
+
+      const metrics = modelRouter.getMetrics();
+      console.log(`\n📈 Training Summary: ${modelRouter.getModelCount()} models trained`);
+
+      // Fetch forecast cluster weather
+      console.log('\n🌤️  Fetching cluster weather data for forecast period...');
+      const forecastClusterWeatherCsv = await weatherService.fetchAllClusters(
+        clusters,
+        options.start,
+        options.end,
+        (msg) => console.log(`   ${msg}`),
+        windClusterIds
+      );
+
+      // Parse forecast cluster weather
+      const forecastClusterWeatherData = new Map<string, Map<string, CFacWeatherFeatures>>();
+      const cfacForecastDatetimes: Date[] = [];
+
+      for (const [clusterId, csvData] of forecastClusterWeatherCsv) {
+        const datetimeMap = new Map<string, CFacWeatherFeatures>();
+        const lines = csvData.split('\n').filter(l => l.trim());
+        if (lines.length < 2) continue;
+
+        const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+        const colIdx = (name: string) => headers.indexOf(name);
+
+        for (let i = 1; i < lines.length; i++) {
+          const values = parseCSVLine(lines[i]);
+          const datetimeStr = values[colIdx('datetime')];
+          if (!datetimeStr) continue;
+
+          const dt = DateTime.fromISO(datetimeStr).plus({ hours: 1 });
+          if (!dt.isValid) continue;
+
+          const key = dt.toFormat('yyyy-MM-dd HH:mm');
+          const datetime = dt.toJSDate();
+
+          const weatherFeatures: CFacWeatherFeatures = {
+            windSpeed: parseFloat(values[colIdx('windspeed')]) || 0,
+            windGust: parseFloat(values[colIdx('windgust')]) || 0,
+            solarRadiation: parseFloat(values[colIdx('solarradiation')]) || 0,
+            cloudCover: parseFloat(values[colIdx('cloudcover')]) || 0,
+            temperature: parseFloat(values[colIdx('temp')]) || 0,
+            precipitation: parseFloat(values[colIdx('precip')]) || 0
+          };
+
+          const windSpeed100Idx = colIdx('windspeed100');
+          const windDir100Idx = colIdx('winddir100');
+          if (windSpeed100Idx >= 0 && values[windSpeed100Idx]) {
+            weatherFeatures.windSpeed100 = parseFloat(values[windSpeed100Idx]) || undefined;
+          }
+          if (windDir100Idx >= 0 && values[windDir100Idx]) {
+            weatherFeatures.windDirection100 = parseFloat(values[windDir100Idx]) || undefined;
+          }
+
+          datetimeMap.set(key, weatherFeatures);
+          cfacForecastDatetimes.push(datetime);
+        }
+        forecastClusterWeatherData.set(clusterId, datetimeMap);
+      }
+
+      const uniqueCfacDatetimes = [...new Set(cfacForecastDatetimes.map(d => d.getTime()))]
+        .sort((a, b) => a - b)
+        .map(ts => new Date(ts));
+      console.log(`   Forecast period: ${uniqueCfacDatetimes.length} hours across ${forecastClusterWeatherData.size} clusters`);
+
+      // Generate capacity factor forecasts
+      console.log('\n🔮 Generating capacity factor forecasts...');
+      const cfacForecasts: CFacForecastResult[] = [];
+
+      for (const datetime of uniqueCfacDatetimes) {
+        const dt = DateTime.fromJSDate(datetime);
+        const weatherKey = dt.toFormat('yyyy-MM-dd HH:mm');
+
+        const stationWeather = new Map<string, CFacWeatherFeatures>();
+        for (const code of trainingStations) {
+          const clusterId = capacityFactorService.getClusterForStation(code);
+          if (clusterId) {
+            const clusterData = forecastClusterWeatherData.get(clusterId);
+            if (clusterData) {
+              const weather = clusterData.get(weatherKey);
+              if (weather) {
+                stationWeather.set(code, weather);
+              }
+            }
+          }
+
+          if (!stationWeather.has(code)) {
+            let sumTemp = 0, sumWind = 0, sumGust = 0, sumSolar = 0, sumCloud = 0, count = 0;
+            for (const [, clusterData] of forecastClusterWeatherData) {
+              const weather = clusterData.get(weatherKey);
+              if (weather) {
+                sumTemp += weather.temperature;
+                sumWind += weather.windSpeed;
+                sumGust += weather.windGust;
+                sumSolar += weather.solarRadiation;
+                sumCloud += weather.cloudCover;
+                count++;
+              }
+            }
+            if (count > 0) {
+              stationWeather.set(code, {
+                windSpeed: sumWind / count,
+                windGust: sumGust / count,
+                solarRadiation: sumSolar / count,
+                cloudCover: sumCloud / count,
+                temperature: sumTemp / count
+              });
+            }
+          }
+        }
+
+        if (stationWeather.size === 0) continue;
+
+        const predictions = modelRouter.predictAll(trainingStations, stationWeather, datetime);
+        cfacForecasts.push(...predictions);
+      }
+
+      console.log(`   Generated ${cfacForecasts.length} predictions`);
+
+      // Write capacity factor forecast
+      await capacityFactorService.writeForecastCSV(
+        cfacForecasts,
+        cfacOutputFile,
+        trainingStations,
+        (msg) => console.log(`   ${msg}`)
+      );
+
+      console.log(`\n✅ Capacity factor forecast written to: ${cfacOutputFile}`);
+      console.log(`   📊 ${cfacForecasts.length} predictions for ${trainingStations.length} stations`);
+
+      // ==================== SUMMARY ====================
+      console.log('\n╔══════════════════════════════════════════════════════════════╗');
+      console.log('║                         SUMMARY                              ║');
+      console.log('╚══════════════════════════════════════════════════════════════╝\n');
+      console.log(`📅 Forecast Period: ${options.start} to ${options.end}`);
+      console.log(`📁 Output Directory: ${options.output}`);
+      console.log('');
+      console.log('📈 Generated Files:');
+      console.log(`   • Demand Forecast:  ${demandOutputFile}`);
+      console.log(`     - ${demandForecasts.length} predictions across ${regions.length} regions`);
+      console.log(`   • Capacity Factor:  ${cfacOutputFile}`);
+      console.log(`     - ${cfacForecasts.length} predictions for ${trainingStations.length} stations`);
+      console.log('');
+      console.log('✅ Combined forecast complete!');
+
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+// OUTAGE command - Analyze outage events and calculate probabilities
+const outageCmd = program.command('outage').description('Outage event analysis and probability forecasting');
+
+outageCmd
+  .command('analyze')
+  .description('Analyze outage events and generate probability statistics')
+  .requiredOption('-d, --data <path>', 'Path to outage data directory (Ev_*.csv, HistDBErr_*.csv, and WAPOS/*.csv files)')
+  .option('-o, --output <file>', 'Output JSON file for analysis report')
+  .option('--predict-days <days>', 'Number of days to predict ahead', '7')
+  .option('--no-wapos', 'Exclude WAPOS planned outages from analysis')
+  .option('--save-db', 'Save analysis results to database')
+  .action(async (options) => {
+    try {
+      console.log('\n📊 Outage Analysis');
+      console.log('═══════════════════════════════════════════════════════════════\n');
+
+      // Parse outage data
+      console.log('🔄 Loading outage data...');
+      const data = parseOutageDirectory(
+        options.data,
+        (msg) => console.log(`   ${msg}`),
+        { includeWAPOS: options.wapos !== false }
+      );
+
+      if (data.records.length === 0) {
+        console.error('❌ No outage records found');
+        process.exit(1);
+      }
+
+      // Generate analysis report
+      console.log('\n📈 Analyzing outage patterns...');
+      const report = generateAnalysisReport(data, (msg) => console.log(`   ${msg}`));
+
+      // Display summary
+      console.log('\n╔══════════════════════════════════════════════════════════════╗');
+      console.log('║                       ANALYSIS SUMMARY                       ║');
+      console.log('╚══════════════════════════════════════════════════════════════╝\n');
+
+      console.log('📅 Data Period:');
+      console.log(`   ${DateTime.fromJSDate(report.dataRange.start).toISODate()} to ${DateTime.fromJSDate(report.dataRange.end).toISODate()}`);
+      console.log(`   (${Math.round((report.dataRange.end.getTime() - report.dataRange.start.getTime()) / (1000 * 60 * 60 * 24))} days)\n`);
+
+      console.log('📊 Overall Statistics:');
+      console.log(`   • Total Outages:           ${report.summary.totalOutages}`);
+      console.log(`     ├─ Planned (WAPOS):      ${data.totalPlannedOutages}`);
+      console.log(`     └─ Unplanned (Forced):   ${data.totalUnplannedOutages}`);
+      console.log(`   • Total Capacity Lost:     ${report.summary.totalCapacityLostMWh.toFixed(0)} MWh`);
+      console.log(`   • Average Outages/Day:     ${report.summary.averageOutagesPerDay.toFixed(2)}`);
+      console.log(`   • Most Affected Region:    ${report.summary.mostAffectedRegion}`);
+      console.log(`   • Most Affected Fuel:      ${report.summary.mostAffectedFuelType}`);
+      console.log(`   • Peak Outage Hour:        ${report.summary.peakOutageHour}:00\n`);
+
+      // Region breakdown
+      console.log('🗺️  Regional Breakdown:');
+      console.log('┌──────────┬──────────┬──────────┬──────────────┬────────────────┬──────────────┐');
+      console.log('│  Region  │ Planned  │Unplanned │ Outages/Day  │ Avg Cap Lost   │ Peak Hour    │');
+      console.log('├──────────┼──────────┼──────────┼──────────────┼────────────────┼──────────────┤');
+      for (const region of ['CLUZ', 'CVIS', 'CMIN'] as GridRegion[]) {
+        const stats = report.regionStats[region];
+        console.log(`│ ${region.padEnd(8)} │ ${String(stats.plannedOutages).padStart(8)} │${String(stats.unplannedOutages).padStart(9)} │ ${stats.averageUnplannedOutagesPerDay.toFixed(2).padStart(12)} │ ${stats.averageCapacityLostMW.toFixed(0).padStart(10)} MW │ ${String(stats.peakOutageHour).padStart(5)}:00     │`);
+      }
+      console.log('└──────────┴──────────┴──────────┴──────────────┴────────────────┴──────────────┘\n');
+
+      // Severity distribution
+      console.log('⚠️  Severity Distribution:');
+      const sevTotal = report.summary.totalOutages;
+      for (const severity of [OutageSeverity.MINOR, OutageSeverity.MODERATE, OutageSeverity.MAJOR, OutageSeverity.CRITICAL]) {
+        const count = Object.values(report.regionStats).reduce((sum, r) => sum + r.outagesBySeverity[severity], 0);
+        const pct = ((count / sevTotal) * 100).toFixed(1);
+        const bar = '█'.repeat(Math.round(count / sevTotal * 30));
+        console.log(`   ${severity.padEnd(10)} ${bar.padEnd(30)} ${pct}% (${count})`);
+      }
+
+      // Time period distribution
+      console.log('\n🕐 Time Period Distribution:');
+      for (const period of [TimePeriod.MORNING, TimePeriod.AFTERNOON, TimePeriod.EVENING, TimePeriod.NIGHT]) {
+        const count = Object.values(report.regionStats).reduce((sum, r) => sum + r.outagesByTimePeriod[period], 0);
+        const pct = ((count / sevTotal) * 100).toFixed(1);
+        const bar = '█'.repeat(Math.round(count / sevTotal * 30));
+        const timeRange = period === TimePeriod.MORNING ? '06:00-12:00' :
+                         period === TimePeriod.AFTERNOON ? '12:00-18:00' :
+                         period === TimePeriod.EVENING ? '18:00-24:00' : '00:00-06:00';
+        console.log(`   ${period.padEnd(10)} (${timeRange}) ${bar.padEnd(20)} ${pct}%`);
+      }
+
+      // Top 10 problematic units
+      console.log('\n🔧 Top 10 Most Problematic Units:');
+      console.log('┌────────────────────┬──────────┬──────────┬──────────────┬──────────────┐');
+      console.log('│ Unit ID            │ Region   │ Fuel     │ Outage Rate  │ Availability │');
+      console.log('├────────────────────┼──────────┼──────────┼──────────────┼──────────────┤');
+      for (const unit of report.unitStats.slice(0, 10)) {
+        console.log(`│ ${unit.unitId.padEnd(18)} │ ${unit.region.padEnd(8)} │ ${unit.fuelType.padEnd(8)} │ ${unit.outageRate.toFixed(2).padStart(8)}/mo  │ ${(unit.availabilityRate * 100).toFixed(1).padStart(8)}%    │`);
+      }
+      console.log('└────────────────────┴──────────┴──────────┴──────────────┴──────────────┘\n');
+
+      // Probability model summary
+      console.log('📈 Probability Model:');
+      console.log('   Base Outage Probability per Day:');
+      for (const region of ['CLUZ', 'CVIS', 'CMIN'] as GridRegion[]) {
+        const prob = report.probabilityModel.regionBaseProbability[region];
+        console.log(`     ${region}: ${formatProbability(prob)} (${(prob * 30).toFixed(1)} outages/month)`);
+      }
+
+      console.log('\n   Day of Week Risk Multipliers:');
+      const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+      let dowLine = '     ';
+      for (let i = 0; i < 7; i++) {
+        const mult = report.probabilityModel.dayOfWeekMultiplier[i];
+        dowLine += `${days[i]}: ${mult.toFixed(2)}x  `;
+      }
+      console.log(dowLine);
+
+      console.log('\n   Time Period Risk Multipliers:');
+      for (const period of [TimePeriod.MORNING, TimePeriod.AFTERNOON, TimePeriod.EVENING, TimePeriod.NIGHT]) {
+        const mult = report.probabilityModel.timePeriodMultiplier[period];
+        console.log(`     ${period.padEnd(10)}: ${mult.toFixed(2)}x`);
+      }
+
+      // Predictions
+      if (report.predictions.length > 0) {
+        console.log('\n╔══════════════════════════════════════════════════════════════╗');
+        console.log('║                    7-DAY OUTAGE FORECAST                     ║');
+        console.log('╚══════════════════════════════════════════════════════════════╝\n');
+
+        // Group predictions by date
+        const predByDate = new Map<string, typeof report.predictions>();
+        for (const pred of report.predictions) {
+          const dateKey = DateTime.fromJSDate(pred.datetime).toISODate()!;
+          if (!predByDate.has(dateKey)) {
+            predByDate.set(dateKey, []);
+          }
+          predByDate.get(dateKey)!.push(pred);
+        }
+
+        console.log('┌────────────┬──────────┬──────────────┬─────────────────┬──────────────┐');
+        console.log('│ Date       │ Region   │ Probability  │ Expected Loss   │ Risk Level   │');
+        console.log('├────────────┼──────────┼──────────────┼─────────────────┼──────────────┤');
+
+        for (const [date, preds] of predByDate) {
+          for (const pred of preds) {
+            const color = getRiskColor(pred.riskLevel);
+            const reset = '\x1b[0m';
+            console.log(`│ ${date} │ ${pred.region.padEnd(8)} │ ${formatProbability(pred.probabilityOfOutage).padStart(12)} │ ${pred.expectedCapacityLossMW.toFixed(0).padStart(10)} MW   │ ${color}${pred.riskLevel.padEnd(12)}${reset} │`);
+          }
+        }
+        console.log('└────────────┴──────────┴──────────────┴─────────────────┴──────────────┘');
+      }
+
+      // Save report to file if requested
+      if (options.output) {
+        const outputPath = options.output;
+        writeFileSync(outputPath, JSON.stringify(report, null, 2));
+        console.log(`\n💾 Full report saved to: ${outputPath}`);
+      }
+
+      // Save to database if requested
+      if (options.saveDb) {
+        console.log('\n💾 Saving to database...');
+        const { saveOutageDataToDatabase } = await import('./services/outageAnalysisService.js');
+        const { recordsImported, modelId } = saveOutageDataToDatabase(
+          data,
+          report.probabilityModel,
+          (msg) => console.log(`   ${msg}`)
+        );
+        console.log(`   ✅ Saved ${recordsImported} records, model ID: ${modelId}`);
+      }
+
+      console.log('\n✅ Outage analysis complete!');
+
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+outageCmd
+  .command('summary')
+  .description('Quick summary of outage statistics')
+  .requiredOption('-d, --data <path>', 'Path to outage data directory')
+  .option('--no-wapos', 'Exclude WAPOS planned outages')
+  .action(async (options) => {
+    try {
+      console.log('\n📊 Quick Outage Summary\n');
+
+      const data = parseOutageDirectory(options.data, undefined, { includeWAPOS: options.wapos !== false });
+
+      console.log(`Total Outage Events: ${data.totalEvents}`);
+      console.log(`  Planned (WAPOS):   ${data.totalPlannedOutages}`);
+      console.log(`  Unplanned:         ${data.totalUnplannedOutages}`);
+      console.log(`Unique Units Affected: ${data.uniqueUnits}`);
+      console.log(`Date Range: ${DateTime.fromJSDate(data.dateRange.start).toISODate()} to ${DateTime.fromJSDate(data.dateRange.end).toISODate()}`);
+
+      // Count by region
+      const byRegion: Record<string, { planned: number; unplanned: number }> = {
+        CLUZ: { planned: 0, unplanned: 0 },
+        CVIS: { planned: 0, unplanned: 0 },
+        CMIN: { planned: 0, unplanned: 0 }
+      };
+      for (const record of data.records) {
+        if (record.outageType === 'planned') {
+          byRegion[record.region].planned++;
+        } else {
+          byRegion[record.region].unplanned++;
+        }
+      }
+
+      console.log('\nOutages by Region:');
+      for (const [region, counts] of Object.entries(byRegion)) {
+        const total = counts.planned + counts.unplanned;
+        console.log(`  ${region}: ${total} (${counts.planned} planned, ${counts.unplanned} unplanned)`);
+      }
+
+      // Count by severity
+      const bySeverity: Record<string, number> = {};
+      for (const record of data.records) {
+        bySeverity[record.severity] = (bySeverity[record.severity] || 0) + 1;
+      }
+
+      console.log('\nOutages by Severity:');
+      for (const [severity, count] of Object.entries(bySeverity)) {
+        console.log(`  ${severity}: ${count}`);
+      }
+
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+outageCmd
+  .command('weather-forecast')
+  .description('Generate weather-adjusted outage probability forecast')
+  .option('-s, --start <date>', 'Start date for forecast (YYYY-MM-DD)', DateTime.now().toISODate()!)
+  .option('-d, --days <number>', 'Number of days to forecast', '7')
+  .option('--precip <mm>', 'Manual precipitation override (mm) for all regions')
+  .option('--wind <kmh>', 'Manual wind speed override (km/h) for all regions')
+  .option('-k, --api-key <key>', 'Visual Crossing API key (or set VISUAL_CROSSING_API_KEY env)')
+  .option('-c, --cache <path>', 'Weather cache directory', './data/weather_cache')
+  .action(async (options) => {
+    try {
+      const {
+        generateWeatherAdjustedForecast,
+        formatWeatherForecastReport,
+        getPrecipitationMultiplier,
+        getWindSpeedMultiplier,
+        DEFAULT_WEATHER_MULTIPLIERS
+      } = await import('./services/outageAnalysisService.js');
+
+      console.log('\n🌧️  Weather-Adjusted Outage Probability Forecast');
+      console.log('═══════════════════════════════════════════════════════════════\n');
+
+      // If manual values provided, show quick calculation
+      if (options.precip !== undefined || options.wind !== undefined) {
+        const precipMm = parseFloat(options.precip) || 0;
+        const windKmh = parseFloat(options.wind) || 0;
+
+        console.log('Manual Weather Input Mode:');
+        console.log(`  Precipitation: ${precipMm} mm`);
+        console.log(`  Wind Speed: ${windKmh} km/h\n`);
+
+        console.log('Risk Multipliers by Region:');
+        console.log('┌────────┬─────────────────┬─────────────────┬─────────────────┐');
+        console.log('│ Region │ Precip Mult     │ Wind Mult       │ Combined        │');
+        console.log('├────────┼─────────────────┼─────────────────┼─────────────────┤');
+
+        for (const region of ['CLUZ', 'CVIS', 'CMIN'] as GridRegion[]) {
+          const precipResult = getPrecipitationMultiplier(precipMm, region);
+          const windResult = getWindSpeedMultiplier(windKmh);
+          const combined = Math.max(precipResult.multiplier, windResult.multiplier);
+
+          console.log(`│ ${region}   │ ${precipResult.multiplier.toFixed(2)}x (${precipResult.label.padEnd(8)}) │ ${windResult.multiplier.toFixed(2)}x (${windResult.label.padEnd(8)}) │ ${combined.toFixed(2)}x             │`);
+        }
+        console.log('└────────┴─────────────────┴─────────────────┴─────────────────┘\n');
+
+        console.log('Weather Risk Thresholds (from ML analysis):');
+        console.log('\nPrecipitation:');
+        for (const t of DEFAULT_WEATHER_MULTIPLIERS.precipitationThresholds) {
+          console.log(`  >= ${t.minPrecipMm.toString().padStart(3)} mm: ${t.multiplier.toFixed(2)}x (${t.label})`);
+        }
+        console.log('\nWind Speed:');
+        for (const t of DEFAULT_WEATHER_MULTIPLIERS.windSpeedThresholds) {
+          console.log(`  >= ${t.minWindKmh.toString().padStart(3)} km/h: ${t.multiplier.toFixed(2)}x (${t.label})`);
+        }
+        return;
+      }
+
+      // Generate forecast from database weather data
+      const startDate = options.start;
+      const days = parseInt(options.days) || 7;
+      const endDate = DateTime.fromISO(startDate).plus({ days: days - 1 }).toISODate()!;
+
+      console.log(`Forecast Period: ${startDate} to ${endDate}`);
+
+      // Auto-fetch missing weather data for all regions
+      const apiKey = getApiKey();
+      const weatherService = createWeatherService(apiKey, options.cache);
+
+      console.log('\n🌤️  Fetching weather data for all regions...\n');
+
+      for (const location of DEFAULT_LOCATIONS) {
+        try {
+          await weatherService.fetchWeatherData(
+            location,
+            startDate,
+            endDate,
+            (msg) => console.log(`  ${msg}`)
+          );
+        } catch (error: any) {
+          console.log(`  ⚠️  Could not fetch weather for ${location.name}: ${error.message}`);
+        }
+      }
+
+      console.log('\n📊 Generating outage probability forecast...\n');
+
+      const forecasts = generateWeatherAdjustedForecast(
+        startDate,
+        days,
+        (msg) => console.log(`  ${msg}`)
+      );
+
+      if (forecasts.length === 0) {
+        console.log('\n⚠️  No weather data available for the specified period.');
+        console.log('   Check your API key or use manual mode: iload outage weather-forecast --precip 50 --wind 40');
+        return;
+      }
+
+      console.log('\n' + formatWeatherForecastReport(forecasts));
+
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+outageCmd
+  .command('duration-stats')
+  .description('Show outage duration statistics by severity and region')
+  .option('-d, --data <path>', 'Path to outage data directory (optional, uses database if not provided)')
+  .option('--no-wapos', 'Exclude WAPOS planned outages')
+  .action(async (options) => {
+    try {
+      const { loadOutageDataFromDatabase } = await import('./services/outageAnalysisService.js');
+
+      console.log('\n📊 Outage Duration Statistics by Severity and Region');
+      console.log('═══════════════════════════════════════════════════════════════\n');
+
+      let records: OutageRecord[];
+
+      if (options.data) {
+        const data = parseOutageDirectory(options.data, undefined, { includeWAPOS: options.wapos !== false });
+        records = data.records;
+        console.log(`Loaded ${records.length} records from files\n`);
+      } else {
+        const data = loadOutageDataFromDatabase();
+        records = data.records;
+        console.log(`Loaded ${records.length} records from database\n`);
+      }
+
+      if (records.length === 0) {
+        console.log('No outage records found.');
+        return;
+      }
+
+      // Calculate statistics by region and severity
+      const stats: Record<string, Record<string, {
+        count: number;
+        totalMinutes: number;
+        minMinutes: number;
+        maxMinutes: number;
+        avgCapacityMW: number;
+        durations: number[];
+      }>> = {};
+
+      const regions: GridRegion[] = ['CLUZ', 'CVIS', 'CMIN'];
+      const severities = ['minor', 'moderate', 'major', 'critical'];
+
+      // Initialize
+      for (const region of regions) {
+        stats[region] = {};
+        for (const severity of severities) {
+          stats[region][severity] = {
+            count: 0,
+            totalMinutes: 0,
+            minMinutes: Infinity,
+            maxMinutes: 0,
+            avgCapacityMW: 0,
+            durations: []
+          };
+        }
+      }
+
+      // Collect data
+      for (const record of records) {
+        const s = stats[record.region][record.severity];
+        s.count++;
+        s.totalMinutes += record.durationMinutes;
+        s.minMinutes = Math.min(s.minMinutes, record.durationMinutes);
+        s.maxMinutes = Math.max(s.maxMinutes, record.durationMinutes);
+        s.avgCapacityMW += record.capacityLostMW;
+        s.durations.push(record.durationMinutes);
+      }
+
+      // Calculate medians and averages
+      const calcMedian = (arr: number[]): number => {
+        if (arr.length === 0) return 0;
+        const sorted = [...arr].sort((a, b) => a - b);
+        const mid = Math.floor(sorted.length / 2);
+        return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+      };
+
+      // Print report for each region
+      for (const region of regions) {
+        console.log(`\n─── ${region} ───────────────────────────────────────────────────────────`);
+        console.log('');
+        console.log('Severity  │ Count │ Avg Duration │ Median Duration │ Min      │ Max       │ Avg MW Lost');
+        console.log('──────────┼───────┼──────────────┼─────────────────┼──────────┼───────────┼────────────');
+
+        for (const severity of severities) {
+          const s = stats[region][severity];
+          if (s.count === 0) {
+            console.log(`${severity.padEnd(9)} │     0 │          N/A │             N/A │      N/A │       N/A │        N/A`);
+            continue;
+          }
+
+          const avgMin = s.totalMinutes / s.count;
+          const medianMin = calcMedian(s.durations);
+          const avgCapacity = s.avgCapacityMW / s.count;
+
+          const formatDuration = (mins: number): string => {
+            if (mins >= 60) {
+              const hours = Math.floor(mins / 60);
+              const remaining = Math.round(mins % 60);
+              return `${hours}h ${remaining}m`.padStart(10);
+            }
+            return `${Math.round(mins)}m`.padStart(10);
+          };
+
+          console.log(`${severity.padEnd(9)} │ ${s.count.toString().padStart(5)} │ ${formatDuration(avgMin)} │ ${formatDuration(medianMin).padStart(15)} │ ${formatDuration(s.minMinutes)} │ ${formatDuration(s.maxMinutes)} │ ${avgCapacity.toFixed(0).padStart(7)} MW`);
+        }
+      }
+
+      // Overall summary
+      console.log('\n═══════════════════════════════════════════════════════════════');
+      console.log('OVERALL SUMMARY');
+      console.log('───────────────────────────────────────────────────────────────\n');
+
+      console.log('Severity  │ Total Count │ Avg Duration │ Total Hours │ % of Outages');
+      console.log('──────────┼─────────────┼──────────────┼─────────────┼─────────────');
+
+      for (const severity of severities) {
+        let totalCount = 0;
+        let totalMinutes = 0;
+        const allDurations: number[] = [];
+
+        for (const region of regions) {
+          const s = stats[region][severity];
+          totalCount += s.count;
+          totalMinutes += s.totalMinutes;
+          allDurations.push(...s.durations);
+        }
+
+        if (totalCount === 0) {
+          console.log(`${severity.padEnd(9)} │           0 │          N/A │         N/A │        0.0%`);
+          continue;
+        }
+
+        const avgMin = totalMinutes / totalCount;
+        const pct = (totalCount / records.length * 100).toFixed(1);
+        const totalHours = (totalMinutes / 60).toFixed(1);
+
+        const formatDuration = (mins: number): string => {
+          if (mins >= 60) {
+            const hours = Math.floor(mins / 60);
+            const remaining = Math.round(mins % 60);
+            return `${hours}h ${remaining}m`.padStart(10);
+          }
+          return `${Math.round(mins)}m`.padStart(10);
+        };
+
+        console.log(`${severity.padEnd(9)} │ ${totalCount.toString().padStart(11)} │ ${formatDuration(avgMin)} │ ${totalHours.padStart(11)} │ ${pct.padStart(11)}%`);
+      }
+
+      console.log('\n✅ Duration statistics complete!');
 
     } catch (error: any) {
       console.error(`\n❌ Error: ${error.message}`);

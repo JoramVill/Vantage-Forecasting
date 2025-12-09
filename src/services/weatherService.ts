@@ -2,6 +2,8 @@ import axios from 'axios';
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { DateTime } from 'luxon';
+import { getDatabase, closeDatabase, DatabaseService } from '../database/index.js';
+import { RawWeatherData } from '../types/index.js';
 
 export interface WeatherLocation {
   id: string;
@@ -74,16 +76,77 @@ export class WeatherService {
   private cacheDir: string;
   private locations: WeatherLocation[];
   private baseUrl = 'https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/';
+  private useDatabase: boolean = true;  // Primary storage is now database
 
   constructor(config: WeatherServiceConfig) {
     this.apiKey = config.apiKey;
     this.cacheDir = config.cacheDir;
     this.locations = config.locations;
 
-    // Ensure cache directory exists
+    // Ensure cache directory exists (still used as backup/legacy)
     if (!existsSync(this.cacheDir)) {
       mkdirSync(this.cacheDir, { recursive: true });
     }
+  }
+
+  /**
+   * Parse a CSV line handling quoted fields with commas
+   */
+  private parseCSVLine(line: string): string[] {
+    const result: string[] = [];
+    let current = '';
+    let inQuotes = false;
+
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      if (char === '"') {
+        inQuotes = !inQuotes;
+      } else if (char === ',' && !inQuotes) {
+        result.push(current.trim());
+        current = '';
+      } else {
+        current += char;
+      }
+    }
+    result.push(current.trim());
+    return result;
+  }
+
+  /**
+   * Parse CSV response from Visual Crossing API into RawWeatherData records
+   */
+  private parseCsvToRecords(csvData: string, locationName: string): RawWeatherData[] {
+    const lines = csvData.split('\n').filter(l => l.trim());
+    if (lines.length < 2) return [];
+
+    // Header line typically doesn't have quoted fields
+    const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+    const colIdx = (name: string) => headers.indexOf(name);
+
+    const records: RawWeatherData[] = [];
+
+    for (let i = 1; i < lines.length; i++) {
+      // Data lines may have quoted fields (e.g., location name with commas)
+      const values = this.parseCSVLine(lines[i]);
+
+      records.push({
+        name: locationName,
+        latitude: parseFloat(values[colIdx('latitude')]) || 0,
+        longitude: parseFloat(values[colIdx('longitude')]) || 0,
+        datetime: values[colIdx('datetime')],
+        temp: parseFloat(values[colIdx('temp')]) || 0,
+        dew: parseFloat(values[colIdx('dew')]) || 0,
+        precip: parseFloat(values[colIdx('precip')]) || 0,
+        windgust: parseFloat(values[colIdx('windgust')]) || 0,
+        windspeed: parseFloat(values[colIdx('windspeed')]) || 0,
+        cloudcover: parseFloat(values[colIdx('cloudcover')]) || 0,
+        solarradiation: parseFloat(values[colIdx('solarradiation')]) || 0,
+        solarenergy: parseFloat(values[colIdx('solarenergy')]) || 0,
+        uvindex: parseFloat(values[colIdx('uvindex')]) || 0
+      });
+    }
+
+    return records;
   }
 
   /**
@@ -233,71 +296,141 @@ export class WeatherService {
   }
 
   /**
-   * Fetch weather data for a date range, using cache where available
+   * Fetch weather data for a date range, using DATABASE as primary storage
+   * Falls back to file cache for legacy compatibility
    * Returns combined CSV data for all days
+   *
+   * Smart refresh logic:
+   * - Historical data (past dates) is permanent, never re-downloaded
+   * - Forecast data is refreshed if stale (>24 hours old)
+   * - Past dates with forecast data get replaced with actual historical data
    */
   async fetchWeatherData(
     location: WeatherLocation,
     startDate: string,
     endDate: string,
     onProgress?: (message: string) => void
-  ): Promise<{ success: boolean; data?: string; error?: string; cached: number; downloaded: number }> {
+  ): Promise<{ success: boolean; data?: string; error?: string; cached: number; downloaded: number; refreshed: number }> {
     const dates = this.getDateRange(startDate, endDate);
     const allRows: string[] = [];
     let header: string | null = null;
     let cachedCount = 0;
     let downloadedCount = 0;
+    let refreshedCount = 0;
 
     onProgress?.(`Fetching weather data for ${location.name}: ${dates.length} days`);
 
-    for (const date of dates) {
+    // Get database instance
+    const db = getDatabase();
+
+    // Check which dates need to be fetched (missing, stale forecast, or needs historical)
+    const missingDates = db.getMissingWeatherDates(location.name, startDate, endDate);
+    const staleForecastDates = new Set(db.getStaleForecastDates(location.name, startDate, endDate));
+    const needsHistoricalDates = new Set(db.getDatesNeedingHistoricalData(location.name, startDate, endDate));
+    const dbAvailableDates = new Set(dates.filter(d => !missingDates.includes(d)));
+
+    // Calculate breakdown for progress message
+    const trulyMissing = missingDates.filter(d => !staleForecastDates.has(d) && !needsHistoricalDates.has(d));
+    const staleToRefresh = missingDates.filter(d => staleForecastDates.has(d));
+    const needsHistorical = missingDates.filter(d => needsHistoricalDates.has(d));
+
+    if (missingDates.length > 0) {
+      onProgress?.(`  Database: ${dbAvailableDates.size} days OK`);
+      if (trulyMissing.length > 0) onProgress?.(`  Missing: ${trulyMissing.length} days`);
+      if (staleToRefresh.length > 0) onProgress?.(`  Stale forecast: ${staleToRefresh.length} days (will refresh)`);
+      if (needsHistorical.length > 0) onProgress?.(`  Needs historical: ${needsHistorical.length} days (replacing forecast with actual)`);
+    } else {
+      onProgress?.(`  Database has all ${dbAvailableDates.size} days (historical data preserved)`);
+    }
+
+    // Download dates that need updating
+    for (const date of missingDates) {
       try {
-        let csvData: string | null = null;
+        const isStale = staleForecastDates.has(date);
+        const needsHist = needsHistoricalDates.has(date);
 
-        // Check cache first
-        if (this.hasCachedData(location.id, date)) {
-          csvData = this.readCachedData(location.id, date);
-          cachedCount++;
-        } else {
-          // Download from API
-          onProgress?.(`  Downloading ${location.name} ${date}...`);
-          csvData = await this.downloadDayData(location, date);
-          this.saveCacheData(location.id, date, csvData);
-          downloadedCount++;
-
-          // Small delay to avoid rate limiting
-          await new Promise(resolve => setTimeout(resolve, 200));
-        }
-
-        if (csvData) {
-          const lines = csvData.split('\n').filter(l => l.trim());
-
-          // Keep header from first file
-          if (!header && lines.length > 0) {
-            header = lines[0];
-          }
-
-          // Add data rows (skip header)
-          for (let i = 1; i < lines.length; i++) {
-            allRows.push(lines[i]);
+        // Check file cache as fallback before downloading (only for truly missing)
+        if (!isStale && !needsHist && this.hasCachedData(location.id, date)) {
+          const csvData = this.readCachedData(location.id, date);
+          if (csvData) {
+            // Import from file cache to database
+            const records = this.parseCsvToRecords(csvData, location.name);
+            if (records.length > 0) {
+              db.importWeatherDay(records, location.name);
+              cachedCount++;
+              onProgress?.(`  Imported ${location.name} ${date} from file cache`);
+              continue;
+            }
           }
         }
+
+        // Download from API
+        const reason = needsHist ? '(historical)' : isStale ? '(refresh)' : '';
+        onProgress?.(`  Downloading ${location.name} ${date} ${reason}...`);
+        const csvData = await this.downloadDayData(location, date);
+
+        // Parse and store in database (auto-detects historical vs forecast)
+        const records = this.parseCsvToRecords(csvData, location.name);
+        if (records.length > 0) {
+          const result = db.importWeatherDay(records, location.name);
+          if (isStale || needsHist) {
+            refreshedCount++;
+          } else {
+            downloadedCount++;
+          }
+        }
+
+        // Also save to file cache for backup
+        this.saveCacheData(location.id, date, csvData);
+
+        // Small delay to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 200));
       } catch (error: any) {
         onProgress?.(`  Error fetching ${date}: ${error.message}`);
         // Continue with other dates
       }
     }
 
-    if (!header || allRows.length === 0) {
-      return { success: false, error: 'No weather data retrieved', cached: cachedCount, downloaded: downloadedCount };
+    // Count dates that were already in database (and don't need refresh)
+    cachedCount += dbAvailableDates.size;
+
+    // Now retrieve ALL data from database and format as CSV
+    const weatherData = db.getWeatherDataForParser(location.name, startDate, endDate);
+
+    if (!weatherData || weatherData.records.length === 0) {
+      return { success: false, error: 'No weather data retrieved', cached: cachedCount, downloaded: downloadedCount, refreshed: refreshedCount };
+    }
+
+    // Convert database records to CSV format
+    header = 'name,latitude,longitude,datetime,temp,dew,precip,windgust,windspeed,cloudcover,solarradiation,solarenergy,uvindex';
+    for (const record of weatherData.records) {
+      allRows.push([
+        record.name,
+        record.latitude,
+        record.longitude,
+        record.datetime,
+        record.temp,
+        record.dew,
+        record.precip,
+        record.windgust,
+        record.windspeed,
+        record.cloudcover,
+        record.solarradiation,
+        record.solarenergy,
+        record.uvindex
+      ].join(','));
     }
 
     // Combine header and all rows
     const combinedData = [header, ...allRows].join('\n');
 
-    onProgress?.(`  ${location.name}: ${cachedCount} cached, ${downloadedCount} downloaded`);
+    const summary = [];
+    if (cachedCount > 0) summary.push(`${cachedCount} from DB`);
+    if (downloadedCount > 0) summary.push(`${downloadedCount} new`);
+    if (refreshedCount > 0) summary.push(`${refreshedCount} refreshed`);
+    onProgress?.(`  ${location.name}: ${summary.join(', ')}`);
 
-    return { success: true, data: combinedData, cached: cachedCount, downloaded: downloadedCount };
+    return { success: true, data: combinedData, cached: cachedCount, downloaded: downloadedCount, refreshed: refreshedCount };
   }
 
   /**

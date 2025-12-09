@@ -1,6 +1,9 @@
 // Export capacity factor types
 export * from './capacityFactor.js';
 
+// Export outage types
+export * from './outage.js';
+
 // Weather data from CSV (raw hourly)
 export interface RawWeatherData {
   name: string;

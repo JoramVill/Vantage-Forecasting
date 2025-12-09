@@ -2,435 +2,319 @@
 
 ## System Architecture
 
-### High-Level Data Flow
+### High-Level Component Diagram
 
 ```
-┌─────────────────┐     ┌──────────────────┐
-│  Demand CSV     │────>│                  │
-│  (hourly MW)    │     │   Data Parsers   │
-└─────────────────┘     │                  │
-                        │  - demandParser  │
-┌─────────────────┐     │  - weatherParser │
-│  Weather CSV    │────>│                  │
-│  (hourly data)  │     └────────┬─────────┘
-└─────────────────┘              │
-                                 ▼
-                        ┌─────────────────┐
-                        │  Data Merger    │
-                        │  - Timestamp    │
-                        │    alignment    │
-                        │  - Region       │
-                        │    mapping      │
-                        └────────┬────────┘
-                                 │
-                                 ▼
-                        ┌─────────────────────┐
-                        │ Feature Engineering │
-                        │  - 6 Temporal       │
-                        │  - 8 Raw Weather    │
-                        │  - 8 Derived        │
-                        │  - 8 Lag Features   │
-                        └────────┬────────────┘
-                                 │
-                   ┌─────────────┴─────────────┐
-                   ▼                           ▼
-          ┌─────────────────┐        ┌─────────────────┐
-          │ Multiple Linear │        │    XGBoost      │
-          │   Regression    │        │ Gradient Boost  │
-          └────────┬────────┘        └────────┬────────┘
-                   │                           │
-                   └─────────────┬─────────────┘
-                                 ▼
-                        ┌─────────────────┐
-                        │ Model Evaluation│
-                        │  - R² Score     │
-                        │  - MAPE         │
-                        │  - MAE, RMSE    │
-                        └────────┬────────┘
-                                 │
-                   ┌─────────────┴─────────────┐
-                   ▼                           ▼
-          ┌─────────────────┐        ┌─────────────────┐
-          │  Forecast CSV   │        │  Report Files   │
-          │  Output         │        │  (Markdown)     │
-          └─────────────────┘        └─────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              iLoad CLI                                       │
+│  ┌─────────┐ ┌──────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌─────────────┐  │
+│  │forecast │ │  cfac    │ │ outage │ │   db   │ │evaluate│ │forecast-all │  │
+│  └────┬────┘ └────┬─────┘ └───┬────┘ └───┬────┘ └───┬────┘ └──────┬──────┘  │
+└───────┼──────────┼───────────┼──────────┼──────────┼─────────────┼──────────┘
+        │          │           │          │          │             │
+        ▼          ▼           ▼          ▼          ▼             ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           Service Layer                                      │
+│  ┌──────────────┐  ┌────────────────────┐  ┌─────────────────────────────┐  │
+│  │ Weather      │  │ Capacity Factor    │  │ Outage Analysis             │  │
+│  │ Service      │  │ Service            │  │ Service                     │  │
+│  │ (API Fetch)  │  │ (117 stations)     │  │ (Weather Correlation)       │  │
+│  └──────────────┘  └────────────────────┘  └─────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────┘
+        │          │           │          │
+        ▼          ▼           ▼          ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            Model Layer                                       │
+│  ┌────────────────┐  ┌────────────────┐  ┌────────────────────────────────┐ │
+│  │ Hybrid Model   │  │ XGBoost Model  │  │ Regression Model              │ │
+│  │ (Region-aware) │  │ (Gradient Boost)│  │ (Linear)                     │ │
+│  └────────────────┘  └────────────────┘  └────────────────────────────────┘ │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │ Capacity Factor Models (per station type: solar, wind, hydro, etc.)   │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────────────┘
+        │          │           │          │
+        ▼          ▼           ▼          ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          Data Layer                                          │
+│  ┌────────────────┐  ┌────────────────┐  ┌────────────────────────────────┐ │
+│  │ SQLite DB      │  │ CSV Parsers    │  │ Weather Cache                 │ │
+│  │ (Demand,       │  │ (Demand,       │  │ (Visual Crossing API)         │ │
+│  │  Weather,      │  │  Weather,      │  │                               │ │
+│  │  Models)       │  │  CFac, Outage) │  │                               │ │
+│  └────────────────┘  └────────────────┘  └────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Module Responsibilities
+---
 
-### 1. Parsers (`src/parsers/`)
+## Core Components
 
-**demandParser.ts**
-- Reads demand CSV with format: `DateTimeEnding,CLUZ,CVIS,CMIN`
-- Parses date format: `M/D/YYYY HH:mm` (hour-ending)
-- Pivots data from wide to long format (one row per region per timestamp)
-- Returns: `DemandData` with records array, regions list, date range
+### 1. Demand Forecasting Models
 
-**weatherParser.ts**
-- Reads weather CSV with 13 columns (name, lat, lon, datetime, temp, dew, etc.)
-- Parses ISO 8601 timestamps (hour-starting)
-- Extracts city name from "name" column
-- Returns: `WeatherData` with records array, city, date range
+#### Hybrid Model (Recommended)
 
-### 2. Data Processing (`src/utils/`)
+The Hybrid Model combines statistical profiles with region-specific learned characteristics.
 
-**dataMerger.ts**
-- Merges demand and weather data by timestamp and region
-- **Key operation**: Adds 1 hour to weather timestamps for alignment
-  - Weather: `2025-10-01T00:00:00` → Demand: `10/1/2025 01:00`
-- Maps cities to regions using `REGION_MAPPINGS`
-  - Manila → CLUZ, Cebu City → CVIS, Davao City → CMIN
-- Returns: `MergedRecord[]` with matched data + statistics on unmatched
+**Key Features:**
+- **Region-specific learning**: Each region (CLUZ, CVIS, CMIN) learns its own temperature sensitivity
+- **Daily swing calibration**: Learns how much each region varies peak-to-trough
+- **Time-period awareness**: Different sensitivity for night, morning, midday, evening
 
-### 3. Feature Engineering (`src/features/`)
+**Architecture:**
+```typescript
+interface RegionCharacteristics {
+  avgDailySwing: number;           // Learned daily variation
+  tempSensitivityMultiplier: number; // Learned temp response
+  peakHourOffset: number;          // Peak timing adjustment
+  troughDepthRatio: number;        // How low troughs go
+}
+```
 
-**featureEngineering.ts**
+**Training Process:**
+1. Build statistical profiles per (region, hour, daytype)
+2. Learn region characteristics from historical daily patterns
+3. Calculate temperature-demand correlations per region
+4. Store learned multipliers for forecasting
 
-Implements sophisticated feature extraction pipeline:
+**Prediction Process:**
+1. Look up statistical profile for (region, hour, daytype)
+2. Apply region-specific temperature adjustment
+3. Scale by learned swing amplitude
+4. Clamp to historical min/max bounds
 
-#### Temporal Features (6)
+#### XGBoost Model
+
+Gradient boosted decision trees for complex pattern capture.
+
+**Configuration:**
 ```typescript
 {
-  hour: 0-23,              // Hour of day
-  dayOfWeek: 0-6,          // 0=Sunday, 1=Monday, etc.
-  isWeekend: 0|1,          // Binary weekend flag
-  isHoliday: 0|1,          // Philippines holiday flag
-  dayOfMonth: 1-31,        // Day number
-  month: 1-12              // Month number
+  maxDepth: 6,
+  learningRate: 0.1,
+  nEstimators: 100,
+  validationSplit: 0.2
 }
 ```
 
-#### Derived Weather Features (8)
+#### Regression Model
+
+Linear regression for fast, interpretable forecasting.
+
+---
+
+### 2. Capacity Factor Forecasting
+
+Forecasts generation capacity for 117 renewable/must-run stations.
+
+**Station Types:**
+| Type | Stations | Weather Dependency |
+|------|----------|-------------------|
+| Solar | 53 | High (radiation, cloud) |
+| Hydro | 31 | Moderate (precipitation) |
+| Biomass | 10 | Low |
+| Battery | 8 | Dispatch-based |
+| Geothermal | 8 | Low |
+| Wind | 7 | High (wind speed) |
+
+**Weather Clusters:**
+- 29 geographic clusters for weather data
+- Each cluster covers multiple nearby stations
+- Wind stations use 100m hub-height wind data
+
+**Model Architecture:**
+- Individual regression model per station
+- Features: solar radiation, temperature, wind speed, cloud cover, humidity
+- Training on historical capacity factor data
+
+---
+
+### 3. Outage Analysis
+
+Analyzes historical outages and forecasts probability based on weather.
+
+**Weather Risk Multipliers (ML-derived):**
 ```typescript
-// Relative Humidity (Magnus Formula)
-RH = 100 * exp((a*dew)/(b+dew)) / exp((a*temp)/(b+temp))
-where a=17.625, b=243.04
+precipitationThresholds: [
+  { minPrecipMm: 100, multiplier: 3.40, label: 'Extreme Rain' },
+  { minPrecipMm: 50,  multiplier: 2.61, label: 'Heavy Rain' },
+  { minPrecipMm: 20,  multiplier: 1.34, label: 'Moderate Rain' }
+]
 
-// Heat Index (Rothfusz Regression, for temp >= 27°C)
-HI = -8.78469475556 + 1.61139411*T + 2.33854883889*R
-     - 0.14611605*T*R - 0.012308094*T² - 0.0164248277778*R²
-     + 0.002211732*T²*R + 0.00072546*T*R² - 0.000003582*T²*R²
+windSpeedThresholds: [
+  { minWindKmh: 50, multiplier: 3.35, label: 'Storm' },
+  { minWindKmh: 40, multiplier: 2.24, label: 'High Wind' }
+]
 
-// Cooling Degree Hours (tropical base 24°C)
-CDH = max(0, temp - 24)
-
-// Effective Solar Radiation (cloud-adjusted)
-effectiveSolar = solarradiation * (1 - cloudcover/100)
-
-// Apparent Temperature (wind-adjusted)
-apparentTemp = temp - (windspeed * 0.05)
-
-// Additional flags
-isRaining = (precip > 0.1) ? 1 : 0
-tempDewSpread = temp - dew
-isDaytime = (hour >= 6 && hour < 18) ? 1 : 0
+regionalPrecipSensitivity: {
+  CLUZ: 1.199,
+  CVIS: 1.225,
+  CMIN: 1.000
+}
 ```
 
-#### Lag Features (8)
-Calculated per region with chronological sorting:
+---
+
+### 4. Database System
+
+SQLite database for persistent storage.
+
+**Tables:**
+- `demand` - Historical demand records
+- `weather` - Historical and forecast weather
+- `models` - Saved trained models
+- `outages` - Historical outage events
+
+**Key Operations:**
 ```typescript
-// Demand lags (MW values from past)
-demandLag1h: demand from 1 hour ago
-demandLag24h: demand from 24 hours ago
-demandLag168h: demand from 168 hours (7 days) ago
-
-// Temperature lags
-tempLag1h: temperature from 1 hour ago
-tempLag24h: temperature from 24 hours ago
-
-// Rolling averages (last 24 hours)
-demandRolling24h: mean demand over last 24 hours
-tempRolling24h: mean temperature over last 24 hours
-tempMax24h: max temperature over last 24 hours
+db.getDemandData(startDate, endDate)
+db.getWeatherForDateRegion(date, region)
+db.saveModel(modelData)
+db.importDemand(records)
 ```
 
-**Lag Filtering Logic**:
-- During training: Skip records with missing `demandLag24h` or `demandLag168h`
-- Result: First ~168 hours of data excluded from training
-- Ensures all lag features are populated for model training
+---
 
-**Progressive Forecasting**:
-- Initial forecasts use historical lags from training data
-- Subsequent forecasts use previously generated predictions as lags
-- Creates temporal dependency chain for multi-step forecasting
+### 5. Weather Service
 
-### 4. Models (`src/models/`)
+Automatic weather data fetching from Visual Crossing API.
 
-#### RegressionModel (regressionModel.ts)
+**Features:**
+- Auto-fetches missing weather data
+- Caches downloaded data to database
+- Supports historical and forecast periods
+- Multiple location support (Manila, Cebu, Davao + 29 clusters)
 
-**Algorithm**: Ordinary Least Squares Multiple Linear Regression
-
-**Training Process**:
-1. Split data 80/20 (train/test)
-2. Extract feature matrix X and target vector y
-3. Fit model: `β = (X'X)⁻¹X'y`
-4. Generate predictions on test set
-5. Calculate metrics: R², MAPE, MAE, RMSE
-
-**Prediction**:
+**API Integration:**
 ```typescript
-y_pred = β₀ + β₁x₁ + β₂x₂ + ... + β₃₀x₃₀
+const weatherService = createWeatherService(apiKey, cacheDir);
+await weatherService.fetchWeatherData(location, startDate, endDate);
 ```
 
-**Strengths**:
-- Fast training (<1 second)
-- Interpretable coefficients
-- Good baseline performance
-- No hyperparameters
+---
 
-**Limitations**:
-- Assumes linear relationships
-- Can't capture interactions automatically
-- Lower accuracy than XGBoost
+## Feature Engineering
 
-#### XGBoostModel (xgboostModel.ts)
-
-**Algorithm**: Gradient Boosted Decision Trees
-
-**Hyperparameters**:
+### Temporal Features (6)
 ```typescript
 {
-  maxDepth: 6,              // Tree depth limit
-  learningRate: 0.1,        // Step size shrinkage
-  nEstimators: 100,         // Number of trees
-  validationSplit: 0.2      // Validation set size
+  hour: 0-23,
+  dayOfWeek: 0-6,
+  isWeekend: 0|1,
+  isHoliday: 0|1,
+  isSaturday: 0|1,
+  isSunday: 0|1
 }
 ```
 
-**Training Process**:
-1. Split train/validation (80/20)
-2. Initialize with mean prediction
-3. Iteratively fit trees to residuals
-4. Apply learning rate to tree predictions
-5. Combine predictions: `F(x) = F₀ + η∑ᵢfᵢ(x)`
-6. Calculate feature importance from tree splits
-
-**Prediction**:
+### Weather Features (8)
 ```typescript
-y_pred = ensemble of 100 decision trees
+{
+  temp: number,           // °C
+  dew: number,            // °C
+  precip: number,         // mm
+  windgust: number,       // km/h
+  windspeed: number,      // km/h
+  cloudcover: number,     // %
+  solarradiation: number, // W/m²
+  uvindex: number         // 0-11+
+}
 ```
 
-**Strengths**:
-- Captures non-linear relationships
-- High accuracy (R² 0.92-0.97)
-- Handles feature interactions
-- Provides feature importance
-
-**Limitations**:
-- Slower training (5-30 seconds)
-- Less interpretable than regression
-- Requires hyperparameter tuning
-
-### 5. Writers (`src/writers/`)
-
-**forecastWriter.ts**
-- Writes forecast results to CSV
-- Format: `datetime,region,predictedDemand`
-- Uses `csv-stringify` for reliable CSV generation
-
-**reportWriter.ts**
-- Generates Markdown reports with:
-  - Model type and configuration
-  - Performance metrics (R², MAPE, MAE, RMSE)
-  - Top 10 feature importance (XGBoost)
-  - Training/test sample counts
-  - Timestamp of report generation
-- Creates comparison reports for both models
-
-### 6. CLI Interface (`src/index.ts`)
-
-**Framework**: Commander.js
-
-**Commands**:
-
-1. **train** - Train models and generate reports
-   - Loads and merges data
-   - Engineers features
-   - Trains selected model(s)
-   - Writes performance reports
-
-2. **forecast** - Generate predictions
-   - Trains model on historical data
-   - Processes forecast weather data
-   - Generates progressive predictions
-   - Writes forecast CSV
-
-3. **info** - Display data summary
-   - Shows record counts, date ranges
-   - Validates data files
-   - No model training
-
-## Data Structures
-
-### Core Interfaces
-
+### Derived Features (8)
 ```typescript
-// Raw demand record
-interface DemandRecord {
-  datetime: Date;
-  region: string;    // 'CLUZ' | 'CVIS' | 'CMIN'
-  demand: number;    // MW
-}
-
-// Raw weather record
-interface WeatherRecord {
-  datetime: string;                    // ISO 8601
-  temp: number;                        // °C
-  dew: number;                         // °C
-  precip: number;                      // mm
-  windgust: number;                    // km/h
-  windspeed: number;                   // km/h
-  cloudcover: number;                  // %
-  solarradiation: number;              // W/m²
-  solarenergy: number;                 // MJ/m²
-  uvindex: number;                     // 0-11+
-}
-
-// Merged record (demand + weather)
-interface MergedRecord {
-  datetime: Date;
-  region: string;
-  demand: number;
-  weather: WeatherRecord;
-}
-
-// Feature vector (30 features)
-interface FeatureVector {
-  // Temporal (6)
-  hour: number;
-  dayOfWeek: number;
-  isWeekend: number;
-  isHoliday: number;
-  dayOfMonth: number;
-  month: number;
-
-  // Raw weather (8)
-  temp: number;
-  dew: number;
-  precip: number;
-  windgust: number;
-  windspeed: number;
-  cloudcover: number;
-  solarradiation: number;
-  uvindex: number;
-
-  // Derived weather (8)
-  relativeHumidity: number;
-  heatIndex: number;
-  CDH: number;
-  effectiveSolar: number;
-  apparentTemp: number;
-  isRaining: number;
-  tempDewSpread: number;
-  isDaytime: number;
-
-  // Lag features (8)
-  demandLag1h?: number;
-  demandLag24h?: number;
-  demandLag168h?: number;
-  tempLag1h?: number;
-  tempLag24h?: number;
-  demandRolling24h?: number;
-  tempRolling24h?: number;
-  tempMax24h?: number;
-}
-
-// Training sample (features + target)
-interface TrainingSample {
-  datetime: Date;
-  region: string;
-  demand: number;           // Target variable
-  features: FeatureVector;  // 30 features
-}
-
-// Model evaluation result
-interface ModelResult {
-  modelType: 'regression' | 'xgboost';
-  r2Score: number;          // Coefficient of determination
-  mape: number;             // Mean Absolute Percentage Error
-  mae: number;              // Mean Absolute Error
-  rmse: number;             // Root Mean Squared Error
-  trainSamples: number;
-  testSamples: number;
-  featureImportance?: Map<string, number>;  // XGBoost only
-}
-
-// Forecast output
-interface ForecastResult {
-  datetime: Date;
-  region: string;
-  predictedDemand: number;
+{
+  relativeHumidity: number,  // Magnus formula
+  heatIndex: number,         // Rothfusz regression
+  CDH: number,               // Cooling degree hours (base 24°C)
+  effectiveSolar: number,    // Cloud-adjusted solar
+  apparentTemp: number,      // Wind-adjusted temp
+  isRaining: number,         // Binary flag
+  tempDewSpread: number,     // Humidity indicator
+  isDaytime: number          // 6am-6pm flag
 }
 ```
+
+### Lag Features (8)
+```typescript
+{
+  demandLag1h: number,
+  demandLag24h: number,
+  demandLag168h: number,     // 7 days
+  tempLag1h: number,
+  tempLag24h: number,
+  demandRolling24h: number,
+  tempRolling24h: number,
+  tempMax24h: number
+}
+```
+
+---
+
+## Data Flow
+
+### Forecast Generation Flow
+
+```
+┌─────────────┐    ┌──────────────┐    ┌─────────────────┐
+│ Load Demand │───>│ Fetch Weather│───>│ Build Features  │
+│ (DB/File)   │    │ (API/Cache)  │    │                 │
+└─────────────┘    └──────────────┘    └────────┬────────┘
+                                                │
+                                                ▼
+┌─────────────┐    ┌──────────────┐    ┌─────────────────┐
+│ Write CSV   │<───│ Generate     │<───│ Train Model     │
+│ Output      │    │ Predictions  │    │                 │
+└─────────────┘    └──────────────┘    └─────────────────┘
+```
+
+### Database-First Workflow
+
+```
+1. Import Data:
+   iload db import -t demand -f demand.csv
+   iload db import -t weather -f weather.csv -l Manila
+
+2. Generate Forecast:
+   iload forecast --use-db --start 2025-12-01 --end 2025-12-31 -o forecast.csv
+
+3. Evaluate:
+   iload evaluate -f forecast.csv -a actual.csv
+```
+
+---
 
 ## Performance Characteristics
 
-### Computational Complexity
+### Model Accuracy (Typical)
 
-| Operation | Time Complexity | Space Complexity | Notes |
-|-----------|----------------|------------------|-------|
-| CSV Parsing | O(n) | O(n) | n = number of records |
-| Data Merging | O(n log n) | O(n) | Hash map lookup |
-| Feature Engineering | O(n) | O(n) | Per-sample calculation |
-| Regression Training | O(n·f²) | O(f²) | f=30 features, matrix inversion |
-| XGBoost Training | O(n·f·t·d) | O(t·d) | t=100 trees, d=6 depth |
-| Prediction | O(1) regression, O(t·d) XGBoost | O(1) | Per sample |
+| Model | R² | MAPE | Best For |
+|-------|-----|------|----------|
+| Hybrid | 0.99+ | 2-4% | Shape accuracy (peaks/troughs) |
+| XGBoost | 0.95+ | 3-5% | Complex patterns |
+| Regression | 0.85+ | 5-8% | Fast baseline |
 
-### Typical Performance (on sample data)
+### Capacity Factor Accuracy (by Type)
 
-| Dataset Size | Parse | Merge | Features | Train Regression | Train XGBoost | Forecast |
-|--------------|-------|-------|----------|------------------|---------------|----------|
-| 1 week (504h) | <0.1s | <0.1s | <0.1s | <0.1s | 2-5s | <0.1s |
-| 1 month (720h) | <0.2s | <0.2s | <0.2s | <0.2s | 5-10s | <0.2s |
-| 3 months (2160h) | <0.5s | <0.5s | <0.5s | <0.5s | 10-20s | <0.5s |
-| 1 year (8760h) | ~1s | ~1s | ~1s | ~1s | 20-40s | ~1s |
+| Station Type | Avg MAE | Avg MAPE |
+|--------------|---------|----------|
+| Solar | 0.045 | 50% |
+| Biomass | 0.020 | 35% |
+| Geothermal | 0.083 | 20% |
+| Hydro | 0.148 | 38% |
+| Wind | 0.364 | 500%+ |
 
-### Memory Usage
+### Computational Performance
 
-- **Base overhead**: ~50 MB (Node.js + libraries)
-- **Per 1000 records**: ~5 MB
-- **Model storage**:
-  - Regression: <1 MB (30 coefficients)
-  - XGBoost: ~10-50 MB (100 trees × depth 6)
-- **Peak training**: 2-3× steady state (feature matrices)
+| Operation | 1 Week | 1 Month | 3 Months |
+|-----------|--------|---------|----------|
+| Data Load | <0.1s | <0.2s | <0.5s |
+| Training | <1s | <2s | <5s |
+| Forecast | <0.1s | <0.2s | <0.5s |
 
-## Error Handling
+---
 
-### Data Validation
-
-1. **CSV Format Validation**
-   - Required columns present
-   - Date formats parseable
-   - Numeric values valid
-
-2. **Timestamp Validation**
-   - Continuous hourly intervals
-   - No duplicate timestamps per region
-   - Date ranges overlap between demand/weather
-
-3. **Data Quality Checks**
-   - Missing values reported
-   - Outliers logged (>3σ from mean)
-   - Unmatched records counted
-
-### Model Validation
-
-1. **Training Data Requirements**
-   - Minimum 168 hours (7 days) for lag features
-   - At least 100 samples after filtering
-   - All regions represented
-
-2. **Feature Validation**
-   - No NaN or Infinity values
-   - Reasonable ranges (temp 15-40°C, demand >0)
-   - Lag features populated
-
-3. **Performance Checks**
-   - R² score >0.7 (warning if lower)
-   - MAPE <20% (warning if higher)
-   - Test set size ≥20% of total
-
-## Configuration & Constants
+## Configuration
 
 ### Region Mappings
 ```typescript
@@ -441,124 +325,112 @@ REGION_MAPPINGS = {
 }
 ```
 
-### Climate Constants
-```typescript
-BASE_TEMP_CELSIUS = 24     // CDH base for tropical climate
-HEAT_INDEX_THRESHOLD = 27  // Apply Rothfusz above this temp
+### Weather API
+- Provider: Visual Crossing
+- API Key: Environment variable `VISUAL_CROSSING_API_KEY`
+- Rate Limit: 1000 requests/day (free tier)
+
+### Database
+- Type: SQLite
+- Location: `data/iload.db`
+- Auto-created on first use
+
+---
+
+## File Structure
+
+```
+src/
+├── index.ts              # CLI entry point
+├── parsers/              # CSV parsing
+│   ├── demandParser.ts
+│   ├── weatherParser.ts
+│   ├── capacityFactorParser.ts
+│   └── outageParser.ts
+├── models/               # Forecasting models
+│   ├── hybridModel.ts    # Region-aware hybrid
+│   ├── regressionModel.ts
+│   ├── xgboostModel.ts
+│   └── capacityFactor/   # CFac models
+├── services/             # Business logic
+│   ├── weatherService.ts
+│   ├── capacityFactorService.ts
+│   └── outageAnalysisService.ts
+├── database/             # SQLite integration
+│   └── database.ts
+├── features/             # Feature engineering
+│   └── featureEngineering.ts
+├── types/                # TypeScript interfaces
+├── utils/                # Utilities
+└── writers/              # Output formatters
 ```
 
-### Holidays (2025)
-15 Philippines public holidays configured for `isHoliday` feature
+---
 
-### Date Formats
-```typescript
-DEMAND_DATE_FORMAT = 'M/d/yyyy HH:mm'          // Hour-ending
-WEATHER_DATE_FORMAT = "yyyy-MM-dd'T'HH:mm:ss"  // ISO 8601, hour-starting
-```
+## Error Handling
 
-## Testing & Validation
+### Common Errors
 
-### Unit Testing Approach
-- **Parsers**: Validate CSV → data structure conversion
-- **Feature Engineering**: Verify formula calculations
-- **Models**: Check training/prediction correctness
-- **Writers**: Ensure output format compliance
+| Error | Cause | Solution |
+|-------|-------|----------|
+| "No demand data in database" | Empty DB | Import data with `db import` |
+| "No training samples" | <168h of data | Provide more historical data |
+| "Weather API error" | API key/network | Check API key, retry |
+| "Missing required option" | CLI args | Use `--help` for options |
 
-### Integration Testing
-- **End-to-end**: Load data → train → forecast → validate output
-- **Multi-region**: Ensure all 3 regions process correctly
-- **Edge cases**: Missing data, single day, leap years
+### Validation
 
-### Performance Testing
-- **Scalability**: Test with 1 week, 1 month, 1 year datasets
-- **Memory**: Monitor heap usage during large dataset processing
-- **Accuracy**: Validate R² and MAPE on known-good datasets
+- **Data Quality**: Missing values, outliers, duplicates
+- **Timestamp Alignment**: Demand (hour-ending) vs Weather (hour-starting)
+- **Feature Bounds**: Temperature 15-45°C, demand >0
 
-## Deployment Considerations
+---
 
-### Prerequisites
-- Node.js 18+ (ES Modules, modern syntax)
-- ~100 MB disk space (including node_modules)
-- ~200 MB RAM minimum
+## Extension Points
 
-### Installation Steps
-1. `npm install` - Install dependencies
-2. `npm run build` - Compile TypeScript
-3. `npm link` (optional) - Global CLI access
-
-### Production Recommendations
-- Use `--model xgboost` for best accuracy
-- Provide ≥1 month training data
-- Validate weather forecast quality before trusting predictions
-- Monitor model performance over time (retrain monthly)
-- Archive training reports for reproducibility
-
-### Scalability Options
-- **Horizontal**: Run separate processes per region
-- **Vertical**: Increase Node heap size for large datasets (`--max-old-space-size`)
-- **Distributed**: Split training/forecasting across workers
-- **Cloud**: Deploy as Lambda/Cloud Function for on-demand forecasting
-
-## Maintenance & Updates
+### Adding New Regions
+1. Add to `REGION_MAPPINGS` in constants
+2. Ensure demand CSV has column
+3. Configure weather location
 
 ### Adding Features
-1. Calculate feature in `featureEngineering.ts`
-2. Add to `FEATURE_NAMES` array (order matters!)
-3. Update `FeatureVector` interface
-4. Rebuild: `npm run build`
+1. Calculate in `featureEngineering.ts`
+2. Add to `FeatureVector` interface
+3. Include in `FEATURE_NAMES` array
 
-### Adding Regions
-1. Add mapping to `REGION_MAPPINGS`
-2. Ensure demand CSV has column for region
-3. Provide weather CSV for region's city
+### Adding Station Types
+1. Add type to `StationType` enum
+2. Implement station classifier
+3. Configure weather cluster mapping
 
-### Updating Holidays
-Edit `PH_HOLIDAYS_2025` array in `constants/index.ts`
+---
 
-### Model Tuning
-Modify hyperparameters in `xgboostModel.ts`:
-- `maxDepth`: Tree complexity (4-10)
-- `learningRate`: Convergence speed (0.01-0.3)
-- `nEstimators`: Number of trees (50-500)
+## Deployment
 
-## Troubleshooting Guide
+### Requirements
+- Node.js 18+
+- 200 MB RAM minimum
+- 100 MB disk space
 
-### Common Issues
+### Installation
+```bash
+npm install
+npm run build
+npm link  # Optional global install
+```
 
-**"No training samples available"**
-- Cause: <168 hours of data (need 7 days for lags)
-- Solution: Provide more historical data
+### Production Recommendations
+- Use `--model hybrid` for demand forecasting
+- Import ≥3 months historical data
+- Retrain monthly for best accuracy
+- Monitor forecast vs actual metrics
 
-**Low R² score (<0.7)**
-- Check: Data quality (missing values, outliers)
-- Check: Weather-demand misalignment
-- Try: More training data, different model
+---
 
-**"Unmatched demand/weather records"**
-- Cause: Date range mismatch or city name issues
-- Solution: Verify date ranges overlap, check city names
+## Key Improvements (2025)
 
-**High MAPE (>10%)**
-- Possible: Unusual weather patterns not in training
-- Possible: Holiday/weekend not properly captured
-- Try: Retrain with more diverse data
-
-### Debug Techniques
-1. Use `info` command to validate data files
-2. Check training reports for feature importance
-3. Compare regression vs XGBoost performance
-4. Examine forecast CSV for unreasonable values
-5. Verify timestamp alignment in merged data
-
-## Conclusion
-
-This system provides a complete, production-ready electricity load forecasting pipeline specifically optimized for the Philippines power grid. The architecture balances accuracy (XGBoost), interpretability (Regression), and usability (CLI) while maintaining code quality through TypeScript's type safety and modular design.
-
-Key strengths:
-- **Comprehensive feature engineering** captures complex weather-demand relationships
-- **Dual-model approach** provides flexibility and comparison
-- **Tropical climate optimized** with Philippines-specific calculations
-- **Production-grade code** with error handling and validation
-- **Easy to use** CLI with clear documentation
-
-The system is ready for deployment in forecasting scenarios and can be extended with additional features, regions, or models as needed.
+1. **Hybrid Model**: Region-specific learned characteristics replace hardcoded values
+2. **Database Integration**: `--use-db` flag for streamlined workflows
+3. **Capacity Factor**: 117 station forecasting with cluster-based weather
+4. **Outage Analysis**: ML-derived weather risk multipliers
+5. **Auto Weather Fetch**: API integration eliminates manual weather file management

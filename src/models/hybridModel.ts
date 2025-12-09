@@ -39,19 +39,25 @@ interface StatisticalBounds {
   baseTemp: number; // Reference temperature for the profile
   // Time period for this hour
   timePeriod: TimePeriod;
+  // Region-specific swing characteristics (learned from data)
+  swingAmplitude: number; // Actual observed daily swing for this profile
+  region: string; // Region this profile belongs to
 }
 
 /**
- * Time-period specific scaling factors
- * Controls how much temperature affects demand in each period
+ * Region-specific shape characteristics (learned during training)
+ * Controls how the model interpolates within min/max bounds
  */
-const TEMP_SENSITIVITY: Record<TimePeriod, number> = {
-  [TimePeriod.NIGHT]: 0.3,        // Low temp sensitivity at night
-  [TimePeriod.MORNING_RAMP]: 0.5, // Moderate during morning ramp
-  [TimePeriod.MIDDAY]: 1.0,       // Full temp sensitivity (cooling load)
-  [TimePeriod.EVENING_PEAK]: 0.4, // Lower - residential patterns dominate
-  [TimePeriod.LATE_NIGHT]: 0.3    // Low temp sensitivity
-};
+interface RegionCharacteristics {
+  // Daily swing ratio: how much the region varies peak-to-trough
+  avgDailySwing: number;
+  // Temperature sensitivity multiplier (learned from data)
+  tempSensitivityMultiplier: number;
+  // Peak hour bias: does this region peak earlier/later than median?
+  peakHourOffset: number;
+  // Trough depth: how low does the region go relative to median?
+  troughDepthRatio: number;
+}
 
 /**
  * Hybrid Interpolation Model
@@ -65,6 +71,7 @@ const TEMP_SENSITIVITY: Record<TimePeriod, number> = {
 export class HybridModel {
   private model: MultivariateLinearRegression | null = null;
   private profiles: Map<string, StatisticalBounds> = new Map();
+  private regionCharacteristics: Map<string, RegionCharacteristics> = new Map();
   private growthFactor: number = 0; // Daily growth rate (e.g., 0.0001 = 0.01% per day)
   private recentDaysCount: number = 7;
 
@@ -145,10 +152,14 @@ export class HybridModel {
       // Positive means higher temp = higher demand (cooling load)
       const tempCoefficient = varTemp > 0 ? covTempDemand / varTemp : 0;
 
-      // Extract hour from key (format: region_hour_daytype)
+      // Extract region and hour from key (format: region_hour_daytype)
       const keyParts = key.split('_');
+      const region = keyParts[0];
       const hour = parseInt(keyParts[1], 10);
       const timePeriod = getTimePeriod(hour);
+
+      // Calculate swing amplitude for this profile
+      const swingAmplitude = max - min;
 
       this.profiles.set(key, {
         min,
@@ -158,7 +169,105 @@ export class HybridModel {
         recentDays,
         tempCoefficient,
         baseTemp,
-        timePeriod
+        timePeriod,
+        swingAmplitude,
+        region
+      });
+    }
+
+    // Learn region-specific characteristics from profiles
+    this.learnRegionCharacteristics(samples);
+  }
+
+  /**
+   * Learn region-specific shape characteristics from training data
+   * This replaces hardcoded TEMP_SENSITIVITY with data-driven values
+   */
+  private learnRegionCharacteristics(samples: TrainingSample[]): void {
+    // Group samples by region and date to calculate daily patterns
+    const regionDays = new Map<string, Map<string, Array<{ hour: number; demand: number; temp: number }>>>();
+
+    for (const sample of samples) {
+      const region = this.inferRegion(sample);
+      const dateStr = DateTime.fromJSDate(sample.datetime).toISODate() || '';
+
+      if (!regionDays.has(region)) {
+        regionDays.set(region, new Map());
+      }
+      const regionData = regionDays.get(region)!;
+      if (!regionData.has(dateStr)) {
+        regionData.set(dateStr, []);
+      }
+      regionData.get(dateStr)!.push({
+        hour: sample.features.hour,
+        demand: sample.demand,
+        temp: sample.features.temp
+      });
+    }
+
+    // Calculate characteristics for each region
+    for (const [region, dailyData] of regionDays) {
+      const dailySwings: number[] = [];
+      const dailyPeakHours: number[] = [];
+      const dailyTroughRatios: number[] = [];
+      const tempDemandCorrelations: number[] = [];
+
+      for (const [dateStr, hourlyData] of dailyData) {
+        if (hourlyData.length < 20) continue; // Skip incomplete days
+
+        const demands = hourlyData.map(h => h.demand);
+        const temps = hourlyData.map(h => h.temp);
+        const maxDemand = Math.max(...demands);
+        const minDemand = Math.min(...demands);
+        const avgDemand = demands.reduce((a, b) => a + b, 0) / demands.length;
+
+        // Daily swing (max - min)
+        dailySwings.push(maxDemand - minDemand);
+
+        // Peak hour
+        const peakHour = hourlyData[demands.indexOf(maxDemand)].hour;
+        dailyPeakHours.push(peakHour);
+
+        // Trough depth ratio (how far below average is the trough)
+        dailyTroughRatios.push(minDemand / avgDemand);
+
+        // Temperature-demand correlation for this day
+        if (temps.length > 1) {
+          const avgTemp = temps.reduce((a, b) => a + b, 0) / temps.length;
+          let covTD = 0, varT = 0, varD = 0;
+          for (let i = 0; i < demands.length; i++) {
+            const tDev = temps[i] - avgTemp;
+            const dDev = demands[i] - avgDemand;
+            covTD += tDev * dDev;
+            varT += tDev * tDev;
+            varD += dDev * dDev;
+          }
+          if (varT > 0 && varD > 0) {
+            tempDemandCorrelations.push(covTD / Math.sqrt(varT * varD));
+          }
+        }
+      }
+
+      if (dailySwings.length === 0) continue;
+
+      // Calculate average characteristics
+      const avgDailySwing = dailySwings.reduce((a, b) => a + b, 0) / dailySwings.length;
+      const avgPeakHour = dailyPeakHours.reduce((a, b) => a + b, 0) / dailyPeakHours.length;
+      const avgTroughRatio = dailyTroughRatios.reduce((a, b) => a + b, 0) / dailyTroughRatios.length;
+      const avgTempCorr = tempDemandCorrelations.length > 0
+        ? tempDemandCorrelations.reduce((a, b) => a + b, 0) / tempDemandCorrelations.length
+        : 0.5;
+
+      // Temperature sensitivity multiplier based on correlation
+      // High correlation = temperature drives demand (use full temp coefficient)
+      // Low correlation = other factors dominate (dampen temp coefficient)
+      const tempSensitivityMultiplier = 0.3 + (Math.abs(avgTempCorr) * 0.7);
+
+      this.regionCharacteristics.set(region, {
+        avgDailySwing,
+        tempSensitivityMultiplier,
+        peakHourOffset: avgPeakHour - 15, // Offset from typical 3pm peak
+        troughDepthRatio: avgTroughRatio
       });
     }
   }
@@ -326,46 +435,56 @@ export class HybridModel {
   }
 
   /**
-   * Interpolate using profile median with time-period aware adjustments
-   * Different time periods have different demand drivers
+   * Interpolate using profile bounds with region-specific learned characteristics
+   * Uses data-driven temperature sensitivity instead of hardcoded values
    */
   private interpolate(features: FeatureVector, profile: StatisticalBounds): number {
+    // Get region-specific characteristics (learned from data)
+    const regionChars = this.regionCharacteristics.get(profile.region);
+
     // Start with the median demand for this hour/daytype
     let prediction = profile.median;
 
-    // Get time-period specific temperature sensitivity
-    const tempSensitivity = TEMP_SENSITIVITY[profile.timePeriod];
+    // Get time-period base sensitivity (varies by time of day)
+    const timePeriodSensitivity = this.getTimePeriodSensitivity(profile.timePeriod);
 
-    // Apply temperature adjustment scaled by time period sensitivity
-    // Midday: full temperature effect (cooling load)
-    // Evening: reduced effect (residential patterns dominate)
+    // Apply region-specific temperature sensitivity multiplier
+    // This is LEARNED from data, not hardcoded
+    const regionTempMultiplier = regionChars?.tempSensitivityMultiplier ?? 1.0;
+    const effectiveTempSensitivity = timePeriodSensitivity * regionTempMultiplier;
+
+    // Apply temperature adjustment
     const tempDeviation = features.temp - profile.baseTemp;
-    const tempAdjustment = profile.tempCoefficient * tempDeviation * tempSensitivity;
+    const tempAdjustment = profile.tempCoefficient * tempDeviation * effectiveTempSensitivity;
     prediction += tempAdjustment;
 
-    // Evening peak boost based on daylight/time patterns
-    // Residential demand surges independent of temperature
-    if (profile.timePeriod === TimePeriod.EVENING_PEAK) {
-      // Look at the median's position relative to midday
-      // Evening typically higher than late afternoon due to residential surge
-      // The profile already captures this, but we reinforce it
-      const hour = features.hour;
+    // For regions with high daily swing, use bounds more aggressively
+    // For regions with low daily swing, stay closer to median
+    if (regionChars && profile.swingAmplitude > 0) {
+      // Calculate where we are relative to median based on temp
+      const normalizedTempDev = tempDeviation / 10; // Normalize to ~±1 range
 
-      // Peak hours are typically 19-21 (7pm-9pm)
-      if (hour >= 19 && hour <= 21) {
-        // Small boost to ensure we capture the evening peak
-        const peakBoost = 1.02; // 2% boost for peak evening hours
-        prediction *= peakBoost;
+      // Scale the position within bounds by how much this region typically swings
+      // Regions with high swing should use more of their min/max range
+      const swingFactor = Math.min(1.5, regionChars.avgDailySwing / profile.swingAmplitude);
+
+      if (normalizedTempDev > 0) {
+        // Hot temperature - interpolate toward max
+        const distToMax = profile.max - profile.median;
+        prediction = profile.median + (distToMax * normalizedTempDev * swingFactor * 0.5);
+      } else {
+        // Cool temperature - interpolate toward min
+        const distToMin = profile.median - profile.min;
+        prediction = profile.median + (distToMin * normalizedTempDev * swingFactor * 0.5);
       }
     }
 
-    // Use lag-based adjustment for recent trend
-    // If demand was higher/lower than normal recently, adjust accordingly
+    // Use lag-based adjustment for recent trend (smaller effect)
     if (features.demandLag24h !== undefined && profile.median > 0) {
       const lag24hRatio = features.demandLag24h / profile.median;
-      // Apply a small adjustment based on recent trend (±10% max)
-      const trendAdjustment = Math.max(-0.1, Math.min(0.1, lag24hRatio - 1));
-      prediction *= (1 + trendAdjustment * 0.5); // Dampen the effect
+      // Apply a small adjustment based on recent trend (±5% max)
+      const trendAdjustment = Math.max(-0.05, Math.min(0.05, lag24hRatio - 1));
+      prediction *= (1 + trendAdjustment * 0.3); // Dampen the effect
     }
 
     // Clamp to min/max bounds to preserve the hourly shape
@@ -373,6 +492,21 @@ export class HybridModel {
 
     // Ensure non-negative predictions
     return Math.max(0, prediction);
+  }
+
+  /**
+   * Get base time-period sensitivity (before region adjustment)
+   * This provides the baseline shape - regions then modify this
+   */
+  private getTimePeriodSensitivity(timePeriod: TimePeriod): number {
+    switch (timePeriod) {
+      case TimePeriod.NIGHT: return 0.4;        // Low temp sensitivity at night
+      case TimePeriod.MORNING_RAMP: return 0.6; // Moderate during morning ramp
+      case TimePeriod.MIDDAY: return 1.0;       // Full temp sensitivity (cooling load)
+      case TimePeriod.EVENING_PEAK: return 0.5; // Lower - residential patterns dominate
+      case TimePeriod.LATE_NIGHT: return 0.4;   // Low temp sensitivity
+      default: return 0.6;
+    }
   }
 
   /**
