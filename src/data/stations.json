@@ -314,6 +314,36 @@
       "grid": "CLUZ",
       "turbines": 27
     },
+    "02MMPP_G01": {
+      "name": "Dolores Wind Farm Unit G01 (MMPP)",
+      "type": "wind",
+      "operator": "Alternergy Wind One Corporation",
+      "capacity_mw": null,
+      "location": {
+        "municipality": "Pililla",
+        "province": "Rizal",
+        "region": "Region IV-A",
+        "latitude": 14.4667,
+        "longitude": 121.3000
+      },
+      "grid": "CLUZ",
+      "parent": "02DOLORES"
+    },
+    "03AWOC_G01": {
+      "name": "Dolores Wind Farm Unit G01 (AWOC)",
+      "type": "wind",
+      "operator": "Alternergy Wind One Corporation",
+      "capacity_mw": null,
+      "location": {
+        "municipality": "Pililla",
+        "province": "Rizal",
+        "region": "Region IV-A",
+        "latitude": 14.4667,
+        "longitude": 121.3000
+      },
+      "grid": "CLUZ",
+      "parent": "02DOLORES"
+    },
     "01PANTABA": {
       "name": "Pantabangan Hydro",
       "type": "hydro",
@@ -683,7 +713,38 @@
       },
       "grid": "CVIS",
       "commissioned": 2015,
-      "turbines": 18
+      "turbines": 18,
+      "units": ["08PWIND_G01", "08WIND_G02"]
+    },
+    "08PWIND_G01": {
+      "name": "Nabas Wind Farm Unit G01",
+      "type": "wind",
+      "operator": "PetroWind Energy Inc.",
+      "capacity_mw": null,
+      "location": {
+        "municipality": "Nabas",
+        "province": "Aklan",
+        "region": "Region VI",
+        "latitude": 11.8794,
+        "longitude": 121.9859
+      },
+      "grid": "CVIS",
+      "parent": "08NABAS_W"
+    },
+    "08WIND_G02": {
+      "name": "Nabas Wind Farm Unit G02",
+      "type": "wind",
+      "operator": "PetroWind Energy Inc.",
+      "capacity_mw": null,
+      "location": {
+        "municipality": "Nabas",
+        "province": "Aklan",
+        "region": "Region VI",
+        "latitude": 11.8794,
+        "longitude": 121.9859
+      },
+      "grid": "CVIS",
+      "parent": "08NABAS_W"
     },
     "08NABAS_H": {
       "name": "Nabas Hydro",
@@ -1135,18 +1196,19 @@
       "grid": "CLUZ"
     },
     "02DOLORES": {
-      "name": "Dolores Renewable",
-      "type": "solar",
-      "operator": "PH Renewables Inc.",
-      "capacity_mw": null,
+      "name": "Dolores Wind Farm",
+      "type": "wind",
+      "operator": "Alternergy Wind One Corporation",
+      "capacity_mw": 54,
       "location": {
-        "municipality": "Dolores",
-        "province": "Quezon",
+        "municipality": "Pililla",
+        "province": "Rizal",
         "region": "Region IV-A",
-        "latitude": 14.0167,
-        "longitude": 121.4333
+        "latitude": 14.4667,
+        "longitude": 121.3000
       },
-      "grid": "CLUZ"
+      "grid": "CLUZ",
+      "units": ["02MMPP_G01", "03AWOC_G01"]
     },
     "02DOLORES_S": {
       "name": "Dolores Solar",
@@ -1679,6 +1741,15 @@
           "longitude": 120.6479
         }
       },
+      "RIZAL_WIND": {
+        "description": "Wind farms in Rizal (Pililla/Dolores Wind Farm area)",
+        "stations": ["02DOLORES", "02MMPP_G01", "03AWOC_G01"],
+        "referenceLocation": {
+          "name": "Pililla, Rizal",
+          "latitude": 14.4667,
+          "longitude": 121.3000
+        }
+      },
       "BENGUET_HYDRO": {
         "description": "Hydroelectric plants in Benguet",
         "stations": ["01BAKUN", "01LATRINI"],
@@ -1744,7 +1815,7 @@
       },
       "NCR_SOLAR": {
         "description": "Solar plants in Metro Manila",
-        "stations": ["02DOLORES", "02DOLORES_S", "02DONAIMELDA", "02QUEZON_S_E", "02QUEZON_S_S", "02QUEZON_S_V"],
+        "stations": ["02DOLORES_S", "02DONAIMELDA", "02QUEZON_S_E", "02QUEZON_S_S", "02QUEZON_S_V"],
         "referenceLocation": {
           "name": "Quezon City",
           "latitude": 14.6500,
@@ -1878,8 +1949,8 @@
         }
       },
       "AKLAN_WIND": {
-        "description": "Wind farm in Aklan",
-        "stations": ["08NABAS_W", "08NABAS_H"],
+        "description": "Wind farms in Aklan/Western Visayas (Nabas Wind Farm)",
+        "stations": ["08NABAS_W", "08NABAS_H", "08PWIND_G01", "08WIND_G02"],
         "referenceLocation": {
           "name": "Nabas, Aklan",
           "latitude": 11.8794,

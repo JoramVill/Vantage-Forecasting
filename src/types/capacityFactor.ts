@@ -41,8 +41,12 @@ export interface CFacWeatherFeatures {
   windGust: number;
   windDirection?: number;
 
-  // Wind features at hub height (100m) for wind farm forecasting
-  windSpeed100?: number;    // Wind speed at 100m height
+  // Wind features at multiple heights for wind farm forecasting
+  windSpeed50?: number;     // Wind speed at 50m height
+  windDirection50?: number; // Wind direction at 50m height
+  windSpeed80?: number;     // Wind speed at 80m height
+  windDirection80?: number; // Wind direction at 80m height
+  windSpeed100?: number;    // Wind speed at 100m height (hub height)
   windDirection100?: number; // Wind direction at 100m height
 
   // Solar features
@@ -56,6 +60,14 @@ export interface CFacWeatherFeatures {
 
   // Derived
   airDensity?: number; // for wind power adjustment
+
+  // Premium weather features (Visual Crossing corporate account)
+  // These improve solar forecasting accuracy by ~30%
+  uvIndex?: number;         // UV index: 0-11+ (clear-sky indicator, r=0.78 with solar CF)
+  visibility?: number;      // Visibility in km (haze/aerosol indicator, r=0.31 with solar CF)
+  conditions?: string;      // Sky conditions text: "Clear", "Overcast", "Rain", etc.
+  pressure?: number;        // Sea level pressure in hPa
+  precipProb?: number;      // Precipitation probability 0-100%
 }
 
 // Training sample for capacity factor models
@@ -110,6 +122,79 @@ export interface CFacModelMetrics {
   sampleCount: number;
 }
 
+/**
+ * MREC (Must-Run Energy Conversion) Factors
+ * Based on iPool's three-tier piecewise linear conversion system
+ *
+ * The system uses Probability of Exceedance (PoE) to segment wind conditions:
+ * - HIGH tier: Top 10% wind conditions (PoE = 0.1)
+ * - MID tier: 10%-30% wind conditions
+ * - LOW tier: Below 30% (most common conditions)
+ *
+ * Each tier has a conversion factor: CF = MRec * WindSpeed
+ */
+export interface MRECFactors {
+  stationCode: string;
+  stationType: StationType;
+
+  // Three-tier conversion factors (CF = MRec * WindSpeed)
+  MRecH: number;   // High wind conversion factor
+  MRecM: number;   // Mid wind conversion factor
+  MRecL: number;   // Low wind conversion factor
+
+  // Wind speed thresholds (m/s)
+  vH: number;      // Threshold for HIGH tier (wind >= vH)
+  vL: number;      // Threshold for MID tier (vH > wind >= vL), below is LOW
+
+  // Calibration metadata
+  calibrated: boolean;
+  calibrationDate?: Date;
+  sampleCount?: number;
+
+  // Statistics from calibration
+  stats?: {
+    CFacH: number;    // Average CF in HIGH tier
+    CFacM: number;    // Average CF in MID tier
+    CFacL: number;    // Average CF in LOW tier
+    ValH: number;     // Average wind speed in HIGH tier
+    ValM: number;     // Average wind speed in MID tier
+    ValL: number;     // Average wind speed in LOW tier
+    maxWind: number;  // Maximum observed wind speed
+    minWind: number;  // Minimum observed wind speed
+  };
+}
+
+/**
+ * MREC Calibration input data
+ * Requires paired historical capacity factors and wind speeds
+ */
+export interface MRECCalibrationData {
+  datetime: Date;
+  stationCode: string;
+  capacityFactor: number;  // 0.0 to 1.0
+  windSpeed: number;       // m/s (preferably hub-height)
+}
+
+/**
+ * PoE (Probability of Exceedance) constants
+ * Matches iPool's ConstDefinitions.cpp values
+ */
+export const MREC_POE_CONSTANTS = {
+  PoEH: 0.1,   // Top 10% for HIGH tier
+  PoEL: 0.3,   // Top 30% for MID tier cutoff
+  PoEHs: 0.1,  // Solar HIGH tier (same as wind)
+  PoELs: 0.3,  // Solar LOW tier (same as wind)
+} as const;
+
+/**
+ * Wind capacity factor methodology options
+ */
+export enum WindCFacMethodology {
+  MREC = 'mrec',           // iPool-style three-tier piecewise
+  HYBRID = 'hybrid',       // Physics + ML residual learning
+  POWER_CURVE = 'power_curve',  // Pure physics power curve
+}
+
 // Known hydro run-of-river station names (partial matching)
 const KNOWN_HYDRO_ROR_STATIONS = [
   'BAKUN',
@@ -138,6 +223,11 @@ const STATION_TYPE_MAPPING: Record<string, StationType> = {
   '01BURGOS': StationType.WIND,
   '01LAOAG': StationType.WIND,
   '01PAGUDPUD': StationType.WIND,
+  '02DOLORES': StationType.WIND,     // Dolores Wind Farm (units: 02MMPP_G01, 03AWOC_G01)
+  '02MMPP_G01': StationType.WIND,    // MM Pililla Wind unit (parent: 02DOLORES)
+  '03AWOC_G01': StationType.WIND,    // AWOC Wind unit (parent: 02DOLORES)
+  '08PWIND_G01': StationType.WIND,   // Pililla Wind unit (parent: 08NABAS_W)
+  '08WIND_G02': StationType.WIND,    // Wind Farm unit (parent: 08NABAS_W)
 
   // Solar stations (without _S suffix)
   '01BOTOLAN': StationType.SOLAR,
@@ -150,7 +240,6 @@ const STATION_TYPE_MAPPING: Record<string, StationType> = {
   '01SNMARCELINO': StationType.SOLAR,
   '01SNRAFAEL': StationType.SOLAR,
   '01SNTGO': StationType.SOLAR,
-  '02DOLORES': StationType.SOLAR,
   '03CALAMBA': StationType.SOLAR,
   '03CLACA': StationType.SOLAR,
   '03DASMAEHV': StationType.SOLAR,
