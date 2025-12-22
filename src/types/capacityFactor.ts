@@ -87,6 +87,10 @@ export interface CFacTrainingSample {
   // Lag features
   cfacLag1h?: number;
   cfacLag24h?: number;
+
+  // Recency weight for training (exponential decay)
+  // Recent data gets higher weight (1.0 = most recent, decays to ~0.1 for oldest)
+  weight?: number;
 }
 
 // Profile statistics for non-weather-dependent stations
@@ -228,20 +232,23 @@ const STATION_TYPE_MAPPING: Record<string, StationType> = {
   '03AWOC_G01': StationType.WIND,    // AWOC Wind unit (parent: 02DOLORES)
   '08PWIND_G01': StationType.WIND,   // Pililla Wind unit (parent: 08NABAS_W)
   '08WIND_G02': StationType.WIND,    // Wind Farm unit (parent: 08NABAS_W)
+  '08BVISTA': StationType.WIND,      // San Lorenzo Wind Farm, Guimaras (08SLWIND_G01)
+
+  // Solar stations (without _S suffix) - additional
+  '01CURIMAO': StationType.SOLAR,    // Curimao Solar, Ilocos Norte
+  '01PASUQUIN': StationType.SOLAR,   // Pasuquin Solar, Ilocos Norte
+  '01BOTOLAN': StationType.SOLAR,    // Botolan Solar, Zambales
 
   // Solar stations (without _S suffix)
-  '01BOTOLAN': StationType.SOLAR,
   '01CAYANGA': StationType.SOLAR,
   '01CLARK': StationType.SOLAR,
-  '01CURIMAO': StationType.SOLAR,
   '01HERMOSA': StationType.SOLAR,
   '01LIMAY': StationType.SOLAR,
-  '01PASUQUIN': StationType.SOLAR,
   '01SNMARCELINO': StationType.SOLAR,
   '01SNRAFAEL': StationType.SOLAR,
   '01SNTGO': StationType.SOLAR,
   '03CALAMBA': StationType.SOLAR,
-  '03CLACA': StationType.SOLAR,
+  // '03CLACA': StationType.SOLAR,  // REMOVED - this is aggregated coal+solar+battery, use 03CLACA_S for solar
   '03DASMAEHV': StationType.SOLAR,
   '05CALUNG': StationType.SOLAR,
   '06HELIOS': StationType.SOLAR,

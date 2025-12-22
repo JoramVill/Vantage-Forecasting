@@ -105,27 +105,84 @@ Linear regression for fast, interpretable forecasting.
 
 ### 2. Capacity Factor Forecasting
 
-Forecasts generation capacity for 117 renewable/must-run stations.
+Forecasts generation capacity for 117 renewable/must-run stations using specialized models.
 
 **Station Types:**
-| Type | Stations | Weather Dependency |
-|------|----------|-------------------|
-| Solar | 53 | High (radiation, cloud) |
-| Hydro | 31 | Moderate (precipitation) |
-| Biomass | 10 | Low |
-| Battery | 8 | Dispatch-based |
-| Geothermal | 8 | Low |
-| Wind | 7 | High (wind speed) |
+| Type | Stations | Weather Dependency | Model |
+|------|----------|-------------------|-------|
+| Solar | 55 | High (radiation, cloud) | Physics+ML Hybrid |
+| Hydro | 31 | Moderate (precipitation) | Profile-based |
+| Biomass | 10 | Low | Profile-based |
+| Battery | 8 | Dispatch-based | Profile-based |
+| Geothermal | 8 | Low | Profile-based |
+| Wind | 10 | High (wind speed) | Weather-Only MREC Hybrid |
 
-**Weather Clusters:**
-- 29 geographic clusters for weather data
-- Each cluster covers multiple nearby stations
-- Wind stations use 100m hub-height wind data
+**Station-Specific Weather:**
+- Each station has individual coordinates for weather fetching
+- Wind stations use optimal hub-height wind data (10m, 50m, 80m, or 100m based on correlation analysis)
+- Weather cached locally to reduce API calls
 
-**Model Architecture:**
-- Individual regression model per station
-- Features: solar radiation, temperature, wind speed, cloud cover, humidity
-- Training on historical capacity factor data
+#### Solar: Physics+ML Hybrid Model
+
+**Architecture:**
+```
+Physics Base → ML Residual → Bias Correction → Hourly Correction → Final Prediction
+```
+
+**Physics Base (SolarIrradianceModel):**
+- GHI normalization to Standard Test Conditions (1000 W/m²)
+- Cell temperature calculation from ambient + irradiance
+- Temperature derating: -0.3% per °C above 25°C
+- System loss factor: 92%
+- Irradiance scaling: 1.4x (calibrated for PH conditions)
+
+**ML Residual Learning:**
+- Multivariate Linear Regression or XGBoost
+- Features: solar radiation, cloud cover, temperature, hour (cyclical), month, physics baseline, clear sky index
+- Learns station-specific corrections for local effects
+
+**Correction Layers:**
+- Bias correction: Learned from training data (0.8-1.5 range)
+- Hourly correction: Data-driven per-hour factors (replaces hardcoded sunset tapers)
+
+#### Wind: Weather-Only MREC Hybrid Model
+
+**Architecture:**
+```
+MREC Base (3-Tier) → Weather-Only ML Residual → High-Wind Cutout → Final Prediction
+```
+
+**MREC Base (iPool Algorithm):**
+Three-tier piecewise linear conversion based on Probability of Exceedance:
+```
+if windSpeed >= vH:     PcCon = MRecH × windSpeed  (HIGH tier, top 10%)
+else if windSpeed >= vL: PcCon = MRecM × windSpeed  (MID tier, 10-30%)
+else:                    PcCon = MRecL × windSpeed  (LOW tier, bottom 70%)
+
+if PcCon > 1.1: return 0  (High wind cutout)
+```
+
+**Calibration Methods:**
+1. Standard PoE: Fixed 10%/30% thresholds
+2. ML-Optimized: Grid search for optimal vH/vL per station
+3. CF-Based: Learns thresholds from CF-wind relationship
+
+**Weather-Only ML Features (NO temporal features to avoid monsoon overfitting):**
+- MREC base prediction (anchor point)
+- Tier indicators (H/M/L)
+- Gust ratio (turbulence: windGust/windSpeed)
+- Temperature deviation (air density proxy)
+- Normalized wind speed
+- Cloud cover (atmospheric conditions)
+
+**Optimal Wind Height Per Station:**
+| Station | Optimal Height | Correlation |
+|---------|---------------|-------------|
+| 01BURGOS | 50m | 0.64 |
+| 08NABAS_W | 100m | 0.73 |
+| 08STBARBRA_W | 10m | 0.74 |
+| 01PAGUDPUD | 50m | 0.61 |
+| 01LAOAG | 10m | 0.35 |
 
 ---
 
@@ -296,13 +353,23 @@ await weatherService.fetchWeatherData(location, startDate, endDate);
 
 ### Capacity Factor Accuracy (by Type)
 
-| Station Type | Avg MAE | Avg MAPE |
-|--------------|---------|----------|
-| Solar | 0.045 | 50% |
-| Biomass | 0.020 | 35% |
-| Geothermal | 0.083 | 20% |
-| Hydro | 0.148 | 38% |
-| Wind | 0.364 | 500%+ |
+| Station Type | Model | Avg MAPE | Key Improvement |
+|--------------|-------|----------|-----------------|
+| Solar | Physics+ML Hybrid | ~16% | Station-specific bias correction |
+| Wind | Weather-Only MREC Hybrid | ~76% | Avoids monsoon season overfitting |
+| Geothermal | Profile-based | ~20% | Stable baseload patterns |
+| Biomass | Profile-based | ~35% | Operational scheduling |
+| Hydro | Profile-based | ~38% | Seasonal flow modeling |
+
+**Wind Model Comparison:**
+| Model | Training MAPE | Test MAPE | Issue |
+|-------|---------------|-----------|-------|
+| MREC-only | 141% | 96% | Robust baseline |
+| MREC+ML (Temporal) | 110% | 111% | Overfits to season |
+| MREC+ML (Weather-Only) | 122% | **76%** | Best generalization |
+
+**Why Weather-Only for Wind?**
+Temporal features (month encoding) memorize Jul-Oct monsoon patterns that don't transfer to Nov-Dec dry season. Weather-only features (gust ratio, temperature, wind speed) generalize across seasons.
 
 ### Computational Performance
 
@@ -427,10 +494,23 @@ npm link  # Optional global install
 
 ---
 
-## Key Improvements (2025)
+## Key Improvements (December 2025)
 
-1. **Hybrid Model**: Region-specific learned characteristics replace hardcoded values
-2. **Database Integration**: `--use-db` flag for streamlined workflows
-3. **Capacity Factor**: 117 station forecasting with cluster-based weather
-4. **Outage Analysis**: ML-derived weather risk multipliers
-5. **Auto Weather Fetch**: API integration eliminates manual weather file management
+### Demand Forecasting
+1. **Hybrid Model v2**: Region-specific learned characteristics (CLUZ, CVIS, CMIN)
+2. **Temperature Sensitivity**: Learned from data, not hardcoded per region
+3. **Daily Swing Calibration**: Adapts to each region's peak-to-trough patterns
+4. **Database Integration**: `--use-db` flag for streamlined workflows
+
+### Capacity Factor Forecasting
+5. **Physics+ML Hybrid for Solar**: ~16% MAPE with station-specific corrections
+6. **Weather-Only MREC Hybrid for Wind**: ~76% MAPE, avoids monsoon overfitting
+7. **ML-Optimized Calibration**: Grid search for optimal vH/vL thresholds per station
+8. **Optimal Wind Heights**: Per-station height selection (10m-100m) based on correlation
+9. **Station-Specific Weather**: Individual coordinates for 117 stations
+10. **Asymmetric Loss Option**: Penalizes under-predictions more heavily for risk management
+
+### Infrastructure
+11. **Auto Weather Fetch**: Visual Crossing API with local caching
+12. **XGBoost Option**: For ML residual learning in capacity factor models
+13. **Outage Analysis**: ML-derived weather risk multipliers by region

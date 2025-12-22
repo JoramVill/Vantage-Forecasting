@@ -6,11 +6,16 @@
  */
 export class SolarIrradianceModel {
   private GHI_STC: number = 1000;      // W/m² at Standard Test Conditions
-  private tempCoeff: number = -0.004;   // -0.4% per °C above 25°C
-  private systemLoss: number = 0.85;    // 85% (inverter, wiring, soiling)
-  private NOCT: number = 45;            // Nominal Operating Cell Temperature
+  private tempCoeff: number = -0.003;   // -0.3% per °C above 25°C (calibrated from PH data)
+  private systemLoss: number = 0.92;    // 92% (reduced losses for modern inverters)
+  private NOCT: number = 43;            // Nominal Operating Cell Temperature (lower for better ventilation)
+  // Visual Crossing API solar radiation accuracy varies by month:
+  // - July: Accurate (ratio 1.03 vs actual CF)
+  // - November: Under-reports by ~2x (ratio 2.01 vs actual CF)
+  // The scale factor is a compromise; ML residual layer provides additional correction
+  private irradianceScale: number = 1.4;
 
-  constructor(params?: { tempCoeff?: number; systemLoss?: number; NOCT?: number }) {
+  constructor(params?: { tempCoeff?: number; systemLoss?: number; NOCT?: number; irradianceScale?: number }) {
     if (params?.tempCoeff !== undefined) {
       this.tempCoeff = params.tempCoeff;
     }
@@ -19,6 +24,9 @@ export class SolarIrradianceModel {
     }
     if (params?.NOCT !== undefined) {
       this.NOCT = params.NOCT;
+    }
+    if (params?.irradianceScale !== undefined) {
+      this.irradianceScale = params.irradianceScale;
     }
   }
 
@@ -35,14 +43,17 @@ export class SolarIrradianceModel {
       return 0;
     }
 
+    // Scale up irradiance (Visual Crossing API under-reports compared to actual PH conditions)
+    const scaledRadiation = solarRadiation * this.irradianceScale;
+
     // Calculate cell temperature based on ambient temperature and irradiance
-    const cellTemp = this.calculateCellTemperature(temperature, solarRadiation);
+    const cellTemp = this.calculateCellTemperature(temperature, scaledRadiation);
 
     // Calculate temperature derating factor
     const tempFactor = this.calculateTempFactor(cellTemp);
 
     // Calculate capacity factor
-    const cFac = (solarRadiation / this.GHI_STC) * tempFactor * this.systemLoss;
+    const cFac = (scaledRadiation / this.GHI_STC) * tempFactor * this.systemLoss;
 
     // Clamp to valid range [0, 1]
     return Math.max(0, Math.min(1, cFac));

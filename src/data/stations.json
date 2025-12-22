@@ -2,7 +2,7 @@
   "metadata": {
     "description": "WESM Must-Run/Renewable Power Station Reference Data",
     "version": "1.0.0",
-    "lastUpdated": "2025-12-04",
+    "lastUpdated": "2025-12-18",
     "sources": [
       "Global Energy Monitor (gem.wiki)",
       "Global Energy Observatory (globalenergyobservatory.org)",
@@ -29,8 +29,8 @@
       "commissioned": 2001
     },
     "01BOTOLAN": {
-      "name": "Botolan Solar/Hydro",
-      "type": "hydro",
+      "name": "Botolan Solar",
+      "type": "solar",
       "operator": "Unknown",
       "capacity_mw": null,
       "location": {
@@ -74,16 +74,16 @@
       "grid": "CLUZ"
     },
     "01CAYANGA": {
-      "name": "Cayanga Solar",
+      "name": "Cayanga-Bugallon Solar",
       "type": "solar",
-      "operator": "Unknown",
-      "capacity_mw": null,
+      "operator": "Cayanga-Bugallon Solar Energy Inc.",
+      "capacity_mw": 94.7,
       "location": {
-        "municipality": "Unknown",
+        "municipality": "Bugallon",
         "province": "Pangasinan",
         "region": "Region I",
-        "latitude": 16.0000,
-        "longitude": 120.3000
+        "latitude": 15.8667,
+        "longitude": 120.6167
       },
       "grid": "CLUZ"
     },
@@ -159,8 +159,8 @@
       "grid": "CLUZ"
     },
     "01CURIMAO": {
-      "name": "Curimao Wind",
-      "type": "wind",
+      "name": "Curimao Solar",
+      "type": "solar",
       "operator": "Unknown",
       "capacity_mw": null,
       "location": {
@@ -196,23 +196,25 @@
         "province": "Bataan",
         "region": "Region III",
         "latitude": 14.8333,
-        "longitude": 120.5000
+        "longitude": 120.5000,
+        "notes": "High CF/irradiance discrepancy - coordinates may need verification"
       },
       "grid": "CLUZ"
     },
     "01LAOAG": {
-      "name": "Laoag Wind/Hydro",
+      "name": "Laoag Wind (Bangui Bay + Balaoi/Caunayan aggregate)",
       "type": "wind",
-      "operator": "Unknown",
-      "capacity_mw": null,
+      "operator": "NWPDC/Bayog Wind Power Corp/ACEN",
+      "capacity_mw": 85,
       "location": {
-        "municipality": "Laoag City",
+        "municipality": "Bangui",
         "province": "Ilocos Norte",
         "region": "Region I",
-        "latitude": 18.1986,
-        "longitude": 120.5936
+        "latitude": 18.5250,
+        "longitude": 120.7000
       },
-      "grid": "CLUZ"
+      "grid": "CLUZ",
+      "notes": "Aggregates Bangui Bay Wind (51.9MW) and Balaoi-Caunayan Wind in Pagudpud"
     },
     "01LAOAG_S": {
       "name": "Laoag Solar",
@@ -244,16 +246,16 @@
       "commissioned": 1991
     },
     "01LIMAY": {
-      "name": "Limay Power Plant",
+      "name": "Limay Solar (Morong/Orion aggregate)",
       "type": "solar",
-      "operator": "Unknown",
+      "operator": "Multiple (Bataan Solar, Orion Solar)",
       "capacity_mw": null,
       "location": {
-        "municipality": "Limay",
+        "municipality": "Orion",
         "province": "Bataan",
         "region": "Region III",
-        "latitude": 14.5617,
-        "longitude": 120.6000
+        "latitude": 14.6333,
+        "longitude": 120.5833
       },
       "grid": "CLUZ"
     },
@@ -302,14 +304,14 @@
     "01PAGUDPUD": {
       "name": "Pagudpud Wind Farm (Caparispisan)",
       "type": "wind",
-      "operator": "North Luzon Renewables",
+      "operator": "North Luzon Renewables/Amihan",
       "capacity_mw": 81,
       "location": {
         "municipality": "Pagudpud",
         "province": "Ilocos Norte",
         "region": "Region I",
-        "latitude": 18.5500,
-        "longitude": 120.8167
+        "latitude": 18.6148,
+        "longitude": 120.8051
       },
       "grid": "CLUZ",
       "turbines": 27
@@ -359,8 +361,8 @@
       "grid": "CLUZ"
     },
     "01PASUQUIN": {
-      "name": "Pasuquin Wind",
-      "type": "wind",
+      "name": "Pasuquin Solar",
+      "type": "solar",
       "operator": "Unknown",
       "capacity_mw": null,
       "location": {
@@ -531,14 +533,14 @@
     "04ORMOC_S": {
       "name": "Ormoc Solar",
       "type": "solar",
-      "operator": "First Soleq Energy Corp",
+      "operator": "PSFLI/SEPALCO",
       "capacity_mw": null,
       "location": {
         "municipality": "Ormoc City",
         "province": "Leyte",
         "region": "Region VIII",
-        "latitude": 11.0869,
-        "longitude": 124.6338
+        "latitude": 11.0739,
+        "longitude": 124.6244
       },
       "grid": "CVIS"
     },
@@ -595,7 +597,8 @@
         "province": "Negros Occidental",
         "region": "Region VI",
         "latitude": 10.6765,
-        "longitude": 122.9509
+        "longitude": 122.9509,
+        "notes": "NEEDS VERIFICATION - No major solar plant confirmed in Bacolod City. May be in Talisay, La Carlota, or Silay area. Shows high CF/irradiance discrepancy."
       },
       "grid": "CVIS"
     },
@@ -760,10 +763,26 @@
       },
       "grid": "CVIS"
     },
-    "08STBARBRA_W": {
-      "name": "Santa Barbara Wind",
+    "08BVISTA": {
+      "name": "San Lorenzo Wind Farm (Guimaras)",
       "type": "wind",
-      "operator": "Unknown",
+      "operator": "Guimaras Wind Corporation/TAREC",
+      "capacity_mw": 54,
+      "location": {
+        "municipality": "San Lorenzo",
+        "province": "Guimaras",
+        "region": "Region VI",
+        "latitude": 10.5906,
+        "longitude": 122.6923
+      },
+      "grid": "CVIS",
+      "turbines": 27,
+      "notes": "First wind farm in Visayas, spans 14km across 4 barangays"
+    },
+    "08STBARBRA_W": {
+      "name": "Santa Barbara (NO WIND - deprecated)",
+      "type": "unknown",
+      "operator": "N/A",
       "capacity_mw": null,
       "location": {
         "municipality": "Santa Barbara",
@@ -772,7 +791,8 @@
         "latitude": 10.8167,
         "longitude": 122.5333
       },
-      "grid": "CVIS"
+      "grid": "CVIS",
+      "notes": "Deprecated - use 08BVISTA for San Lorenzo Wind Farm"
     },
     "08STBARBRA_S": {
       "name": "Santa Barbara Solar",
@@ -818,16 +838,16 @@
       "grid": "CMIN"
     },
     "11KIBAW": {
-      "name": "Kibawe Hydro",
-      "type": "hydro",
-      "operator": "Unknown",
+      "name": "Kibawe-Asian GreenEnergy Solar",
+      "type": "solar",
+      "operator": "Asian GreenEnergy Corporation",
       "capacity_mw": null,
       "location": {
         "municipality": "Kibawe",
         "province": "Bukidnon",
         "region": "Region X",
-        "latitude": 7.5667,
-        "longitude": 124.9833
+        "latitude": 7.5550,
+        "longitude": 124.9694
       },
       "grid": "CMIN"
     },
@@ -1008,8 +1028,9 @@
         "municipality": "San Manuel",
         "province": "Pangasinan",
         "region": "Region I",
-        "latitude": 15.8667,
-        "longitude": 120.6167
+        "latitude": 16.0615,
+        "longitude": 120.6726,
+        "notes": "Corrected coordinates - same area as 01SNMANUEL_S"
       },
       "grid": "CLUZ"
     },
@@ -1134,8 +1155,9 @@
         "municipality": "San Manuel",
         "province": "Pangasinan",
         "region": "Region I",
-        "latitude": 15.8667,
-        "longitude": 120.6167
+        "latitude": 16.0615,
+        "longitude": 120.6726,
+        "notes": "Corrected coordinates - actual plant location in San Manuel, not Bugallon"
       },
       "grid": "CLUZ"
     },
@@ -1196,19 +1218,20 @@
       "grid": "CLUZ"
     },
     "02DOLORES": {
-      "name": "Dolores Wind Farm",
+      "name": "Dolores Wind Farm (Pililla)",
       "type": "wind",
-      "operator": "Alternergy Wind One Corporation",
+      "operator": "Pililla Wind Power Corp/Alternergy",
       "capacity_mw": 54,
       "location": {
         "municipality": "Pililla",
         "province": "Rizal",
         "region": "Region IV-A",
-        "latitude": 14.4667,
-        "longitude": 121.3000
+        "latitude": 14.4753,
+        "longitude": 121.3485
       },
       "grid": "CLUZ",
-      "units": ["02MMPP_G01", "03AWOC_G01"]
+      "units": ["02MMPP_G01", "03AWOC_G01"],
+      "notes": "Station also includes Pinugay Solar (02PNGYSOL_G01)"
     },
     "02DOLORES_S": {
       "name": "Dolores Solar",
@@ -1309,9 +1332,9 @@
       "grid": "CLUZ"
     },
     "03CLACA": {
-      "name": "Calatagan/Calaca Power",
-      "type": "solar",
-      "operator": "Solar Philippines",
+      "name": "Calatagan/Calaca Aggregated (Coal+Solar+Battery)",
+      "type": "unknown",
+      "operator": "Mixed",
       "capacity_mw": null,
       "location": {
         "municipality": "Calatagan",
@@ -1514,21 +1537,23 @@
         "province": "Samar",
         "region": "Region VIII",
         "latitude": 11.850,
-        "longitude": 125.117
+        "longitude": 125.117,
+        "notes": "Moderate CF/irradiance discrepancy - coordinates may need verification"
       },
       "grid": "CVIS"
     },
     "04TABANGO_S": {
-      "name": "Tabango Solar",
+      "name": "San Isidro Solar (Tabango substation)",
       "type": "solar",
       "operator": "San Isidro Solar Power Corp.",
       "capacity_mw": 120.003,
       "location": {
-        "municipality": "Tabango",
+        "municipality": "San Isidro",
         "province": "Leyte",
         "region": "Region VIII",
-        "latitude": 11.3000,
-        "longitude": 124.0333
+        "latitude": 11.4145,
+        "longitude": 124.3421,
+        "notes": "Corrected - actual plant in San Isidro (Brgy. Bitaog), connected to Tabango substation"
       },
       "grid": "CVIS"
     },
@@ -1597,8 +1622,8 @@
         "municipality": "Calatrava",
         "province": "Negros Occidental",
         "region": "Region VI",
-        "latitude": 10.600,
-        "longitude": 123.483
+        "latitude": 10.5519,
+        "longitude": 123.4711
       },
       "grid": "CVIS"
     },
@@ -1746,8 +1771,8 @@
         "stations": ["02DOLORES", "02MMPP_G01", "03AWOC_G01"],
         "referenceLocation": {
           "name": "Pililla, Rizal",
-          "latitude": 14.4667,
-          "longitude": 121.3000
+          "latitude": 14.4753,
+          "longitude": 121.3485
         }
       },
       "BENGUET_HYDRO": {
@@ -1770,7 +1795,7 @@
       },
       "PAMPANGA_SOLAR": {
         "description": "Solar plants in Pampanga/Central Luzon",
-        "stations": ["01CLARK", "01MEXICO_S", "01MEXICO_BI", "01MEXICO_S_A", "01MEXICO_S_R"],
+        "stations": ["01CLARK", "01MEXICO_S", "01MEXICO_BI", "01MEXICO_S_A", "01MEXICO_S_R", "01CNCEPCN_S", "01CNCEPCN_BI"],
         "referenceLocation": {
           "name": "Mexico, Pampanga",
           "latitude": 15.067,
@@ -1791,8 +1816,8 @@
         "stations": ["01CAYANGA", "01SNMANUEL_S", "01CRUZDAN_S_B"],
         "referenceLocation": {
           "name": "San Manuel, Pangasinan",
-          "latitude": 15.8667,
-          "longitude": 120.6167
+          "latitude": 16.0615,
+          "longitude": 120.6726
         }
       },
       "ZAMBALES_SOLAR": {
@@ -1802,6 +1827,15 @@
           "name": "San Marcelino, Zambales",
           "latitude": 14.967,
           "longitude": 120.150
+        }
+      },
+      "BATAAN_SOLAR": {
+        "description": "Solar plants in Bataan",
+        "stations": ["01HERMOSA", "01HERMOSA_S", "01LIMAY", "01MARIVELES_S"],
+        "referenceLocation": {
+          "name": "Hermosa, Bataan",
+          "latitude": 14.8333,
+          "longitude": 120.5000
         }
       },
       "BULACAN_SOLAR": {
@@ -1941,7 +1975,7 @@
       },
       "ILOILO_RENEWABLE": {
         "description": "Biomass/Hydro plants in Iloilo",
-        "stations": ["08DINGLE_BI", "08STBARBRA_W", "08STBARBRA_S", "08STBARBRA_H"],
+        "stations": ["08DINGLE_BI", "08STBARBRA_S", "08STBARBRA_H"],
         "referenceLocation": {
           "name": "Santa Barbara, Iloilo",
           "latitude": 10.883,
@@ -1955,6 +1989,15 @@
           "name": "Nabas, Aklan",
           "latitude": 11.8794,
           "longitude": 121.9859
+        }
+      },
+      "GUIMARAS_WIND": {
+        "description": "San Lorenzo Wind Farm in Guimaras Island",
+        "stations": ["08BVISTA"],
+        "referenceLocation": {
+          "name": "San Lorenzo, Guimaras",
+          "latitude": 10.5906,
+          "longitude": 122.6923
         }
       },
       "ILIGAN_HYDRO": {

@@ -35,6 +35,7 @@ export const DEFAULT_LOCATIONS: WeatherLocation[] = [
 ];
 
 // Weather elements to fetch (matching existing format)
+// Now includes extended solar radiation components for better PV modeling
 const HOURLY_ELEMENTS = [
   'datetime',
   'name',
@@ -46,9 +47,12 @@ const HOURLY_ELEMENTS = [
   'windgust',
   'windspeed',
   'cloudcover',
-  'solarradiation',
+  'solarradiation',    // GHI - Global Horizontal Irradiance (W/m²)
   'solarenergy',
-  'uvindex'
+  'uvindex',
+  'dniradiation',      // DNI - Direct Normal Irradiance (W/m²)
+  'difradiation',      // DHI - Diffuse Horizontal Irradiance (W/m²)
+  'ghiradiation'       // GHI - explicit Global Horizontal Irradiance (W/m²)
 ];
 
 // Extended wind elements for wind farm forecasting (hub height ~80-100m)
@@ -62,13 +66,47 @@ const WIND_ELEMENTS = [
   'dew',
   'precip',
   'windgust',
-  'windspeed',
-  'windspeed100',   // Wind speed at 100m (hub height)
-  'winddir100',     // Wind direction at 100m
+  'windspeed',        // 10m wind speed (standard)
+  'winddir',          // 10m wind direction
+  'windspeed50',      // Wind speed at 50m
+  'winddir50',        // Wind direction at 50m
+  'windspeed80',      // Wind speed at 80m
+  'winddir80',        // Wind direction at 80m
+  'windspeed100',     // Wind speed at 100m (hub height)
+  'winddir100',       // Wind direction at 100m
   'cloudcover',
   'solarradiation',
   'solarenergy',
   'uvindex'
+];
+
+// Full elements for per-station fetching (includes all data for analysis)
+const FULL_ELEMENTS = [
+  'datetime',
+  'name',
+  'latitude',
+  'longitude',
+  'temp',
+  'dew',
+  'humidity',
+  'precip',
+  'precipprob',
+  'windgust',
+  'windspeed',
+  'winddir',
+  'windspeed50',
+  'winddir50',
+  'windspeed80',
+  'winddir80',
+  'windspeed100',
+  'winddir100',
+  'pressure',
+  'cloudcover',
+  'visibility',
+  'solarradiation',
+  'solarenergy',
+  'uvindex',
+  'conditions'
 ];
 
 export class WeatherService {
@@ -196,8 +234,10 @@ export class WeatherService {
    * Download weather data for a single day from Visual Crossing API
    */
   private async downloadDayData(location: WeatherLocation, date: string): Promise<string> {
+    // Always use Asia/Manila timezone for Philippine grid consistency
     const url = `${this.baseUrl}${encodeURIComponent(location.name)}/${date}/${date}` +
-                `?unitGroup=metric&contentType=csv&include=hours` +
+                `?unitGroup=metric&contentType=csv&include=hours,remote` +
+                `&timezone=Asia/Manila` +
                 `&elements=${HOURLY_ELEMENTS.join(',')}` +
                 `&key=${this.apiKey}`;
 
@@ -230,10 +270,14 @@ export class WeatherService {
     const locationStr = `${latitude},${longitude}`;
 
     // Try wind elements first if requested
+    // Always use Asia/Manila timezone for Philippine grid consistency
+    const timezone = 'Asia/Manila';
+
     if (useWindElements) {
       try {
         const windUrl = `${this.baseUrl}${locationStr}/${date}/${date}` +
-                        `?unitGroup=metric&contentType=csv&include=hours` +
+                        `?unitGroup=metric&contentType=csv&include=hours,remote` +
+                        `&timezone=${timezone}` +
                         `&elements=${WIND_ELEMENTS.join(',')}` +
                         `&key=${this.apiKey}`;
 
@@ -256,7 +300,8 @@ export class WeatherService {
 
     // Standard elements (fallback or default)
     const url = `${this.baseUrl}${locationStr}/${date}/${date}` +
-                `?unitGroup=metric&contentType=csv&include=hours` +
+                `?unitGroup=metric&contentType=csv&include=hours,remote` +
+                `&timezone=${timezone}` +
                 `&elements=${HOURLY_ELEMENTS.join(',')}` +
                 `&key=${this.apiKey}`;
 
@@ -644,6 +689,143 @@ export class WeatherService {
         }
       }
     }
+  }
+
+  /**
+   * Fetch weather data for a single station using its exact coordinates
+   * Returns full weather elements including all wind heights (10m, 50m, 80m, 100m)
+   * @param stationCode - Station code for caching
+   * @param latitude - Station latitude
+   * @param longitude - Station longitude
+   * @param startDate - Start date YYYY-MM-DD
+   * @param endDate - End date YYYY-MM-DD
+   * @param onProgress - Progress callback
+   * @param useFullElements - If true, fetch all available elements including all wind heights
+   */
+  async fetchStationWeatherData(
+    stationCode: string,
+    latitude: number,
+    longitude: number,
+    startDate: string,
+    endDate: string,
+    onProgress?: (message: string) => void,
+    useFullElements: boolean = true
+  ): Promise<{ success: boolean; data?: string; error?: string; cached: number; downloaded: number }> {
+    const dates = this.getDateRange(startDate, endDate);
+    const allRows: string[] = [];
+    let header: string | null = null;
+    let cachedCount = 0;
+    let downloadedCount = 0;
+
+    // Use station-specific cache directory
+    const cacheKey = `station_${stationCode}`;
+
+    for (const date of dates) {
+      try {
+        let csvData: string | null = null;
+
+        // Check cache first
+        if (this.hasCachedData(cacheKey, date)) {
+          csvData = this.readCachedData(cacheKey, date);
+          cachedCount++;
+        } else {
+          // Download from API using station coordinates
+          onProgress?.(`  Downloading ${stationCode} ${date}...`);
+
+          const locationStr = `${latitude},${longitude}`;
+          const elements = useFullElements ? FULL_ELEMENTS : WIND_ELEMENTS;
+
+          const url = `${this.baseUrl}${locationStr}/${date}/${date}` +
+                      `?unitGroup=metric&contentType=csv&include=hours,remote` +
+                      `&elements=${elements.join(',')}` +
+                      `&key=${this.apiKey}`;
+
+          const response = await axios({
+            method: 'GET',
+            url: url,
+            timeout: 60000
+          });
+
+          csvData = response.data as string;
+          if (csvData) {
+            this.saveCacheData(cacheKey, date, csvData);
+            downloadedCount++;
+          }
+
+          // Small delay to avoid rate limiting
+          await new Promise(resolve => setTimeout(resolve, 150));
+        }
+
+        if (csvData) {
+          const lines = csvData.split('\n').filter(l => l.trim());
+
+          // Keep header from first file
+          if (!header && lines.length > 0) {
+            header = lines[0];
+          }
+
+          // Add data rows (skip header)
+          for (let i = 1; i < lines.length; i++) {
+            allRows.push(lines[i]);
+          }
+        }
+      } catch (error: any) {
+        onProgress?.(`  Error fetching ${stationCode} ${date}: ${error.message}`);
+        // Continue with other dates
+      }
+    }
+
+    if (!header || allRows.length === 0) {
+      return { success: false, error: 'No weather data retrieved', cached: cachedCount, downloaded: downloadedCount };
+    }
+
+    const combinedData = [header, ...allRows].join('\n');
+
+    if (downloadedCount > 0 || cachedCount > 0) {
+      onProgress?.(`  ${stationCode}: ${cachedCount} cached, ${downloadedCount} downloaded`);
+    }
+
+    return { success: true, data: combinedData, cached: cachedCount, downloaded: downloadedCount };
+  }
+
+  /**
+   * Fetch weather data for multiple stations
+   * @param stations - Array of {code, latitude, longitude, type}
+   * @param startDate - Start date YYYY-MM-DD
+   * @param endDate - End date YYYY-MM-DD
+   * @param onProgress - Progress callback
+   */
+  async fetchAllStationsWeather(
+    stations: Array<{ code: string; latitude: number; longitude: number; type: string }>,
+    startDate: string,
+    endDate: string,
+    onProgress?: (message: string) => void
+  ): Promise<Map<string, string>> {
+    const results = new Map<string, string>();
+
+    onProgress?.(`Fetching per-station weather for ${stations.length} stations...`);
+
+    for (let i = 0; i < stations.length; i++) {
+      const station = stations[i];
+      onProgress?.(`[${i + 1}/${stations.length}] ${station.code} (${station.type})`);
+
+      const result = await this.fetchStationWeatherData(
+        station.code,
+        station.latitude,
+        station.longitude,
+        startDate,
+        endDate,
+        onProgress,
+        true  // Use full elements
+      );
+
+      if (result.success && result.data) {
+        results.set(station.code, result.data);
+      }
+    }
+
+    onProgress?.(`Completed: ${results.size}/${stations.length} stations`);
+    return results;
   }
 
   /**

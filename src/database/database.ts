@@ -11,6 +11,15 @@ import {
   OutageProbabilityModel,
   GridRegion
 } from '../types/outage.js';
+import {
+  InterconnectorRecord,
+  InterconnectorStats,
+  InterconnectorModelMetrics
+} from '../types/interconnector.js';
+import {
+  MRECFactors,
+  MRECCalibrationData
+} from '../types/capacityFactor.js';
 
 export interface DatabaseStats {
   demandRecords: number;
@@ -63,6 +72,9 @@ export class DatabaseService {
     // Set schema version if not exists
     const stmt = this.db.prepare('INSERT OR IGNORE INTO schema_info (key, value) VALUES (?, ?)');
     stmt.run('version', String(SCHEMA_VERSION));
+
+    // Initialize interconnector metadata
+    this.initializeInterconnectorMetadata();
   }
 
   // ============ DEMAND RECORDS ============
@@ -937,6 +949,281 @@ export class DatabaseService {
     };
   }
 
+  // ============ INTERCONNECTOR RECORDS ============
+
+  /**
+   * Import interconnector records from RTDHS data
+   */
+  importInterconnectorRecords(
+    records: InterconnectorRecord[],
+    sourceFile?: string
+  ): { inserted: number; updated: number } {
+    const insertStmt = this.db.prepare(`
+      INSERT INTO interconnector_records
+      (datetime, run_time, market_type, interconnector_name, congestion_flag, flow_from, flow_to, overload_mw, source_file)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(datetime, run_time, interconnector_name) DO UPDATE SET
+        congestion_flag = excluded.congestion_flag,
+        flow_from = excluded.flow_from,
+        flow_to = excluded.flow_to,
+        overload_mw = excluded.overload_mw,
+        source_file = excluded.source_file,
+        imported_at = CURRENT_TIMESTAMP
+    `);
+
+    let inserted = 0;
+
+    const transaction = this.db.transaction(() => {
+      for (const record of records) {
+        const datetimeStr = DateTime.fromJSDate(record.timeInterval).toISO();
+        const runTimeStr = DateTime.fromJSDate(record.runTime).toISO();
+
+        insertStmt.run(
+          datetimeStr,
+          runTimeStr,
+          record.marketType,
+          record.hvdcName,
+          record.congestionFlag,
+          record.flowFrom,
+          record.flowTo,
+          record.overloadMW,
+          sourceFile || null
+        );
+        inserted++;
+      }
+    });
+
+    transaction();
+    return { inserted, updated: 0 };
+  }
+
+  /**
+   * Get interconnector records from database
+   */
+  getInterconnectorRecords(
+    startDate?: string,
+    endDate?: string,
+    interconnector?: string
+  ): InterconnectorRecord[] {
+    let sql = 'SELECT * FROM interconnector_records WHERE 1=1';
+    const params: any[] = [];
+
+    if (startDate) {
+      sql += ' AND datetime >= ?';
+      params.push(startDate);
+    }
+    if (endDate) {
+      sql += ' AND datetime <= ?';
+      params.push(endDate);
+    }
+    if (interconnector) {
+      sql += ' AND interconnector_name = ?';
+      params.push(interconnector);
+    }
+
+    sql += ' ORDER BY datetime, interconnector_name';
+
+    const rows = this.db.prepare(sql).all(...params) as any[];
+    return rows.map(row => ({
+      runTime: new Date(row.run_time),
+      marketType: row.market_type,
+      timeInterval: new Date(row.datetime),
+      hvdcName: row.interconnector_name,
+      congestionFlag: row.congestion_flag as 'Y' | 'N',
+      flowFrom: row.flow_from,
+      flowTo: row.flow_to,
+      overloadMW: row.overload_mw,
+      sourceFile: row.source_file
+    }));
+  }
+
+  /**
+   * Get interconnector statistics
+   */
+  getInterconnectorStats(
+    interconnector?: string,
+    startDate?: string,
+    endDate?: string
+  ): InterconnectorStats[] {
+    let sql = `
+      SELECT
+        interconnector_name,
+        COUNT(*) as total_records,
+        SUM(CASE WHEN congestion_flag = 'Y' THEN 1 ELSE 0 END) as congestion_events,
+        AVG(flow_from) as avg_flow_from,
+        AVG(flow_to) as avg_flow_to,
+        MAX(flow_from) as peak_flow_from,
+        MIN(flow_to) as peak_flow_to,
+        MIN(datetime) as start_date,
+        MAX(datetime) as end_date
+      FROM interconnector_records
+      WHERE 1=1
+    `;
+    const params: any[] = [];
+
+    if (startDate) {
+      sql += ' AND datetime >= ?';
+      params.push(startDate);
+    }
+    if (endDate) {
+      sql += ' AND datetime <= ?';
+      params.push(endDate);
+    }
+    if (interconnector) {
+      sql += ' AND interconnector_name = ?';
+      params.push(interconnector);
+    }
+
+    sql += ' GROUP BY interconnector_name';
+
+    const rows = this.db.prepare(sql).all(...params) as any[];
+
+    return rows.map(row => ({
+      interconnector: row.interconnector_name,
+      totalRecords: row.total_records,
+      congestionEvents: row.congestion_events,
+      congestionRate: row.total_records > 0 ? row.congestion_events / row.total_records : 0,
+      avgFlowFrom: row.avg_flow_from,
+      avgFlowTo: row.avg_flow_to,
+      peakFlowFrom: row.peak_flow_from,
+      peakFlowTo: row.peak_flow_to,
+      flowVolatility: 0,  // Calculate separately if needed
+      dateRange: {
+        start: row.start_date,
+        end: row.end_date
+      }
+    }));
+  }
+
+  /**
+   * Save interconnector congestion prediction model
+   */
+  saveInterconnectorModel(
+    name: string,
+    trainingStart: string,
+    trainingEnd: string,
+    trainingSamples: number,
+    metrics: InterconnectorModelMetrics,
+    modelData: string,
+    modelType: string = 'regression',
+    trainingTimeMs?: number
+  ): number {
+    // Deactivate previous models of the same type
+    this.db.prepare('UPDATE interconnector_models SET is_active = 0 WHERE model_type = ?').run(modelType);
+
+    const stmt = this.db.prepare(`
+      INSERT INTO interconnector_models
+      (name, model_type, training_start, training_end, training_samples,
+       accuracy, precision, recall, f1_score, r2_score, mape, mae, rmse,
+       training_time_ms, model_data, is_active)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+    `);
+
+    const result = stmt.run(
+      name,
+      modelType,
+      trainingStart,
+      trainingEnd,
+      trainingSamples,
+      metrics.accuracy,
+      metrics.precision,
+      metrics.recall,
+      metrics.f1Score,
+      metrics.r2Score,
+      metrics.mape,
+      metrics.mae,
+      metrics.rmse,
+      trainingTimeMs || 0,
+      modelData
+    );
+
+    return result.lastInsertRowid as number;
+  }
+
+  /**
+   * Get the active interconnector model
+   */
+  getActiveInterconnectorModel(modelType?: string): any | null {
+    let query = `
+      SELECT * FROM interconnector_models
+      WHERE is_active = 1
+    `;
+
+    if (modelType) {
+      query += ` AND model_type = ?`;
+    }
+
+    query += ` ORDER BY created_at DESC LIMIT 1`;
+
+    const row = modelType
+      ? this.db.prepare(query).get(modelType) as any
+      : this.db.prepare(query).get() as any;
+
+    if (!row) return null;
+
+    return {
+      id: row.id,
+      name: row.name,
+      modelType: row.model_type || 'regression',
+      trainingStart: row.training_start,
+      trainingEnd: row.training_end,
+      trainingSamples: row.training_samples,
+      accuracy: row.accuracy,
+      precision: row.precision,
+      recall: row.recall,
+      f1Score: row.f1_score,
+      r2Score: row.r2_score,
+      mape: row.mape,
+      mae: row.mae,
+      rmse: row.rmse,
+      trainingTimeMs: row.training_time_ms,
+      modelData: row.model_data
+    };
+  }
+
+  /**
+   * Get all interconnector models
+   */
+  getAllInterconnectorModels(): any[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM interconnector_models
+      ORDER BY created_at DESC
+    `).all() as any[];
+
+    return rows.map(row => ({
+      id: row.id,
+      name: row.name,
+      modelType: row.model_type || 'regression',
+      trainingStart: row.training_start,
+      trainingEnd: row.training_end,
+      trainingSamples: row.training_samples,
+      accuracy: row.accuracy,
+      precision: row.precision,
+      recall: row.recall,
+      f1Score: row.f1_score,
+      r2Score: row.r2_score,
+      mape: row.mape,
+      mae: row.mae,
+      rmse: row.rmse,
+      trainingTimeMs: row.training_time_ms,
+      isActive: row.is_active === 1,
+      createdAt: row.created_at
+    }));
+  }
+
+  /**
+   * Initialize interconnector metadata (called during schema setup)
+   */
+  initializeInterconnectorMetadata(): void {
+    const stmt = this.db.prepare(`
+      INSERT OR IGNORE INTO interconnector_metadata (name, from_region, to_region, capacity_mw, notes)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+
+    stmt.run('MINVIS1', 'CMIN', 'CVIS', 450, 'Mindanao-Visayas HVDC');
+    stmt.run('VISLUZ1', 'CVIS', 'CLUZ', 420, 'Visayas-Luzon HVDC');
+  }
+
   // ============ STATS ============
 
   getStats(): DatabaseStats {
@@ -979,6 +1266,260 @@ export class DatabaseService {
     this.db.exec('DELETE FROM models');
     this.db.exec('DELETE FROM training_runs');
     this.vacuum();
+  }
+
+  // ============ MREC FACTORS (Wind Capacity Factor) ============
+
+  /**
+   * Save or update MREC factors for a wind station
+   */
+  saveMRECFactors(factors: MRECFactors): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO mrec_factors
+      (station_code, station_type, mrec_h, mrec_m, mrec_l, v_h, v_l, calibrated, calibration_date, sample_count, stats)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(station_code) DO UPDATE SET
+        station_type = excluded.station_type,
+        mrec_h = excluded.mrec_h,
+        mrec_m = excluded.mrec_m,
+        mrec_l = excluded.mrec_l,
+        v_h = excluded.v_h,
+        v_l = excluded.v_l,
+        calibrated = excluded.calibrated,
+        calibration_date = excluded.calibration_date,
+        sample_count = excluded.sample_count,
+        stats = excluded.stats,
+        updated_at = CURRENT_TIMESTAMP
+    `);
+
+    stmt.run(
+      factors.stationCode,
+      factors.stationType,
+      factors.MRecH,
+      factors.MRecM,
+      factors.MRecL,
+      factors.vH,
+      factors.vL,
+      factors.calibrated ? 1 : 0,
+      factors.calibrationDate?.toISOString() || null,
+      factors.sampleCount || null,
+      factors.stats ? JSON.stringify(factors.stats) : null
+    );
+  }
+
+  /**
+   * Get MREC factors for a station
+   */
+  getMRECFactors(stationCode: string): MRECFactors | null {
+    const row = this.db.prepare(`
+      SELECT * FROM mrec_factors WHERE station_code = ?
+    `).get(stationCode) as any;
+
+    if (!row) return null;
+
+    return {
+      stationCode: row.station_code,
+      stationType: row.station_type,
+      MRecH: row.mrec_h,
+      MRecM: row.mrec_m,
+      MRecL: row.mrec_l,
+      vH: row.v_h,
+      vL: row.v_l,
+      calibrated: row.calibrated === 1,
+      calibrationDate: row.calibration_date ? new Date(row.calibration_date) : undefined,
+      sampleCount: row.sample_count,
+      stats: row.stats ? JSON.parse(row.stats) : undefined
+    };
+  }
+
+  /**
+   * Get all MREC factors
+   */
+  getAllMRECFactors(): MRECFactors[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM mrec_factors ORDER BY station_code
+    `).all() as any[];
+
+    return rows.map(row => ({
+      stationCode: row.station_code,
+      stationType: row.station_type,
+      MRecH: row.mrec_h,
+      MRecM: row.mrec_m,
+      MRecL: row.mrec_l,
+      vH: row.v_h,
+      vL: row.v_l,
+      calibrated: row.calibrated === 1,
+      calibrationDate: row.calibration_date ? new Date(row.calibration_date) : undefined,
+      sampleCount: row.sample_count,
+      stats: row.stats ? JSON.parse(row.stats) : undefined
+    }));
+  }
+
+  /**
+   * Get calibrated MREC factors only
+   */
+  getCalibratedMRECFactors(): MRECFactors[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM mrec_factors WHERE calibrated = 1 ORDER BY station_code
+    `).all() as any[];
+
+    return rows.map(row => ({
+      stationCode: row.station_code,
+      stationType: row.station_type,
+      MRecH: row.mrec_h,
+      MRecM: row.mrec_m,
+      MRecL: row.mrec_l,
+      vH: row.v_h,
+      vL: row.v_l,
+      calibrated: true,
+      calibrationDate: row.calibration_date ? new Date(row.calibration_date) : undefined,
+      sampleCount: row.sample_count,
+      stats: row.stats ? JSON.parse(row.stats) : undefined
+    }));
+  }
+
+  /**
+   * Delete MREC factors for a station
+   */
+  deleteMRECFactors(stationCode: string): void {
+    this.db.prepare('DELETE FROM mrec_factors WHERE station_code = ?').run(stationCode);
+  }
+
+  /**
+   * Clear all MREC factors
+   */
+  clearMRECFactors(): void {
+    this.db.exec('DELETE FROM mrec_factors');
+  }
+
+  // ============ WIND CFAC HISTORY ============
+
+  /**
+   * Import wind capacity factor history for MREC calibration
+   */
+  importWindCFacHistory(
+    data: MRECCalibrationData[],
+    sourceFile?: string
+  ): { inserted: number; updated: number } {
+    const stmt = this.db.prepare(`
+      INSERT INTO wind_cfac_history
+      (datetime, station_code, capacity_factor, wind_speed, wind_speed_100, source_file)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(datetime, station_code) DO UPDATE SET
+        capacity_factor = excluded.capacity_factor,
+        wind_speed = excluded.wind_speed,
+        wind_speed_100 = excluded.wind_speed_100,
+        source_file = excluded.source_file,
+        imported_at = CURRENT_TIMESTAMP
+    `);
+
+    let inserted = 0;
+
+    const transaction = this.db.transaction(() => {
+      for (const record of data) {
+        const dtStr = DateTime.fromJSDate(record.datetime).toISO();
+        stmt.run(
+          dtStr,
+          record.stationCode,
+          record.capacityFactor,
+          record.windSpeed,
+          record.windSpeed,  // Use same value for 100m if not provided separately
+          sourceFile || null
+        );
+        inserted++;
+      }
+    });
+
+    transaction();
+    return { inserted, updated: 0 };
+  }
+
+  /**
+   * Get wind capacity factor history for calibration
+   */
+  getWindCFacHistory(
+    stationCode?: string,
+    startDate?: string,
+    endDate?: string
+  ): MRECCalibrationData[] {
+    let sql = 'SELECT * FROM wind_cfac_history WHERE 1=1';
+    const params: any[] = [];
+
+    if (stationCode) {
+      sql += ' AND station_code = ?';
+      params.push(stationCode);
+    }
+    if (startDate) {
+      sql += ' AND datetime >= ?';
+      params.push(startDate);
+    }
+    if (endDate) {
+      sql += ' AND datetime <= ?';
+      params.push(endDate);
+    }
+
+    sql += ' ORDER BY datetime, station_code';
+
+    const rows = this.db.prepare(sql).all(...params) as any[];
+    return rows.map(row => ({
+      datetime: new Date(row.datetime),
+      stationCode: row.station_code,
+      capacityFactor: row.capacity_factor,
+      windSpeed: row.wind_speed_100 || row.wind_speed
+    }));
+  }
+
+  /**
+   * Get wind stations with historical data
+   */
+  getWindStationsWithHistory(): string[] {
+    const rows = this.db.prepare(`
+      SELECT DISTINCT station_code FROM wind_cfac_history ORDER BY station_code
+    `).all() as any[];
+    return rows.map(r => r.station_code);
+  }
+
+  /**
+   * Get wind capacity factor history statistics
+   */
+  getWindCFacHistoryStats(): {
+    totalRecords: number;
+    stations: number;
+    dateRange: { start: string | null; end: string | null };
+    byStation: { stationCode: string; count: number; avgCF: number }[];
+  } {
+    const total = (this.db.prepare('SELECT COUNT(*) as count FROM wind_cfac_history').get() as any).count;
+    const stations = (this.db.prepare('SELECT COUNT(DISTINCT station_code) as count FROM wind_cfac_history').get() as any).count;
+    const dateRange = this.db.prepare('SELECT MIN(datetime) as start, MAX(datetime) as end FROM wind_cfac_history').get() as any;
+
+    const byStation = this.db.prepare(`
+      SELECT station_code, COUNT(*) as count, AVG(capacity_factor) as avg_cf
+      FROM wind_cfac_history
+      GROUP BY station_code
+      ORDER BY station_code
+    `).all() as any[];
+
+    return {
+      totalRecords: total,
+      stations,
+      dateRange: { start: dateRange?.start || null, end: dateRange?.end || null },
+      byStation: byStation.map(r => ({
+        stationCode: r.station_code,
+        count: r.count,
+        avgCF: r.avg_cf
+      }))
+    };
+  }
+
+  /**
+   * Clear wind capacity factor history
+   */
+  clearWindCFacHistory(stationCode?: string): void {
+    if (stationCode) {
+      this.db.prepare('DELETE FROM wind_cfac_history WHERE station_code = ?').run(stationCode);
+    } else {
+      this.db.exec('DELETE FROM wind_cfac_history');
+    }
   }
 }
 

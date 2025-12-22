@@ -13,7 +13,7 @@ export { WindHybridModel } from './WindHybridModel.js';
 export { SolarHybridModel } from './SolarHybridModel.js';
 
 // MREC model (iPool-style three-tier piecewise)
-export { WindMRECModel, calibrateAllMREC } from './WindMRECModel.js';
+export { WindMRECModel, calibrateAllMREC, calibrateAllMRECCFBased, calibrateAllMRECMLOptimized } from './WindMRECModel.js';
 export { SolarMRECModel, calibrateAllSolarMREC } from './SolarMRECModel.js';
 export type { SolarMRECFactors, SolarMRECCalibrationData } from './SolarMRECModel.js';
 
@@ -50,12 +50,28 @@ export type { EnhancedHybridFactors, EnhancedHybridMetrics } from './WindEnhance
 export { SolarPremiumHybridModel, trainAllSolarPremium } from './SolarPremiumHybridModel.js';
 export type { SolarPremiumMetrics, SolarPremiumWeatherFeatures } from './SolarPremiumHybridModel.js';
 
+// Solar MREC+ML Hybrid (iPool MREC base + ML residual learning)
+export { SolarMRECHybridModel, calibrateAllSolarMRECHybrid } from './SolarMRECHybridModel.js';
+export type { SolarMRECHybridFactors } from './SolarMRECHybridModel.js';
+
+// Solar Seasonal MREC (separate calibration for dry/monsoon/transition seasons)
+export { SolarSeasonalMRECModel, calibrateAllSeasonalSolarMREC, getPhilippineSeason, PhilippineSeason } from './SolarSeasonalMRECModel.js';
+export type { SolarSeasonalMRECFactors, SeasonalMRECFactors, SolarSeasonalCalibrationData } from './SolarSeasonalMRECModel.js';
+
+// Station-specific Bias Corrector
+export { BiasCorrector } from './BiasCorrector.js';
+export type { StationBias, BiasCorrection } from './BiasCorrector.js';
+
 // Profile-based models (stable generation types)
 export { ProfileBasedModel } from './ProfileBasedModel.js';
 export { GeothermalModel } from './GeothermalModel.js';
 export { BiomassModel } from './BiomassModel.js';
 export { HydroModel } from './HydroModel.js';
 export { BatteryModel } from './BatteryModel.js';
+
+// XGBoost regressor for capacity factor models
+export { CFacXGBoostRegressor } from './CFacXGBoostRegressor.js';
+export type { XGBoostRegressorOptions } from './CFacXGBoostRegressor.js';
 
 // Model router
 export { ModelRouter, modelRouter } from './ModelRouter.js';

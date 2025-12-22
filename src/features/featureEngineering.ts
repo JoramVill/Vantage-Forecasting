@@ -1,7 +1,7 @@
 import { DateTime } from 'luxon';
 import { MergedRecord } from '../utils/dataMerger.js';
 import { FeatureVector, TrainingSample } from '../types/index.js';
-import { BASE_TEMP_CELSIUS, PH_HOLIDAYS_2025, FEATURE_NAMES } from '../constants/index.js';
+import { BASE_TEMP_CELSIUS, isPhilippineHoliday, FEATURE_NAMES } from '../constants/index.js';
 
 // Calculate relative humidity from temperature and dew point
 // Using Magnus formula approximation
@@ -35,11 +35,11 @@ export function calculateHeatIndex(temp: number, rh: number): number {
   return Math.round(HI * 10) / 10;
 }
 
-// Check if a date is a holiday
+// Check if a date is a holiday (uses dynamic date-holidays package)
 function isHoliday(date: Date): boolean {
   const dt = DateTime.fromJSDate(date);
   const dateStr = dt.toFormat('yyyy-MM-dd');
-  return PH_HOLIDAYS_2025.includes(dateStr);
+  return isPhilippineHoliday(dateStr);
 }
 
 // Check if hour is daytime (6:00 - 18:00)
@@ -75,10 +75,13 @@ function extractTemporalFeatures(datetime: Date): {
   const isHolidayFlag = isHoliday(datetime) ? 1 : 0;
 
   // Determine day types
-  const isSunday = dayOfWeek === 0 ? 1 : 0;
-  const isSaturday = dayOfWeek === 6 ? 1 : 0;
+  // IMPORTANT: Holidays are treated as Sundays for demand patterns
+  // This means holidays get isSunday=1, isWeekend=1, isWorkday=0
+  const isActualSunday = dayOfWeek === 0;
+  const isSaturday = (dayOfWeek === 6 && !isHolidayFlag) ? 1 : 0; // Saturday only if not a holiday
+  const isSunday = (isActualSunday || isHolidayFlag) ? 1 : 0; // Holidays treated as Sundays
   const isWeekend = (isSunday || isSaturday) ? 1 : 0;
-  // Workday = Mon-Fri AND not a holiday
+  // Workday = Mon-Fri AND not a holiday (already covered by isSunday including holidays)
   const isWorkday = (!isWeekend && !isHolidayFlag) ? 1 : 0;
 
   // Cyclical hour encoding (preserves circular nature: hour 23 is close to hour 0)

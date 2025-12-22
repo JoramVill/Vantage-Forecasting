@@ -1,327 +1,250 @@
 # Documentation Index - iLoad Forecasting Utility
 
-This document provides a comprehensive guide to all documentation files in this project. Start here to find the information you need.
+**Last Updated:** December 22, 2025
+**Version:** 3.1 - Station-Specific Weather & Improved Accuracy
+
+---
 
 ## Quick Navigation
 
 ### For New Users
-1. Start with **README.md** - Overview and quick start
-2. Read **QUICK_START.md** - Minimal setup to get running
-3. Reference **CLI_USAGE.md** - Detailed command documentation
+1. **[QUICK_START.md](QUICK_START.md)** - Get running in 5 minutes
+2. **[CLI_REFERENCE.md](CLI_REFERENCE.md)** - Complete command reference
+3. **[USER_GUIDE.md](USER_GUIDE.md)** - Comprehensive workflows
+
+### For Capacity Factor Forecasting
+1. **[CAPACITY_FACTOR_GUIDE.md](CAPACITY_FACTOR_GUIDE.md)** - **START HERE** for CFac forecasting
+2. **[CLI_REFERENCE.md](CLI_REFERENCE.md)** - `cfac` commands reference
+
+### For Interconnector Analysis
+1. **[interconnector_analysis/INTERCONNECTOR_FINAL_SUMMARY.md](interconnector_analysis/INTERCONNECTOR_FINAL_SUMMARY.md)** - Start here
+2. **[CLI_REFERENCE.md](CLI_REFERENCE.md)** - `interconnector` commands
 
 ### For Developers
-1. Read **TECHNICAL_OVERVIEW.md** - System architecture and design
-2. Review **context.md** - Implementation details and decisions
-3. Check **02_DATA_STRUCTURES.md** - Data format specifications
-
-### For Understanding the Algorithms
-1. Start with **00_ARCHITECTURE_OVERVIEW.md** - High-level design
-2. Deep dive into **01_DETAILED_ALGORITHMS.md** - ML algorithms and formulas
-3. Review **TECHNICAL_OVERVIEW.md** - Implementation specifics
-
-## Documentation Files
-
-### Primary Documentation (Start Here)
-
-#### **README.md** - Main Project Documentation
-- **Purpose**: Comprehensive project overview and user guide
-- **Audience**: All users (beginners to advanced)
-- **Contents**:
-  - Project overview and features
-  - Installation instructions
-  - Quick start examples
-  - CLI command reference
-  - Data format specifications
-  - Model performance metrics
-  - Project structure
-  - Troubleshooting guide
-- **When to use**: First document to read, general reference
-
-#### **QUICK_START.md** - Fast Setup Guide
-- **Purpose**: Get the system running in 5 minutes
-- **Audience**: New users who want to test quickly
-- **Contents**:
-  - Minimal installation steps
-  - Basic usage examples
-  - Sample data locations
-- **When to use**: When you want to see it work immediately
-
-#### **CLI_USAGE.md** - Command-Line Reference
-- **Purpose**: Detailed CLI command documentation
-- **Audience**: Users running the tool
-- **Contents**:
-  - All commands (train, forecast, info)
-  - All options and flags
-  - Usage examples with output
-  - Data file format specifications
-  - Tips and best practices
-- **When to use**: When using the CLI tool, looking up options
-
-### Technical Documentation
-
-#### **TECHNICAL_OVERVIEW.md** - System Architecture
-- **Purpose**: Deep technical explanation of the system
-- **Audience**: Developers, architects, technical users
-- **Contents**:
-  - System architecture diagrams
-  - Module responsibilities
-  - Data flow explanations
-  - Algorithm implementations
-  - Performance characteristics
-  - Error handling strategies
-  - Configuration details
-- **When to use**: Understanding how the system works internally
-
-#### **context.md** - Implementation Context
-- **Purpose**: Development history and implementation decisions
-- **Audience**: Developers, maintainers
-- **Contents**:
-  - Project evolution
-  - Implementation phases (all completed)
-  - Design decisions and rationale
-  - Technical implementation notes
-  - Performance metrics
-  - Future enhancement opportunities
-- **When to use**: Understanding why things were built this way
-
-### Algorithm & Design Documentation
-
-#### **00_ARCHITECTURE_OVERVIEW.md** - High-Level Design
-- **Purpose**: Conceptual architecture and design approach
-- **Audience**: Architects, technical leads
-- **Contents**:
-  - System architecture overview
-  - Component interactions
-  - Design patterns used
-  - Architectural decisions
-- **When to use**: Understanding the overall system design
-
-#### **01_DETAILED_ALGORITHMS.md** - Algorithm Specifications
-- **Purpose**: Detailed ML algorithm explanations
-- **Audience**: Data scientists, ML engineers
-- **Contents**:
-  - Feature engineering formulas
-  - Multiple Linear Regression mathematics
-  - XGBoost algorithm details
-  - Model evaluation metrics
-  - Mathematical formulas and derivations
-- **When to use**: Understanding the ML models in depth
-
-#### **02_DATA_STRUCTURES.md** - Data Format Specifications
-- **Purpose**: Complete data structure and format reference
-- **Audience**: Data engineers, integrators
-- **Contents**:
-  - Input CSV formats (demand, weather)
-  - Output CSV formats (forecasts)
-  - TypeScript interface definitions
-  - Data validation rules
-  - Sample data examples
-- **When to use**: Preparing data files, integrating with other systems
-
-### Implementation Guides
-
-#### **03_IMPLEMENTATION_GUIDE_CSHARP.md** - C# Implementation Guide
-- **Purpose**: Guide for implementing in C#/.NET
-- **Audience**: C# developers
-- **Contents**:
-  - C# architecture recommendations
-  - Class structure for C# implementation
-  - Algorithm translation to C#
-  - Integration with existing C# systems
-- **When to use**: Porting to C#, integrating with .NET applications
-- **Note**: This is a planning/reference document for C# implementation
-
-#### **04_IMPLEMENTATION_ROADMAP.md** - Development Roadmap
-- **Purpose**: Implementation phases and milestones
-- **Audience**: Project managers, developers
-- **Contents**:
-  - Implementation phases
-  - Task breakdown
-  - Milestone tracking
-  - Development timeline
-- **When to use**: Project planning, tracking progress
-
-#### **IMPLEMENTATION_CONTEXT.md** - Historical Implementation Notes
-- **Purpose**: Earlier implementation context (superseded by context.md)
-- **Audience**: Developers interested in project history
-- **Contents**:
-  - Initial planning notes
-  - Early design decisions
-  - Historical context
-- **When to use**: Understanding project evolution
-- **Note**: Most current information is in **context.md**
-
-## Documentation by Use Case
-
-### Use Case: "I want to run the tool"
-1. **README.md** - Installation and overview
-2. **QUICK_START.md** - Fast setup
-3. **CLI_USAGE.md** - Command reference
-
-### Use Case: "I need to prepare data files"
-1. **02_DATA_STRUCTURES.md** - Data format specifications
-2. **CLI_USAGE.md** - Data format section
-3. **README.md** - Data format examples
-
-### Use Case: "I want to understand the ML models"
-1. **01_DETAILED_ALGORITHMS.md** - Algorithm mathematics
-2. **TECHNICAL_OVERVIEW.md** - Implementation details
-3. **README.md** - Model performance comparison
-
-### Use Case: "I need to modify or extend the code"
-1. **TECHNICAL_OVERVIEW.md** - Architecture and modules
-2. **context.md** - Implementation decisions
-3. **00_ARCHITECTURE_OVERVIEW.md** - Design patterns
-
-### Use Case: "I want to implement this in C#"
-1. **03_IMPLEMENTATION_GUIDE_CSHARP.md** - C# implementation guide
-2. **02_DATA_STRUCTURES.md** - Data structures to replicate
-3. **01_DETAILED_ALGORITHMS.md** - Algorithms to implement
-
-### Use Case: "I'm getting errors"
-1. **README.md** - Troubleshooting section
-2. **CLI_USAGE.md** - Error handling section
-3. **TECHNICAL_OVERVIEW.md** - Error handling strategies
-
-### Use Case: "I want to improve model performance"
-1. **README.md** - Tips and best practices
-2. **01_DETAILED_ALGORITHMS.md** - Model details
-3. **TECHNICAL_OVERVIEW.md** - Model tuning section
-4. **context.md** - Future enhancements
-
-## Documentation Organization
-
-```
-iLoad_Forecasting_Utility/
-├── README.md                          # 🟢 START HERE - Main documentation
-├── QUICK_START.md                     # 🟢 Fast setup guide
-├── CLI_USAGE.md                       # 🟢 Command reference
-├── DOCUMENTATION_INDEX.md             # 📋 This file
-│
-├── TECHNICAL_OVERVIEW.md              # 🔧 Architecture & implementation
-├── context.md                         # 🔧 Implementation context
-│
-├── 00_ARCHITECTURE_OVERVIEW.md        # 📐 High-level design
-├── 01_DETAILED_ALGORITHMS.md          # 📐 Algorithm specifications
-├── 02_DATA_STRUCTURES.md              # 📐 Data format reference
-│
-├── 03_IMPLEMENTATION_GUIDE_CSHARP.md  # 🔄 C# implementation guide
-├── 04_IMPLEMENTATION_ROADMAP.md       # 🔄 Development roadmap
-└── IMPLEMENTATION_CONTEXT.md          # 📜 Historical notes
-
-Legend:
-🟢 Essential for users
-🔧 Essential for developers
-📐 Reference documentation
-🔄 Planning/porting guides
-📜 Historical reference
-```
-
-## Documentation Maintenance
-
-### Keeping Documentation Current
-
-When making changes to the codebase, update:
-
-1. **Features Added**:
-   - Update README.md (Features section)
-   - Update TECHNICAL_OVERVIEW.md (Module responsibilities)
-   - Update context.md (Implementation status)
-
-2. **CLI Changes**:
-   - Update CLI_USAGE.md (Command reference)
-   - Update README.md (CLI Reference section)
-   - Update QUICK_START.md (if affecting basic usage)
-
-3. **Algorithm Changes**:
-   - Update 01_DETAILED_ALGORITHMS.md (Algorithm details)
-   - Update TECHNICAL_OVERVIEW.md (Implementation)
-   - Update README.md (Model performance)
-
-4. **Data Format Changes**:
-   - Update 02_DATA_STRUCTURES.md (Format specs)
-   - Update CLI_USAGE.md (Data file formats)
-   - Update README.md (Data formats section)
-
-5. **Performance Improvements**:
-   - Update README.md (Model performance table)
-   - Update context.md (Performance metrics)
-   - Update TECHNICAL_OVERVIEW.md (Performance characteristics)
-
-## Additional Resources
-
-### Sample Data
-Located in `Data Samples/` directory:
-- `DemandHr_Month_Historical_1.csv` - Sample demand data
-- `Weather_hourly_manila_*.csv` - Manila weather data
-- `Weather_hourly_cebu_*.csv` - Cebu weather data
-- `Weather_hourly_davao_*.csv` - Davao weather data
-
-### Generated Documentation
-After running `train` command, check `output/` directory:
-- `regression_report.md` - Regression model performance
-- `xgboost_report.md` - XGBoost model performance
-- `comparison.md` - Model comparison
-
-### Code Documentation
-Well-commented source code in `src/` directory:
-- TypeScript interfaces in `src/types/`
-- Feature engineering in `src/features/`
-- Model implementations in `src/models/`
-
-## Quick Reference Cards
-
-### Installation Quick Reference
-```bash
-# Install
-npm install
-npm run build
-
-# Run info command
-node dist/index.js info -d demand.csv -w weather.csv
-
-# Train models
-node dist/index.js train -d demand.csv -w weather.csv -o ./output
-
-# Generate forecast
-node dist/index.js forecast -d demand.csv -w hist.csv -f forecast.csv -o output.csv
-```
-
-### File Format Quick Reference
-```csv
-# Demand CSV
-DateTimeEnding,CLUZ,CVIS,CMIN
-10/1/2025 01:00,9152,1241,1909
-
-# Weather CSV
-name,latitude,longitude,datetime,temp,dew,precip,windgust,windspeed,cloudcover,solarradiation,solarenergy,uvindex
-Manila,14.596,120.977,2025-10-01T00:00:00,27,26,0,6.8,5.4,99.9,0,0,0
-```
-
-### Model Performance Quick Reference
-| Model | R² Score | MAPE | Use Case |
-|-------|----------|------|----------|
-| XGBoost | 0.92-0.97 | 2-4% | Production forecasting |
-| Regression | 0.85-0.90 | 4-8% | Baseline/interpretability |
-
-## Getting Help
-
-1. **Check the documentation** - Start with this index
-2. **Review sample data** - See `Data Samples/` for examples
-3. **Examine output reports** - Training reports show detailed metrics
-4. **Read error messages** - CLI provides descriptive errors
-5. **Check troubleshooting** - README.md has common issues
-
-## Document Version History
-
-- **v1.0** (Dec 3, 2025) - Initial comprehensive documentation
-  - Complete user documentation (README, QUICK_START, CLI_USAGE)
-  - Complete technical documentation (TECHNICAL_OVERVIEW, context)
-  - Complete reference documentation (00-04 series)
-  - This documentation index
+1. **[TECHNICAL_OVERVIEW.md](TECHNICAL_OVERVIEW.md)** - Architecture and design
+2. **[APPLICATION_OVERVIEW.md](APPLICATION_OVERVIEW.md)** - System capabilities
 
 ---
 
-**Note**: This documentation represents a complete, production-ready system. All implementation phases are marked as COMPLETED in context.md. The system is ready for deployment and use.
+## Core Documentation
 
-For the most current project overview, always start with **README.md**.
+### Essential User Guides
+
+| Document | Description | When to Use |
+|----------|-------------|-------------|
+| **[QUICK_START.md](QUICK_START.md)** | Fast setup guide | First-time setup |
+| **[USER_GUIDE.md](USER_GUIDE.md)** | Comprehensive workflows | Detailed usage |
+| **[CLI_REFERENCE.md](CLI_REFERENCE.md)** | All commands with options | Command lookup |
+| **[CAPACITY_FACTOR_GUIDE.md](CAPACITY_FACTOR_GUIDE.md)** | CFac forecasting guide | Renewable forecasting |
+
+### Technical Documentation
+
+| Document | Description | Audience |
+|----------|-------------|----------|
+| **[METHODOLOGY_REPORT.md](METHODOLOGY_REPORT.md)** | Forecasting methodology | Clients, Stakeholders |
+| **[TECHNICAL_OVERVIEW.md](TECHNICAL_OVERVIEW.md)** | System architecture | Developers |
+| **[APPLICATION_OVERVIEW.md](APPLICATION_OVERVIEW.md)** | Capabilities overview | Stakeholders |
+
+---
+
+## Capacity Factor Forecasting (v2.0)
+
+### Key Features
+- **Weather-Only MREC Hybrid** for wind (75.8% MAPE)
+- **Physics+ML Hybrid** for solar (~16% MAPE)
+- **Profile-based models** for hydro, geothermal, biomass, battery
+- Automatic 100m hub-height wind data for wind farms
+
+### Quick Command
+```bash
+# Generate optimal forecast using best models for each station type
+node dist/index.js cfac forecast2 \
+  -t "Data Samples/Capacity Factor" \
+  -s 2025-11-01 \
+  -e 2025-12-31 \
+  -o output/cfac_optimal_forecast.csv
+```
+
+### Model Performance
+
+| Station Type | Model | Test MAPE |
+|--------------|-------|-----------|
+| Wind | Weather-Only MREC Hybrid | ~75.8% |
+| Solar | Physics+ML Hybrid | ~16% |
+| Geothermal | Profile-based | ~15-35% |
+| Others | Profile-based | varies |
+
+See **[CAPACITY_FACTOR_GUIDE.md](CAPACITY_FACTOR_GUIDE.md)** for details.
+
+---
+
+## Interconnector Constraint Prediction
+
+**Location:** `Documents/interconnector_analysis/`
+
+### Start Here
+**[INTERCONNECTOR_FINAL_SUMMARY.md](interconnector_analysis/INTERCONNECTOR_FINAL_SUMMARY.md)**
+
+### Analysis Reports
+- **[NOVEMBER_2025_CONSTRAINT_WEATHER_REPORT.md](interconnector_analysis/NOVEMBER_2025_CONSTRAINT_WEATHER_REPORT.md)** - Latest analysis
+- **[CONSTRAINT_DETECTION_FINDINGS.md](interconnector_analysis/CONSTRAINT_DETECTION_FINDINGS.md)** - Detection algorithm
+- **[MODEL_COMPARISON_REPORT.md](interconnector_analysis/MODEL_COMPARISON_REPORT.md)** - Model evaluation
+
+---
+
+## Documentation by Use Case
+
+### "I want to forecast capacity factors"
+1. **[CAPACITY_FACTOR_GUIDE.md](CAPACITY_FACTOR_GUIDE.md)** - Complete guide
+2. **[CLI_REFERENCE.md](CLI_REFERENCE.md)** - `cfac forecast2` command
+3. Use `cfac mrec compare3` to validate wind models
+
+### "I want to run demand forecasting"
+1. **[QUICK_START.md](QUICK_START.md)** - Fast setup
+2. **[USER_GUIDE.md](USER_GUIDE.md)** - Detailed workflows
+3. **[CLI_REFERENCE.md](CLI_REFERENCE.md)** - `train` and `forecast` commands
+
+### "I want to predict interconnector constraints"
+1. **[INTERCONNECTOR_FINAL_SUMMARY.md](interconnector_analysis/INTERCONNECTOR_FINAL_SUMMARY.md)**
+2. **[CLI_REFERENCE.md](CLI_REFERENCE.md)** - `interconnector` commands
+
+### "I need to prepare data files"
+1. **[CLI_REFERENCE.md](CLI_REFERENCE.md)** - Data format specifications
+2. **[USER_GUIDE.md](USER_GUIDE.md)** - Data management
+
+---
+
+## File Organization
+
+```
+iLoad_Forecasting_Utility/
+├── Documents/
+│   ├── DOCUMENTATION_INDEX.md      # This file
+│   │
+│   ├── QUICK_START.md              # Fast setup
+│   ├── USER_GUIDE.md               # Comprehensive guide
+│   ├── CLI_REFERENCE.md            # Command reference
+│   ├── CAPACITY_FACTOR_GUIDE.md    # CFac forecasting (NEW)
+│   │
+│   ├── APPLICATION_OVERVIEW.md     # System overview
+│   ├── TECHNICAL_OVERVIEW.md       # Architecture
+│   │
+│   ├── interconnector_analysis/    # Interconnector docs
+│   │   ├── INTERCONNECTOR_FINAL_SUMMARY.md
+│   │   ├── CONSTRAINT_DETECTION_FINDINGS.md
+│   │   ├── MODEL_COMPARISON_REPORT.md
+│   │   └── ...
+│   │
+│   └── planning/                   # Archived planning docs
+│       ├── INTERCONNECTOR_IMPLEMENTATION_PLAN.md
+│       ├── iPool_Renewable_Generation_Analysis.md
+│       └── MREC_ML_HYBRID_DESIGN.md
+```
+
+---
+
+## Quick Command Reference
+
+### Capacity Factor Forecasting
+```bash
+# Optimal forecast (recommended)
+iload cfac forecast2 -t "Data Samples/Capacity Factor" -s 2025-12-01 -e 2025-12-31 -o cfac.csv
+
+# Compare wind models
+iload cfac mrec compare3 -t "Data Samples/Capacity Factor" -a "Data Samples/Capacity Factor"
+
+# Evaluate forecast
+iload cfac evaluate -f forecast.csv -a actual.csv
+```
+
+### Demand Forecasting
+```bash
+# Train model
+iload train -d demand.csv -w weather.csv --model hybrid
+
+# Generate forecast
+iload forecast -s 2025-12-01 -e 2025-12-07 --use-db -o forecast.csv
+```
+
+### Interconnector Analysis
+```bash
+# Import data
+iload interconnector import -f "RTDHS_folder" --start 2025-11-01 --end 2025-11-30
+
+# Train model
+iload interconnector train --start 2025-07-01 --end 2025-11-30 --model xgboost
+```
+
+---
+
+## Feature Status
+
+| Feature | Status | Documentation |
+|---------|--------|---------------|
+| Demand Forecasting | Production | USER_GUIDE.md |
+| **Capacity Factor (v2)** | **Production** | **CAPACITY_FACTOR_GUIDE.md** |
+| Weather Integration | Production | CLI_REFERENCE.md |
+| Database Management | Production | CLI_REFERENCE.md |
+| Outage Analysis | Production | CLI_REFERENCE.md |
+| Interconnector Detection | Complete | interconnector_analysis/ |
+| Interconnector Prediction | Experimental | INTERCONNECTOR_FINAL_SUMMARY.md |
+
+---
+
+## Recent Updates
+
+### December 22, 2025 - Station-Specific Weather & Improved Accuracy (v2.1)
+
+**Performance Improvements:**
+- Solar MAPE improved from 59.6% to ~16% (measured against actual data)
+- Fixed `--solar-seasonal` flag over-forecasting bug (01LIMAY +296% error)
+
+**New Features:**
+- Station-specific weather coordinates for 117 stations
+- Optimal wind height per station (10m-100m based on correlation analysis)
+- XGBoost option for ML residual learning
+- Asymmetric loss option for under-prediction penalty
+
+**New Documentation:**
+- **[METHODOLOGY_REPORT.md](METHODOLOGY_REPORT.md)** - Comprehensive forecasting methodology
+
+### December 11, 2025 - Optimal Capacity Factor Forecasting (v2.0)
+
+**New Features:**
+- `cfac forecast2` command with optimal model selection
+- Weather-Only MREC Hybrid for wind (21% improvement over baseline)
+- Physics+ML Hybrid for solar
+- `cfac mrec compare3` for three-way model comparison
+
+**New Documentation:**
+- **[CAPACITY_FACTOR_GUIDE.md](CAPACITY_FACTOR_GUIDE.md)** - Comprehensive CFac guide
+- Updated **[CLI_REFERENCE.md](CLI_REFERENCE.md)** with new commands
+
+**Key Finding:**
+Weather-only ML features avoid overfitting across monsoon season transitions, achieving 75.8% MAPE vs 110.8% for temporal features.
+
+---
+
+## Archived/Planning Documents
+
+Located in `Documents/planning/`:
+- **INTERCONNECTOR_IMPLEMENTATION_PLAN.md** - Original implementation plan
+- **iPool_Renewable_Generation_Analysis.md** - iPool algorithm analysis
+- **MREC_ML_HYBRID_DESIGN.md** - Hybrid model design notes
+
+These documents are historical and may not reflect current implementation.
+
+---
+
+## Getting Help
+
+1. **Check documentation** - Start with this index
+2. **Quick start** - See [QUICK_START.md](QUICK_START.md)
+3. **Command help** - Run `iload <command> --help`
+4. **Troubleshooting** - See [USER_GUIDE.md](USER_GUIDE.md)
+5. **Sample data** - Check `Data Samples/` directory
+
+---
+
+**Documentation Version:** 3.1
+**Last Updated:** December 22, 2025

@@ -31,6 +31,9 @@ export class WindHybridModel {
    *
    * @param samples - Training samples with actual capacity factors and weather data
    * @returns Training metrics (MAPE and R² score)
+   *
+   * Uses recency weighting: recent samples are duplicated more times
+   * to give them higher influence on the model.
    */
   async train(samples: CFacTrainingSample[]): Promise<{ mape: number; r2Score: number }> {
     if (samples.length === 0) {
@@ -64,8 +67,15 @@ export class WindHybridModel {
       // Extract features for residual prediction
       const features = this.extractResidualFeatures(sample, physicsCFac);
 
-      X.push(features);
-      Y.push([residual]);
+      // Convert weight to duplication count (1-5 copies based on weight 0.1-1.0)
+      // weight=1.0 → 5 copies, weight=0.5 → 3 copies, weight=0.1 → 1 copy
+      const weight = sample.weight ?? 1.0;
+      const copies = Math.max(1, Math.round(weight * 5));
+
+      for (let c = 0; c < copies; c++) {
+        X.push([...features]);
+        Y.push([residual]);
+      }
     }
 
     // Train residual model

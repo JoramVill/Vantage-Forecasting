@@ -298,6 +298,10 @@ export class CapacityFactorService {
    * @param cfacData - Raw capacity factor data
    * @param weatherData - Map of datetime ISO string -> weather features
    * @param progressCallback - Progress callback function
+   *
+   * Training data filtering:
+   * - Excludes Nov 1-16 (transition period between monsoon and dry season)
+   * - Applies exponential decay weighting (recent data gets higher weight)
    */
   async buildTrainingSamples(
     cfacData: RawCapacityFactorData[],
@@ -309,8 +313,24 @@ export class CapacityFactorService {
     const samples: CFacTrainingSample[] = [];
     const grouped = this.groupByStation(cfacData);
 
+    // Find the most recent datetime for recency weighting
+    let maxTimestamp = 0;
+    for (const [, records] of grouped) {
+      for (const record of records) {
+        const ts = record.datetime.getTime();
+        if (ts > maxTimestamp) maxTimestamp = ts;
+      }
+    }
+    const maxDate = DateTime.fromMillis(maxTimestamp);
+
+    // Recency decay parameter: λ = 0.02 per day (half-life ≈ 35 days)
+    // weight = e^(-λ × days_ago)
+    // This gives: 0 days ago = 1.0, 14 days = 0.76, 30 days = 0.55, 120 days = 0.09
+    const DECAY_LAMBDA = 0.02;
+
     let processedStations = 0;
     const totalStations = grouped.size;
+    let excludedNov1to16 = 0;
 
     for (const [stationCode, records] of grouped) {
       processedStations++;
@@ -334,6 +354,14 @@ export class CapacityFactorService {
 
         // Get weather data for this datetime
         const dt = DateTime.fromJSDate(datetime);
+
+        // FILTER: Exclude Nov 1-16 (monsoon-to-dry transition period)
+        // This period has inconsistent patterns that hurt model generalization
+        if (dt.month === 11 && dt.day >= 1 && dt.day <= 16) {
+          excludedNov1to16++;
+          continue;
+        }
+
         // Use simple format for datetime key to avoid timezone mismatches
         const weatherKey = dt.toFormat('yyyy-MM-dd HH:mm');
         const weather = weatherData.get(weatherKey);
@@ -356,6 +384,10 @@ export class CapacityFactorService {
         const month = dt.month;
         const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
 
+        // Calculate recency weight using exponential decay
+        const daysAgo = maxDate.diff(dt, 'days').days;
+        const weight = Math.exp(-DECAY_LAMBDA * daysAgo);
+
         samples.push({
           datetime,
           stationCode,
@@ -367,7 +399,8 @@ export class CapacityFactorService {
           month,
           isWeekend,
           cfacLag1h,
-          cfacLag24h
+          cfacLag24h,
+          weight
         });
       }
 
@@ -376,7 +409,22 @@ export class CapacityFactorService {
       }
     }
 
-    progressCallback?.(`Built ${samples.length} training samples`);
+    progressCallback?.(`Built ${samples.length} training samples (excluded ${excludedNov1to16} Nov 1-16 records)`);
+
+    // Log weight distribution (avoid spread operator for large arrays to prevent stack overflow)
+    if (samples.length > 0) {
+      let minWeight = Infinity;
+      let maxWeight = -Infinity;
+      let sumWeight = 0;
+      for (const sample of samples) {
+        const w = sample.weight || 1.0;
+        if (w < minWeight) minWeight = w;
+        if (w > maxWeight) maxWeight = w;
+        sumWeight += w;
+      }
+      const avgWeight = sumWeight / samples.length;
+      progressCallback?.(`  Recency weights: min=${minWeight.toFixed(3)}, max=${maxWeight.toFixed(3)}, avg=${avgWeight.toFixed(3)}`);
+    }
 
     return samples;
   }
@@ -536,6 +584,71 @@ export class CapacityFactorService {
    */
   getCluster(clusterId: string): ClusterLocation | undefined {
     return this.clusters.get(clusterId);
+  }
+
+  /**
+   * Get station-specific ClusterLocation objects for wind stations
+   * Uses each station's exact coordinates instead of cluster reference location
+   * This improves wind forecast accuracy since wind is highly location-sensitive
+   */
+  getWindStationLocations(): ClusterLocation[] {
+    const windStations = this.stationsByType.get(StationType.WIND) || [];
+    const locations: ClusterLocation[] = [];
+
+    for (const stationCode of windStations) {
+      const metadata = this.stations.get(stationCode);
+      if (metadata?.location?.latitude && metadata?.location?.longitude) {
+        locations.push({
+          clusterId: `WIND_${stationCode}`,  // Use station code as cluster ID
+          name: `${stationCode} (${metadata.location.municipality}, ${metadata.location.province})`,
+          latitude: metadata.location.latitude,
+          longitude: metadata.location.longitude,
+          stationCodes: [stationCode]  // Only this one station
+        });
+      }
+    }
+
+    return locations;
+  }
+
+  /**
+   * Get station-specific coordinates for a wind station
+   */
+  getStationLocation(stationCode: string): { latitude: number; longitude: number; name: string } | undefined {
+    const metadata = this.stations.get(stationCode);
+    if (metadata?.location?.latitude && metadata?.location?.longitude) {
+      return {
+        latitude: metadata.location.latitude,
+        longitude: metadata.location.longitude,
+        name: `${stationCode} (${metadata.location.municipality}, ${metadata.location.province})`
+      };
+    }
+    return undefined;
+  }
+
+  /**
+   * Get station-specific ClusterLocation objects for solar stations
+   * Uses each station's exact coordinates instead of cluster reference location
+   * This improves solar forecast accuracy since solar radiation/cloud cover is location-sensitive
+   */
+  getSolarStationLocations(): ClusterLocation[] {
+    const solarStations = this.stationsByType.get(StationType.SOLAR) || [];
+    const locations: ClusterLocation[] = [];
+
+    for (const stationCode of solarStations) {
+      const metadata = this.stations.get(stationCode);
+      if (metadata?.location?.latitude && metadata?.location?.longitude) {
+        locations.push({
+          clusterId: `SOLAR_${stationCode}`,  // Use station code as cluster ID
+          name: `${stationCode} (${metadata.location.municipality}, ${metadata.location.province})`,
+          latitude: metadata.location.latitude,
+          longitude: metadata.location.longitude,
+          stationCodes: [stationCode]  // Only this one station
+        });
+      }
+    }
+
+    return locations;
   }
 
   /**

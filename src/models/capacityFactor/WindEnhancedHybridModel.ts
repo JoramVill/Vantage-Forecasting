@@ -30,6 +30,8 @@ export interface EnhancedHybridFactors {
   boostExponent: number;       // Exponent for power law boost (default ~0.5)
   // Multiplicative correction parameters
   baseMultiplier: number;      // Global scaling factor to address underestimation
+  // Fallback flag - if true, use MREC only (ML made things worse)
+  useMRECOnly: boolean;
   // Statistics
   meanActualCF: number;
   meanPredictedCF: number;
@@ -55,6 +57,7 @@ export class WindEnhancedHybridModel {
   private static readonly FEATURE_NAMES = [
     'mrec_base',           // MREC prediction as anchor
     'wind_normalized',     // Wind speed / rated speed
+    'gust_normalized',     // Gust speed / rated speed (key for peaks)
     'gust_ratio',          // Turbulence indicator
     'temp_deviation',      // Air density proxy
     'cloud_cover',         // Atmospheric conditions
@@ -131,6 +134,7 @@ export class WindEnhancedHybridModel {
   private buildFeatures(mrecBase: number, weather: CFacWeatherFeatures): number[] {
     const windSpeed = this.getWindSpeed(weather);
     const ratedSpeed = this.factors?.ratedWindSpeed ?? 15;
+    const gustSpeed = weather.windGust ?? windSpeed;
 
     // Gust ratio: indicates turbulence
     const gustRatio = weather.windGust && windSpeed > 0.1
@@ -143,6 +147,7 @@ export class WindEnhancedHybridModel {
     return [
       mrecBase,                              // MREC prediction as anchor
       windSpeed / ratedSpeed,                // Normalized wind speed
+      gustSpeed / ratedSpeed,                // Normalized gust speed (key for peaks)
       gustRatio,                             // Turbulence indicator
       tempDeviation,                         // Air density proxy
       (weather.cloudCover ?? 50) / 100,      // Atmospheric conditions
@@ -153,9 +158,10 @@ export class WindEnhancedHybridModel {
    * Train the enhanced hybrid model
    *
    * @param samples - Training samples with actual capacity factors
+   * @param asymmetricLoss - If true, penalize under-predictions more heavily (2:1 ratio)
    * @returns Training metrics
    */
-  train(samples: CFacTrainingSample[]): EnhancedHybridMetrics {
+  train(samples: CFacTrainingSample[], asymmetricLoss: boolean = false): EnhancedHybridMetrics {
     const stationSamples = samples.filter(s => s.stationCode === this.stationCode);
 
     if (stationSamples.length < 50) {
@@ -205,15 +211,17 @@ export class WindEnhancedHybridModel {
 
     // Step 4: Determine physics boost parameters
     // If we're underestimating, use a positive boost exponent
-    const boostExponent = correctionRatio > 1 ? Math.min((correctionRatio - 1) * 0.5, 0.5) : 0;
+    // Increased cap from 0.5 to 0.8 to better capture peak capacity factors
+    const boostExponent = correctionRatio > 1 ? Math.min((correctionRatio - 1) * 0.6, 0.8) : 0;
 
-    // Step 5: Store factors
+    // Step 5: Store factors (initially assume ML will help)
     this.factors = {
       stationCode: this.stationCode,
       physicsBoostEnabled: boostExponent > 0.01,
       ratedWindSpeed: Math.max(ratedWindSpeed, 8), // Minimum 8 m/s
       boostExponent,
       baseMultiplier: correctionRatio,
+      useMRECOnly: false,  // Will be set to true if ML degrades performance
       meanActualCF: meanActual,
       meanPredictedCF: meanMrec,
       correctionRatio,
@@ -236,11 +244,20 @@ export class WindEnhancedHybridModel {
         // Target is the multiplicative correction needed
         const correction = actual / boostedPred;
         // Clamp to reasonable range to avoid extreme values
-        const clampedCorrection = Math.max(0.2, Math.min(3.0, correction));
+        // Increased to 5.0 - training data shows peaks can require 4x+ multiplier
+        const clampedCorrection = Math.max(0.2, Math.min(5.0, correction));
 
         const features = this.buildFeatures(mrecPred, sample.weather);
         featureMatrix.push(features);
         correctionTargets.push(clampedCorrection);
+
+        // Asymmetric loss: duplicate samples where model under-predicts (correction > 1)
+        // This makes the model learn to correct under-predictions more aggressively
+        if (asymmetricLoss && correction > 1.0 && actual > 0.1) {
+          // Duplicate this sample once more (2x total weight for under-predictions)
+          featureMatrix.push([...features]);
+          correctionTargets.push(clampedCorrection);
+        }
       }
     }
 
@@ -273,11 +290,18 @@ export class WindEnhancedHybridModel {
     const enhancedMAPE = enhancedValidCount > 0 ? (enhancedErrorSum / enhancedValidCount) * 100 : 0;
     const improvement = mrecOnlyMAPE > 0 ? ((mrecOnlyMAPE - enhancedMAPE) / mrecOnlyMAPE) * 100 : 0;
 
+    // Step 8: Fallback check - if Enhanced makes things worse, use MREC only
+    if (enhancedMAPE > mrecOnlyMAPE && this.factors) {
+      this.factors.useMRECOnly = true;
+      this.residualModel = null;  // Clear ML model to save memory
+      console.warn(`  ⚠️  ${this.stationCode}: Enhanced degraded performance (${mrecOnlyMAPE.toFixed(1)}% → ${enhancedMAPE.toFixed(1)}%), falling back to MREC-only`);
+    }
+
     return {
       stationCode: this.stationCode,
       mrecOnlyMAPE,
-      enhancedMAPE,
-      improvement,
+      enhancedMAPE: this.factors?.useMRECOnly ? mrecOnlyMAPE : enhancedMAPE,  // Report MREC if fallback
+      improvement: this.factors?.useMRECOnly ? 0 : improvement,
       correctionRatio,
       sampleCount: stationSamples.length,
     };
@@ -301,6 +325,11 @@ export class WindEnhancedHybridModel {
       return Math.max(0, Math.min(1, mrecBase));
     }
 
+    // Fallback: If ML was found to degrade performance, use MREC only
+    if (this.factors.useMRECOnly) {
+      return Math.max(0, Math.min(1, mrecBase));
+    }
+
     // Step 2: Apply physics boost (smooth, no hard cutoffs)
     const boosted = this.applyPhysicsBoost(mrecBase, windSpeed);
 
@@ -312,15 +341,18 @@ export class WindEnhancedHybridModel {
       const features = this.buildFeatures(mrecBase, weather);
       const mlCorrection = this.residualModel.predict([features])[0][0];
       // Clamp ML correction to reasonable range
-      const clampedCorrection = Math.max(0.5, Math.min(2.0, mlCorrection));
+      // Increased upper bound to 4.0 - training data shows peaks can require 4x+ multiplier
+      // when high CF occurs at moderate wind speeds (MREC linear assumption breaks down)
+      const clampedCorrection = Math.max(0.3, Math.min(4.0, mlCorrection));
       prediction *= clampedCorrection;
     }
 
     // Step 5: Smooth high-wind handling (instead of hard cutout)
     // Gradually reduce CF as it approaches unrealistic values
-    if (prediction > 0.95) {
+    // Raised threshold from 0.95 to 0.98 to allow more peak expression
+    if (prediction > 0.98) {
       // Soft cap: asymptotically approach 1.0
-      prediction = 0.95 + 0.05 * (1 - Math.exp(-(prediction - 0.95) * 10));
+      prediction = 0.98 + 0.02 * (1 - Math.exp(-(prediction - 0.98) * 15));
     }
 
     // Clamp to valid range
@@ -406,11 +438,12 @@ export class WindEnhancedHybridModel {
 export async function trainAllEnhancedHybrid(
   mrecFactors: MRECFactors[],
   samples: CFacTrainingSample[],
+  asymmetricLoss: boolean = false,
   progressCallback?: (msg: string) => void
 ): Promise<Map<string, WindEnhancedHybridModel>> {
   const models = new Map<string, WindEnhancedHybridModel>();
 
-  progressCallback?.(`Training Enhanced Hybrid for ${mrecFactors.length} wind stations`);
+  progressCallback?.(`Training Enhanced Hybrid for ${mrecFactors.length} wind stations${asymmetricLoss ? ' (with asymmetric loss)' : ''}`);
 
   let totalMrecMAPE = 0;
   let totalEnhancedMAPE = 0;
@@ -423,7 +456,7 @@ export async function trainAllEnhancedHybrid(
     const model = new WindEnhancedHybridModel(factors.stationCode);
     model.loadMRECFactors(factors);
 
-    const metrics = model.train(samples);
+    const metrics = model.train(samples, asymmetricLoss);
 
     if (metrics.sampleCount >= 50) {
       totalMrecMAPE += metrics.mrecOnlyMAPE;

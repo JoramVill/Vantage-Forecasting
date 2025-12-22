@@ -11,11 +11,11 @@ import { RegressionModel } from './models/regressionModel.js';
 import { XGBoostModel } from './models/xgboostModel.js';
 import { HybridModel } from './models/hybridModel.js';
 import { writeForecastCsv, writeModelReport, writeMetricsSummary } from './writers/index.js';
-import { REGION_MAPPINGS } from './constants/index.js';
+import { REGION_MAPPINGS, isPhilippineHoliday } from './constants/index.js';
 import { ForecastResult, TrainingSample, RawWeatherData } from './types/index.js';
 import { createWeatherService, DEFAULT_LOCATIONS, capacityFactorService, ClusterLocation } from './services/index.js';
 import { getDatabase, closeDatabase, DatabaseStats, StoredModel } from './database/index.js';
-import { ModelRouter, WindMRECModel, calibrateAllMREC, WindMRECHybridModel, trainAllMRECHybrid, WindWeatherHybridModel, trainAllWeatherHybrid, SolarMRECModel, calibrateAllSolarMREC, SolarHybridModel, SolarIrradianceModel, WindShearModel, trainAllWindShear, WindCubicModel, calibrateAllCubic, WindWeibullModel, calibrateAllWeibull, WindBiasCorrectionModel, calibrateAllBiasCorrection, WindEnhancedHybridModel, trainAllEnhancedHybrid } from './models/capacityFactor/index.js';
+import { ModelRouter, WindMRECModel, calibrateAllMREC, calibrateAllMRECCFBased, calibrateAllMRECMLOptimized, WindMRECHybridModel, trainAllMRECHybrid, WindWeatherHybridModel, trainAllWeatherHybrid, SolarMRECModel, calibrateAllSolarMREC, SolarHybridModel, SolarIrradianceModel, SolarMRECHybridModel, calibrateAllSolarMRECHybrid, SolarSeasonalMRECModel, calibrateAllSeasonalSolarMREC, WindShearModel, trainAllWindShear, WindCubicModel, calibrateAllCubic, WindWeibullModel, calibrateAllWeibull, WindBiasCorrectionModel, calibrateAllBiasCorrection, WindEnhancedHybridModel, trainAllEnhancedHybrid, BiasCorrector } from './models/capacityFactor/index.js';
 import type { SolarMRECCalibrationData } from './models/capacityFactor/index.js';
 import { MRECCalibrationData, WindCFacMethodology } from './types/capacityFactor.js';
 import { CFacWeatherFeatures, StationType, getStationTypeFromCode, CFacForecastResult, CFacTrainingSample } from './types/capacityFactor.js';
@@ -204,6 +204,9 @@ program
   .option('--model <type>', 'Model type: regression, xgboost, or hybrid', 'regression')
   .option('--use-saved', 'Use saved model from database instead of training new one')
   .option('--scale <percent>', 'Scale forecast by percentage (e.g., 5 for +5%, -3 for -3%)', '0')
+  .option('--scale-workday <percent>', 'Scale workday forecasts by percentage (overrides --scale for workdays)')
+  .option('--scale-weekend <percent>', 'Scale weekend (Sat/Sun) forecasts by percentage (overrides --scale for weekends)')
+  .option('--scale-holiday <percent>', 'Scale holiday forecasts by percentage (highest priority, overrides other scales)')
   .option('--growth <percent>', 'Daily demand growth rate for hybrid model (e.g., 0.01 for 0.01%/day)', '0')
   .option('--cache <dir>', 'Weather cache directory', './weather_cache')
   .option('--use-db', 'Use demand data from database instead of file')
@@ -514,10 +517,43 @@ program
       }
 
       // Generate forecasts
-      const scaleFactor = 1 + (parseFloat(options.scale) / 100);
+      // Parse scale factors (day-type-specific scales override the general scale)
+      const baseScaleFactor = 1 + (parseFloat(options.scale) / 100);
+      const scaleWorkday = options.scaleWorkday !== undefined ? 1 + (parseFloat(options.scaleWorkday) / 100) : null;
+      const scaleWeekend = options.scaleWeekend !== undefined ? 1 + (parseFloat(options.scaleWeekend) / 100) : null;
+      const scaleHoliday = options.scaleHoliday !== undefined ? 1 + (parseFloat(options.scaleHoliday) / 100) : null;
+
+      // Helper function to get the appropriate scale factor for a given date/time
+      const getScaleFactor = (dateTime: Date): number => {
+        const dt = DateTime.fromJSDate(dateTime);
+        const dateStr = dt.toFormat('yyyy-MM-dd');
+        const dow = dt.weekday; // 1=Mon, 7=Sun
+
+        // Priority: holiday > weekend > workday > base
+        if (scaleHoliday !== null && isPhilippineHoliday(dateStr)) {
+          return scaleHoliday;
+        }
+        if (scaleWeekend !== null && (dow === 6 || dow === 7)) {
+          return scaleWeekend;
+        }
+        if (scaleWorkday !== null && dow >= 1 && dow <= 5 && !isPhilippineHoliday(dateStr)) {
+          return scaleWorkday;
+        }
+        return baseScaleFactor;
+      };
+
       console.log('\n🔮 Generating forecasts...');
       if (parseFloat(options.scale) !== 0) {
-        console.log(`  📈 Scaling factor: ${scaleFactor.toFixed(4)} (${parseFloat(options.scale) > 0 ? '+' : ''}${options.scale}%)`);
+        console.log(`  📈 Base scaling factor: ${baseScaleFactor.toFixed(4)} (${parseFloat(options.scale) > 0 ? '+' : ''}${options.scale}%)`);
+      }
+      if (scaleWorkday !== null) {
+        console.log(`  📈 Workday scaling: ${scaleWorkday.toFixed(4)} (${parseFloat(options.scaleWorkday) > 0 ? '+' : ''}${options.scaleWorkday}%)`);
+      }
+      if (scaleWeekend !== null) {
+        console.log(`  📈 Weekend scaling: ${scaleWeekend.toFixed(4)} (${parseFloat(options.scaleWeekend) > 0 ? '+' : ''}${options.scaleWeekend}%)`);
+      }
+      if (scaleHoliday !== null) {
+        console.log(`  📈 Holiday scaling: ${scaleHoliday.toFixed(4)} (${parseFloat(options.scaleHoliday) > 0 ? '+' : ''}${options.scaleHoliday}%)`);
       }
       const forecasts: ForecastResult[] = [];
 
@@ -621,7 +657,7 @@ program
             const daysAhead = Math.max(0, currentDate.diff(forecastStart, 'days').days);
 
             const hybridPrediction = (model as HybridModel).predictForRegion(features, region, daysAhead);
-            prediction = (hybridPrediction ?? similarDaysDemand ?? lastKnownDemand.get(region)?.value ?? 0) * scaleFactor;
+            prediction = (hybridPrediction ?? similarDaysDemand ?? lastKnownDemand.get(region)?.value ?? 0) * getScaleFactor(datetime);
           } else {
             // Regression/XGBoost model
             const basePrediction = (model as RegressionModel | XGBoostModel).predict(features);
@@ -631,15 +667,15 @@ program
 
             if (hasActualLag1h) {
               // Use model prediction directly when we have real lag data
-              prediction = basePrediction * scaleFactor;
+              prediction = basePrediction * getScaleFactor(datetime);
             } else {
               // When lag1h is estimated (from similar days), blend model prediction with similar days
               // This prevents the cold start death spiral by anchoring to historical patterns
               const blendRatio = 0.5; // 50% model, 50% similar days
               if (similarDaysDemand !== undefined) {
-                prediction = (basePrediction * blendRatio + similarDaysDemand * (1 - blendRatio)) * scaleFactor;
+                prediction = (basePrediction * blendRatio + similarDaysDemand * (1 - blendRatio)) * getScaleFactor(datetime);
               } else {
-                prediction = basePrediction * scaleFactor;
+                prediction = basePrediction * getScaleFactor(datetime);
               }
             }
           }
@@ -1661,14 +1697,103 @@ cfacCommand
   .requiredOption('-o, --output <file>', 'Output forecast CSV file')
   .option('--stations <file>', 'Stations JSON file', 'src/data/stations.json')
   .option('--cache <dir>', 'Weather cache directory', './weather_cache')
+  .option('--bias-correction', 'Enable station-specific bias correction (learns from training data)')
+  .option('--asymmetric-loss', 'Use asymmetric loss function that penalizes under-predictions 2x more')
+  .option('--use-xgboost', 'Use XGBoost instead of linear regression for residual models (better non-linear learning)')
+  .option('--scale <percent>', 'Scale ALL forecast outputs by percentage (e.g., 5 for +5%, -3 for -3%)', '0')
+  .option('--scale-solar <percent>', 'Scale SOLAR forecast outputs by percentage', '0')
+  .option('--scale-wind <percent>', 'Scale WIND forecast outputs by percentage', '0')
+  .option('--auto-calibrate [days]', 'Auto-calibrate using N days before forecast start (default: 14)', '14')
+  .option('--no-auto-calibrate', 'Disable auto-calibration')
+  .option('--exclude-outages', 'Exclude outage periods (zeros) from training data per station (default: true)')
+  .option('--no-exclude-outages', 'Include all data including outages in training')
+  .option('--training-end <date>', 'Training data cutoff date (YYYY-MM-DD) - exclude data after this date')
+  .option('--solar-physics-only', 'Use Physics-only model for solar (no ML residual) with learned bias correction')
+  .option('--solar-weather-confidence', 'Use weather-confidence weighted ML for solar (reduce ML residual when weather is clear)')
+  .option('--solar-mrec', 'Use iPool-style MREC three-tier model for solar (per-station calibration)')
+  .option('--solar-mrec-hybrid', 'Use MREC + ML residual hybrid for solar (best of both)')
+  .option('--solar-seasonal', 'Use Seasonal MREC for solar (separate calibration for dry/monsoon/transition seasons)')
+  .option('--solar-seasonal-adaptive', 'Seasonal adaptive: trains separate dry/wet models, reduces ML weight in dry season (Nov-Apr)')
   .action(async (options) => {
     try {
       const apiKey = getApiKey();
       const weatherService = createWeatherService(apiKey, options.cache);
 
+      const asymmetricLoss = options.asymmetricLoss || false;
+      const useXGBoost = options.useXgboost || false;
+      const solarPhysicsOnly = options.solarPhysicsOnly || false;
+      const solarWeatherConfidence = options.solarWeatherConfidence || false;
+      const solarMrec = options.solarMrec || false;
+      const solarMrecHybrid = options.solarMrecHybrid || false;
+      const solarSeasonal = options.solarSeasonal || false;
+      const solarSeasonalAdaptive = options.solarSeasonalAdaptive || false;
+
+      // Parse scale factors (manual overrides)
+      const scaleAll = parseFloat(options.scale) / 100;  // Convert percent to decimal
+      const scaleSolar = parseFloat(options.scaleSolar) / 100;
+      const scaleWind = parseFloat(options.scaleWind) / 100;
+
+      // Parse auto-calibrate option
+      const autoCalibrate = options.autoCalibrate !== false;  // Default true unless --no-auto-calibrate
+      const calibrationDays = autoCalibrate ? parseInt(options.autoCalibrate) || 14 : 0;
+
+      // Parse exclude-outages option (default: true)
+      const excludeOutages = options.excludeOutages !== false;  // Default true unless --no-exclude-outages
+
+      // Calculate calibration period dates
+      const forecastStartDate = DateTime.fromISO(options.start);
+      const calibrationEndDate = forecastStartDate.minus({ days: 1 });  // Day before forecast starts
+      const calibrationStartDate = calibrationEndDate.minus({ days: calibrationDays - 1 });
+
+      // Initialize scale factors (will be updated by auto-calibration if enabled)
+      let effectiveSolarScale = 1 + (scaleSolar !== 0 ? scaleSolar : scaleAll);
+      let effectiveWindScale = 1 + (scaleWind !== 0 ? scaleWind : scaleAll);
+      let effectiveOtherScale = 1 + scaleAll;
+      let calibratedSolarBias = 0;
+      let calibratedWindBias = 0;
+
+      // Per-hour solar scale factors (key: hour 0-23, value: scale factor)
+      // Initialized to 1.0 for all hours, will be updated by auto-calibration
+      const solarHourlyScale = new Map<number, number>();
+      for (let h = 0; h < 24; h++) {
+        solarHourlyScale.set(h, 1.0);
+      }
+
       console.log('\n═══════════════════════════════════════════════════════════════════════════════');
       console.log('          OPTIMAL CAPACITY FACTOR FORECASTING (v2)                              ');
-      console.log('   Wind: Weather-Only MREC Hybrid | Solar: Physics+ML Hybrid                    ');
+      if (solarSeasonalAdaptive) {
+        console.log('   Wind: Weather-Only MREC Hybrid | Solar: SEASONAL ADAPTIVE (dry/wet ML models)');
+      } else if (solarSeasonal) {
+        // DEPRECATED: --solar-seasonal now uses Physics+ML Hybrid (same as default)
+        // The Seasonal MREC model caused severe over-forecasting (+296% errors)
+        console.log('   Wind: Weather-Only MREC Hybrid | Solar: Physics+ML Hybrid                    ');
+        console.log('   NOTE: --solar-seasonal is deprecated; using default hybrid model             ');
+      } else if (solarMrecHybrid) {
+        console.log('   Wind: Weather-Only MREC Hybrid | Solar: iPool MREC + ML Residual (per-station)');
+      } else if (solarMrec) {
+        console.log('   Wind: Weather-Only MREC Hybrid | Solar: iPool MREC Three-Tier (per-station)   ');
+      } else if (solarPhysicsOnly) {
+        console.log('   Wind: Weather-Only MREC Hybrid | Solar: Physics-Only + Bias Correction        ');
+      } else if (solarWeatherConfidence) {
+        console.log('   Wind: Weather-Only MREC Hybrid | Solar: Physics+ML (Weather-Confidence Scaled)');
+      } else {
+        console.log('   Wind: Weather-Only MREC Hybrid | Solar: Physics+ML Hybrid                    ');
+      }
+      if (useXGBoost) {
+        console.log('   ML MODEL: XGBoost (gradient boosting)                                         ');
+      }
+      if (asymmetricLoss) {
+        console.log('   ASYMMETRIC LOSS: Under-predictions penalized 2x                               ');
+      }
+      if (autoCalibrate) {
+        console.log(`   AUTO-CALIBRATE: ${calibrationDays} days (${calibrationStartDate.toISODate()} to ${calibrationEndDate.toISODate()})`);
+      }
+      if (!autoCalibrate && (effectiveSolarScale !== 1 || effectiveWindScale !== 1 || effectiveOtherScale !== 1)) {
+        console.log('   MANUAL SCALING:');
+        if (effectiveSolarScale !== 1) console.log(`      Solar: ${((effectiveSolarScale - 1) * 100).toFixed(1)}%`);
+        if (effectiveWindScale !== 1) console.log(`      Wind:  ${((effectiveWindScale - 1) * 100).toFixed(1)}%`);
+        if (effectiveOtherScale !== 1 && scaleAll !== 0) console.log(`      Other: ${((effectiveOtherScale - 1) * 100).toFixed(1)}%`);
+      }
       console.log('═══════════════════════════════════════════════════════════════════════════════\n');
 
       // Load station metadata
@@ -1680,10 +1805,20 @@ cfacCommand
 
       // Parse training data (capacity factors)
       console.log('\n📚 Parsing capacity factor training data...');
-      const cfacData = await capacityFactorService.parseCapacityFactorDirectory(
+      let cfacData = await capacityFactorService.parseCapacityFactorDirectory(
         options.training,
         (msg) => console.log(`   ${msg}`)
       );
+
+      // Apply training-end date filter if specified
+      const trainingEndDate = options.trainingEnd ? DateTime.fromISO(options.trainingEnd).endOf('day').toJSDate() : null;
+      if (trainingEndDate) {
+        const originalCount = cfacData.length;
+        cfacData = cfacData.filter(record => record.datetime <= trainingEndDate);
+        console.log(`\n📅 Training data cutoff: ${options.trainingEnd}`);
+        console.log(`   Original records: ${originalCount.toLocaleString()}`);
+        console.log(`   After filtering:  ${cfacData.length.toLocaleString()} (removed ${(originalCount - cfacData.length).toLocaleString()} records after cutoff)`);
+      }
 
       // Get unique station codes from training data
       const trainingStations = capacityFactorService.getStationCodes(cfacData);
@@ -1718,11 +1853,140 @@ cfacCommand
       console.log(`   🔋 Battery:         ${batteryStations.length} stations → Profile-based`);
       console.log(`   ❓ Unknown:         ${unknownStations.length} stations → Profile-based`);
 
-      // Identify wind clusters for 100m hub-height data
-      const windClusterIds = new Set<string>();
-      for (const stationCode of windStations) {
-        const clusterId = capacityFactorService.getClusterForStation(stationCode);
-        if (clusterId) windClusterIds.add(clusterId);
+      // ═══════════════════════════════════════════════════════════════════════════
+      // FILTER OUT OUTAGE PERIODS (if enabled)
+      // ═══════════════════════════════════════════════════════════════════════════
+      let filteredCfacData = cfacData;
+
+      if (excludeOutages) {
+        console.log('\n🔍 Filtering out outage periods from training data...');
+
+        const originalCount = cfacData.length;
+        const stationOutageStats = new Map<string, { original: number; filtered: number; removed: number }>();
+
+        // Group data by station
+        const dataByStation = new Map<string, typeof cfacData>();
+        for (const record of cfacData) {
+          if (!dataByStation.has(record.stationCode)) {
+            dataByStation.set(record.stationCode, []);
+          }
+          dataByStation.get(record.stationCode)!.push(record);
+        }
+
+        // For each station, detect and filter outage periods
+        filteredCfacData = [];
+        for (const [stationCode, records] of dataByStation) {
+          const stationType = getStationTypeFromCode(stationCode);
+          const originalStationCount = records.length;
+
+          // Sort by datetime
+          records.sort((a, b) => a.datetime.getTime() - b.datetime.getTime());
+
+          // Detect outage hours (consecutive zeros that indicate plant is offline)
+          // Different logic per station type:
+          // - Wind/Geothermal: CF=0 is an outage (should run 24/7)
+          // - Solar: CF=0 during daylight (6am-6pm) is an outage, nighttime zeros are normal
+          // - Hydro/Biomass/Battery: Exclude consecutive zero streaks > 24 hours
+
+          let filteredRecords: typeof records;
+
+          if (stationType === StationType.WIND || stationType === StationType.GEOTHERMAL) {
+            // Wind and Geothermal should never be zero when operating
+            filteredRecords = records.filter(r => r.capacityFactor > 0);
+          } else if (stationType === StationType.SOLAR) {
+            // Solar: only filter daytime zeros (6am-6pm local time)
+            filteredRecords = records.filter(r => {
+              const hour = r.datetime.getHours();
+              const isDaylight = hour >= 6 && hour <= 18;
+              // Keep nighttime zeros, but filter daytime zeros
+              if (!isDaylight) return true;  // Keep nighttime records
+              return r.capacityFactor > 0;   // Filter daytime zeros
+            });
+          } else {
+            // Hydro/Biomass/Battery: Detect outage streaks (>24 consecutive zeros)
+            // Mark records that are part of outage streaks
+            const outageIndices = new Set<number>();
+            let zeroStreakStart = -1;
+
+            for (let i = 0; i < records.length; i++) {
+              if (records[i].capacityFactor === 0) {
+                if (zeroStreakStart === -1) zeroStreakStart = i;
+              } else {
+                if (zeroStreakStart !== -1) {
+                  const streakLength = i - zeroStreakStart;
+                  // If streak > 24 hours, mark as outage
+                  if (streakLength > 24) {
+                    for (let j = zeroStreakStart; j < i; j++) {
+                      outageIndices.add(j);
+                    }
+                  }
+                }
+                zeroStreakStart = -1;
+              }
+            }
+            // Handle streak at end
+            if (zeroStreakStart !== -1) {
+              const streakLength = records.length - zeroStreakStart;
+              if (streakLength > 24) {
+                for (let j = zeroStreakStart; j < records.length; j++) {
+                  outageIndices.add(j);
+                }
+              }
+            }
+
+            filteredRecords = records.filter((_, i) => !outageIndices.has(i));
+          }
+
+          const removedCount = originalStationCount - filteredRecords.length;
+          if (removedCount > 0) {
+            stationOutageStats.set(stationCode, {
+              original: originalStationCount,
+              filtered: filteredRecords.length,
+              removed: removedCount
+            });
+          }
+
+          filteredCfacData.push(...filteredRecords);
+        }
+
+        const totalRemoved = originalCount - filteredCfacData.length;
+        console.log(`   Removed ${totalRemoved} outage records (${(100 * totalRemoved / originalCount).toFixed(1)}% of data)`);
+
+        // Show stations with significant outages
+        const significantOutages = [...stationOutageStats.entries()]
+          .filter(([, stats]) => stats.removed > 100)
+          .sort((a, b) => b[1].removed - a[1].removed)
+          .slice(0, 10);
+
+        if (significantOutages.length > 0) {
+          console.log('   Stations with significant outages filtered:');
+          for (const [code, stats] of significantOutages) {
+            const pctRemoved = (100 * stats.removed / stats.original).toFixed(0);
+            console.log(`      ${code}: ${stats.removed} records removed (${pctRemoved}%)`);
+          }
+        }
+      }
+
+      // Get station-specific locations for wind (more accurate than cluster centers)
+      const windStationLocations = capacityFactorService.getWindStationLocations();
+      const windStationClusterIds = new Set<string>();
+      for (const loc of windStationLocations) {
+        windStationClusterIds.add(loc.clusterId);  // e.g., "WIND_01BURGOS"
+      }
+      console.log(`\n🌬️  Using station-specific coordinates for ${windStationLocations.length} wind farms`);
+      for (const loc of windStationLocations) {
+        console.log(`   📍 ${loc.stationCodes[0]}: ${loc.latitude.toFixed(4)}, ${loc.longitude.toFixed(4)}`);
+      }
+
+      // Get station-specific locations for solar (more accurate than cluster centers)
+      const solarStationLocations = capacityFactorService.getSolarStationLocations();
+      const solarStationClusterIds = new Set<string>();
+      for (const loc of solarStationLocations) {
+        solarStationClusterIds.add(loc.clusterId);  // e.g., "SOLAR_01CLARK"
+      }
+      console.log(`\n☀️  Using station-specific coordinates for ${solarStationLocations.length} solar plants`);
+      for (const loc of solarStationLocations) {
+        console.log(`   📍 ${loc.stationCodes[0]}: ${loc.latitude.toFixed(4)}, ${loc.longitude.toFixed(4)}`);
       }
 
       // Helper: Proper CSV parsing
@@ -1754,20 +2018,49 @@ cfacCommand
 
       // Fetch weather data for training period
       console.log('\n🌤️  Fetching weather data for training period...');
-      const trainClusterWeatherCsv = await weatherService.fetchAllClusters(
-        clusters,
+
+      // Fetch weather for WIND stations using station-specific coordinates (100m hub height)
+      console.log('   Fetching wind station-specific weather (100m hub height)...');
+      const trainWindWeatherCsv = await weatherService.fetchAllClusters(
+        windStationLocations,  // Individual wind station locations
         trainStart,
         trainEnd,
         (msg) => console.log(`   ${msg}`),
-        windClusterIds
+        windStationClusterIds  // All are wind clusters - need 100m data
       );
 
-      // Parse training weather into cluster -> timestamp -> features
+      // Fetch weather for SOLAR stations using station-specific coordinates
+      console.log('   Fetching solar station-specific weather...');
+      const trainSolarWeatherCsv = await weatherService.fetchAllClusters(
+        solarStationLocations,  // Individual solar station locations
+        trainStart,
+        trainEnd,
+        (msg) => console.log(`   ${msg}`),
+        new Set<string>()  // Not wind - no 100m data needed
+      );
+
+      // Fetch weather for other stations using cluster coordinates
+      console.log('   Fetching cluster weather for other station types...');
+      const nonWindSolarClusters = clusters.filter(c =>
+        !windStationLocations.some(w => w.stationCodes.some(s => c.stationCodes.includes(s))) &&
+        !solarStationLocations.some(sol => sol.stationCodes.some(s => c.stationCodes.includes(s)))
+      );
+      const trainClusterWeatherCsv = await weatherService.fetchAllClusters(
+        nonWindSolarClusters,
+        trainStart,
+        trainEnd,
+        (msg) => console.log(`   ${msg}`),
+        new Set<string>()  // No wind clusters here
+      );
+
+      // Parse training weather into cluster/station -> timestamp -> features
       const trainClusterWeather = new Map<string, Map<number, CFacWeatherFeatures>>();
-      for (const [clusterId, csvData] of trainClusterWeatherCsv) {
+
+      // Helper to parse weather CSV
+      const parseWeatherCsv = (csvData: string): Map<number, CFacWeatherFeatures> => {
         const weatherMap = new Map<number, CFacWeatherFeatures>();
         const lines = csvData.split('\n').filter(l => l.trim());
-        if (lines.length < 2) continue;
+        if (lines.length < 2) return weatherMap;
 
         const headers = parseCSVLine(lines[0]).map(h => h.toLowerCase());
         const colIdx = (name: string) => headers.indexOf(name);
@@ -1795,9 +2088,25 @@ cfacCommand
 
           weatherMap.set(ts, weather);
         }
-        trainClusterWeather.set(clusterId, weatherMap);
+        return weatherMap;
+      };
+
+      // Parse wind station-specific weather
+      for (const [clusterId, csvData] of trainWindWeatherCsv) {
+        trainClusterWeather.set(clusterId, parseWeatherCsv(csvData));
       }
-      console.log(`   Loaded weather for ${trainClusterWeather.size} clusters`);
+
+      // Parse solar station-specific weather
+      for (const [clusterId, csvData] of trainSolarWeatherCsv) {
+        trainClusterWeather.set(clusterId, parseWeatherCsv(csvData));
+      }
+
+      // Parse cluster weather for other stations
+      for (const [clusterId, csvData] of trainClusterWeatherCsv) {
+        trainClusterWeather.set(clusterId, parseWeatherCsv(csvData));
+      }
+
+      console.log(`   Loaded weather: ${trainWindWeatherCsv.size} wind + ${trainSolarWeatherCsv.size} solar stations + ${trainClusterWeatherCsv.size} clusters`);
 
       // ═══════════════════════════════════════════════════════════════════════════
       // TRAIN OPTIMAL MODELS FOR EACH TYPE
@@ -1814,13 +2123,12 @@ cfacCommand
       const mrecCalibrationData: MRECCalibrationData[] = [];
       const windTrainingSamples: CFacTrainingSample[] = [];
 
-      for (const record of cfacData) {
+      for (const record of filteredCfacData) {
         if (!windStations.includes(record.stationCode)) continue;
 
-        const clusterId = capacityFactorService.getClusterForStation(record.stationCode);
-        if (!clusterId) continue;
-
-        const weatherMap = trainClusterWeather.get(clusterId);
+        // Use station-specific weather for wind (WIND_${stationCode})
+        const windClusterId = `WIND_${record.stationCode}`;
+        const weatherMap = trainClusterWeather.get(windClusterId);
         if (!weatherMap) continue;
 
         const ts = record.datetime.getTime();
@@ -1850,8 +2158,8 @@ cfacCommand
         });
       }
 
-      // Calibrate MREC models
-      const mrecModels = await calibrateAllMREC(mrecCalibrationData, (msg) => console.log(`      ${msg}`));
+      // Calibrate MREC models using ML-optimized grid search (finds optimal vH/vL per station)
+      const mrecModels = await calibrateAllMRECMLOptimized(mrecCalibrationData, (msg: string) => console.log(`      ${msg}`));
 
       // Extract MREC factors for hybrid
       const mrecFactorsList: import('./types/capacityFactor.js').MRECFactors[] = [];
@@ -1862,29 +2170,52 @@ cfacCommand
         }
       }
 
-      // Train Weather-Only MREC Hybrid
-      const windHybridModels = await trainAllWeatherHybrid(
+      // Train Enhanced Hybrid (multiplicative correction - better for peaks)
+      const windHybridModels = await trainAllEnhancedHybrid(
         mrecFactorsList,
         windTrainingSamples,
-        (msg) => console.log(`      ${msg}`)
+        asymmetricLoss,
+        (msg: string) => console.log(`      ${msg}`)
       );
-      console.log(`      ✅ Trained ${windHybridModels.size} Wind Weather-Only Hybrid models`);
+      console.log(`      ✅ Trained ${windHybridModels.size} Wind Enhanced Hybrid models${asymmetricLoss ? ' (asymmetric loss)' : ''}`);
 
       // ─────────────────────────────────────────────────────────────────────────────
-      // 2. SOLAR: Physics+ML Hybrid (SolarHybridModel)
+      // 2. SOLAR: Physics+ML Hybrid or Physics-Only with Bias Correction or MREC models
       // ─────────────────────────────────────────────────────────────────────────────
-      console.log('\n   [2/2] ☀️  SOLAR: Training Physics+ML Hybrid...');
+      if (solarSeasonal) {
+        // DEPRECATED: --solar-seasonal now uses Physics+ML Hybrid (same as default)
+        console.log('\n   [2/2] ☀️  SOLAR: Training Physics+ML Hybrid (--solar-seasonal deprecated)...');
+      } else if (solarMrecHybrid) {
+        console.log('\n   [2/2] ☀️  SOLAR: iPool MREC + ML Residual (per-station calibration)...');
+      } else if (solarMrec) {
+        console.log('\n   [2/2] ☀️  SOLAR: iPool MREC Three-Tier (per-station calibration)...');
+      } else if (solarPhysicsOnly) {
+        console.log('\n   [2/2] ☀️  SOLAR: Physics-Only + Bias Correction...');
+      } else if (solarSeasonalAdaptive) {
+        console.log('\n   [2/2] ☀️  SOLAR: Seasonal Adaptive (dry/wet ML models, reduced dry weight)...');
+      } else {
+        console.log('\n   [2/2] ☀️  SOLAR: Training Physics+ML Hybrid...');
+      }
 
       const solarHybridModels = new Map<string, SolarHybridModel>();
-      for (const stationCode of solarStations) {
-        const clusterId = capacityFactorService.getClusterForStation(stationCode);
-        if (!clusterId) continue;
+      const solarPhysicsModels = new Map<string, SolarIrradianceModel>();
+      const solarBiasCorrections = new Map<string, number>();
+      const solarMrecModels = new Map<string, SolarMRECModel>();
+      const solarMrecHybridModels = new Map<string, SolarMRECHybridModel>();
+      const solarSeasonalModels = new Map<string, SolarSeasonalMRECModel>();
 
-        const weatherMap = trainClusterWeather.get(clusterId);
+      // Collect all station samples for batch MREC calibration
+      const allSolarSamples: CFacTrainingSample[] = [];
+      const solarMrecCalibrationData: SolarMRECCalibrationData[] = [];
+
+      for (const stationCode of solarStations) {
+        // Use station-specific weather for solar (SOLAR_${stationCode})
+        const solarClusterId = `SOLAR_${stationCode}`;
+        const weatherMap = trainClusterWeather.get(solarClusterId);
         if (!weatherMap) continue;
 
         // Build training samples for this station
-        const stationRecords = cfacData.filter(r => r.stationCode === stationCode);
+        const stationRecords = filteredCfacData.filter(r => r.stationCode === stationCode);
         const stationSamples: CFacTrainingSample[] = [];
 
         for (const record of stationRecords) {
@@ -1893,7 +2224,7 @@ cfacCommand
           if (!weather) continue;
 
           const dt = record.datetime;
-          stationSamples.push({
+          const sample: CFacTrainingSample = {
             stationCode: record.stationCode,
             datetime: record.datetime,
             stationType: StationType.SOLAR,
@@ -1903,16 +2234,111 @@ cfacCommand
             dayOfWeek: dt.getDay(),
             month: dt.getMonth() + 1,
             isWeekend: dt.getDay() === 0 || dt.getDay() === 6
-          });
+          };
+          stationSamples.push(sample);
+          allSolarSamples.push(sample);
+
+          // Build MREC calibration data (daylight hours with positive irradiance)
+          if ((solarMrec || solarMrecHybrid || solarSeasonal) && dt.getHours() >= 6 && dt.getHours() <= 18 && weather.solarRadiation > 0) {
+            solarMrecCalibrationData.push({
+              datetime: record.datetime,
+              stationCode: record.stationCode,
+              capacityFactor: record.capacityFactor,
+              solarIrradiance: weather.solarRadiation
+            });
+          }
         }
 
         if (stationSamples.length >= 50) {
-          const model = new SolarHybridModel(stationCode);
-          model.train(stationSamples);
-          solarHybridModels.set(stationCode, model);
+          if (solarMrecHybrid || solarMrec) {
+            // MREC models will be calibrated after this loop (batch calibration)
+          } else if (solarSeasonal) {
+            // DEPRECATED: --solar-seasonal now trains hybrid models (same as default)
+            const model = new SolarHybridModel(stationCode);
+            await model.train(stationSamples, asymmetricLoss);
+            solarHybridModels.set(stationCode, model);
+          } else if (solarPhysicsOnly) {
+            // Physics-only mode: create model and calculate bias correction
+            const physicsModel = new SolarIrradianceModel();
+            solarPhysicsModels.set(stationCode, physicsModel);
+
+            // Calculate bias from training data (daylight hours only)
+            let biasSum = 0;
+            let biasCount = 0;
+            for (const sample of stationSamples) {
+              const hour = sample.datetime.getHours();
+              if (hour < 6 || hour > 18) continue;
+              if (sample.actualCFac < 0.01) continue;
+
+              const physicsPred = physicsModel.predict(sample.weather.solarRadiation, sample.weather.temperature);
+              if (physicsPred > 0.01) {
+                biasSum += sample.actualCFac - physicsPred;
+                biasCount++;
+              }
+            }
+
+            const avgBias = biasCount > 0 ? biasSum / biasCount : 0;
+            solarBiasCorrections.set(stationCode, avgBias);
+          } else if (solarSeasonalAdaptive) {
+            // Seasonal Adaptive mode: train separate dry/wet models, reduce ML weight in dry season
+            const model = new SolarHybridModel(stationCode);
+            await model.train(stationSamples, asymmetricLoss);
+            model.setSeasonalAdaptiveMode(true);
+            solarHybridModels.set(stationCode, model);
+          } else {
+            // ML Hybrid mode (with optional weather-confidence scaling)
+            const model = new SolarHybridModel(stationCode);
+            await model.train(stationSamples, asymmetricLoss);
+            // Enable weather-confidence mode if requested (scales ML residual by weather confidence)
+            if (solarWeatherConfidence) {
+              model.setWeatherConfidenceMode(true);
+            }
+            solarHybridModels.set(stationCode, model);
+          }
         }
       }
-      console.log(`      ✅ Trained ${solarHybridModels.size} Solar Physics+ML Hybrid models`);
+
+      // Batch calibrate MREC models (only for non-deprecated MREC modes)
+      if (solarSeasonal) {
+        // DEPRECATED: --solar-seasonal now uses Physics+ML Hybrid (trained above)
+        console.log(`      ✅ Trained ${solarHybridModels.size} Solar Physics+ML Hybrid models (--solar-seasonal deprecated)`);
+      } else if (solarMrecHybrid) {
+        // MREC + ML Residual Hybrid
+        const models = await calibrateAllSolarMRECHybrid(
+          solarMrecCalibrationData,
+          allSolarSamples,
+          asymmetricLoss,
+          (msg: string) => console.log(`      ${msg}`)
+        );
+        for (const [code, model] of models) {
+          solarMrecHybridModels.set(code, model);
+        }
+        console.log(`      ✅ Calibrated ${solarMrecHybridModels.size} Solar MREC+ML Hybrid models${asymmetricLoss ? ' (asymmetric loss)' : ''}`);
+      } else if (solarMrec) {
+        // MREC-only (three-tier piecewise)
+        const models = await calibrateAllSolarMREC(
+          solarMrecCalibrationData,
+          (msg: string) => console.log(`      ${msg}`)
+        );
+        for (const [code, model] of models) {
+          solarMrecModels.set(code, model);
+        }
+        console.log(`      ✅ Calibrated ${solarMrecModels.size} Solar MREC Three-Tier models`);
+      } else if (solarPhysicsOnly) {
+        const avgBias = [...solarBiasCorrections.values()].reduce((a, b) => a + b, 0) / solarBiasCorrections.size;
+        console.log(`      ✅ Created ${solarPhysicsModels.size} Solar Physics-Only models`);
+        console.log(`      📊 Average bias correction: ${(avgBias >= 0 ? '+' : '')}${(avgBias * 100).toFixed(1)}% CF`);
+      } else if (solarSeasonalAdaptive) {
+        // Count how many models have dry season model trained
+        let drySeasonModelCount = 0;
+        for (const model of solarHybridModels.values()) {
+          if (model.hasDrySeasonModel()) drySeasonModelCount++;
+        }
+        console.log(`      ✅ Trained ${solarHybridModels.size} Solar Seasonal Adaptive models${asymmetricLoss ? ' (asymmetric loss)' : ''}`);
+        console.log(`      📊 Dry season models trained: ${drySeasonModelCount}/${solarHybridModels.size} (rest use 30% ML weight)`);
+      } else {
+        console.log(`      ✅ Trained ${solarHybridModels.size} Solar Physics+ML Hybrid models${asymmetricLoss ? ' (asymmetric loss)' : ''}`);
+      }
 
       // ─────────────────────────────────────────────────────────────────────────────
       // 3. OTHER TYPES: Use ModelRouter for profile-based models
@@ -1931,7 +2357,7 @@ cfacCommand
 
       // Build weather map for general ModelRouter
       const generalWeatherMap = new Map<string, CFacWeatherFeatures>();
-      for (const record of cfacData) {
+      for (const record of filteredCfacData) {
         if (!otherTrainingStations.includes(record.stationCode)) continue;
 
         const clusterId = capacityFactorService.getClusterForStation(record.stationCode);
@@ -1951,8 +2377,8 @@ cfacCommand
         }
       }
 
-      // Filter cfacData to only include non-wind/solar stations
-      const otherCfacData = cfacData.filter(r => otherTrainingStations.includes(r.stationCode));
+      // Filter filteredCfacData to only include non-wind/solar stations
+      const otherCfacData = filteredCfacData.filter(r => otherTrainingStations.includes(r.stationCode));
 
       // Train general models
       const otherSamples = await capacityFactorService.buildTrainingSamples(
@@ -1963,31 +2389,109 @@ cfacCommand
 
       const modelRouter = new ModelRouter();
       if (otherSamples.length > 0) {
-        await modelRouter.trainAllModels(otherSamples, (msg) => console.log(`      ${msg}`));
+        await modelRouter.trainAllModels(otherSamples, (msg: string) => console.log(`      ${msg}`));
       }
       console.log(`      ✅ Trained ${modelRouter.getModelCount()} profile-based models`);
+
+      // ═══════════════════════════════════════════════════════════════════════════
+      // LEARN BIAS CORRECTIONS (if enabled)
+      // ═══════════════════════════════════════════════════════════════════════════
+
+      const biasCorrector = new BiasCorrector(options.biasCorrection || false);
+
+      if (options.biasCorrection) {
+        console.log('\n🔧 Learning station-specific bias corrections...');
+
+        const trainingPredictions: Array<{ stationCode: string; predicted: number; actual: number }> = [];
+
+        // Generate predictions on training data for bias learning
+        // WIND: Use Enhanced Hybrid models
+        for (const sample of windTrainingSamples) {
+          const model = windHybridModels.get(sample.stationCode);
+          if (!model) continue;
+
+          const predicted = model.predict(sample.weather, sample.datetime);
+          trainingPredictions.push({
+            stationCode: sample.stationCode,
+            predicted,
+            actual: sample.actualCFac,
+          });
+        }
+
+        // SOLAR: Use Physics+ML Hybrid models
+        for (const record of cfacData) {
+          if (!solarStations.includes(record.stationCode)) continue;
+
+          const model = solarHybridModels.get(record.stationCode);
+          if (!model) continue;
+
+          const solarClusterId = `SOLAR_${record.stationCode}`;
+          const weatherMap = trainClusterWeather.get(solarClusterId);
+          if (!weatherMap) continue;
+
+          const weather = weatherMap.get(record.datetime.getTime());
+          if (!weather) continue;
+
+          const predicted = model.predict(weather, record.datetime);
+          trainingPredictions.push({
+            stationCode: record.stationCode,
+            predicted,
+            actual: record.capacityFactor,
+          });
+        }
+
+        // Learn biases
+        const biasStats = biasCorrector.learnBias(trainingPredictions);
+        console.log(`   ✅ Learned biases for ${biasStats.totalStations} stations`);
+        console.log(`      Wind avg bias: ${biasStats.windAvgBias.toFixed(4)} (${biasStats.windAvgBias < 0 ? 'UNDER' : 'OVER'}-forecasting)`);
+        console.log(`      Solar avg bias: ${biasStats.solarAvgBias.toFixed(4)} (${biasStats.solarAvgBias < 0 ? 'UNDER' : 'OVER'}-forecasting)`);
+
+        // Print detailed bias summary
+        biasCorrector.printSummary((msg) => console.log(msg));
+      }
 
       // ═══════════════════════════════════════════════════════════════════════════
       // FETCH FORECAST WEATHER DATA
       // ═══════════════════════════════════════════════════════════════════════════
 
       console.log('\n🌤️  Fetching weather data for forecast period...');
-      const forecastClusterWeatherCsv = await weatherService.fetchAllClusters(
-        clusters,
+
+      // Fetch forecast weather for wind stations (station-specific coordinates)
+      const forecastWindWeatherCsv = await weatherService.fetchAllClusters(
+        windStationLocations,
         options.start,
         options.end,
         (msg) => console.log(`   ${msg}`),
-        windClusterIds
+        windStationClusterIds
+      );
+
+      // Fetch forecast weather for solar stations (station-specific coordinates)
+      const forecastSolarWeatherCsv = await weatherService.fetchAllClusters(
+        solarStationLocations,
+        options.start,
+        options.end,
+        (msg) => console.log(`   ${msg}`),
+        new Set<string>()  // Not wind - no 100m data needed
+      );
+
+      // Fetch forecast weather for other stations (cluster-based)
+      const forecastClusterWeatherCsv = await weatherService.fetchAllClusters(
+        nonWindSolarClusters,
+        options.start,
+        options.end,
+        (msg) => console.log(`   ${msg}`),
+        new Set<string>()
       );
 
       // Parse forecast weather
       const forecastClusterWeather = new Map<string, Map<number, CFacWeatherFeatures>>();
       const forecastTimestamps = new Set<number>();
 
-      for (const [clusterId, csvData] of forecastClusterWeatherCsv) {
+      // Helper to parse and collect timestamps
+      const parseForecastWeatherCsv = (csvData: string, clusterId: string) => {
         const weatherMap = new Map<number, CFacWeatherFeatures>();
         const lines = csvData.split('\n').filter(l => l.trim());
-        if (lines.length < 2) continue;
+        if (lines.length < 2) return weatherMap;
 
         const headers = parseCSVLine(lines[0]).map(h => h.toLowerCase());
         const colIdx = (name: string) => headers.indexOf(name);
@@ -2015,11 +2519,185 @@ cfacCommand
 
           weatherMap.set(ts, weather);
         }
-        forecastClusterWeather.set(clusterId, weatherMap);
+        return weatherMap;
+      };
+
+      // Parse wind station weather
+      for (const [clusterId, csvData] of forecastWindWeatherCsv) {
+        forecastClusterWeather.set(clusterId, parseForecastWeatherCsv(csvData, clusterId));
+      }
+
+      // Parse solar station weather
+      for (const [clusterId, csvData] of forecastSolarWeatherCsv) {
+        forecastClusterWeather.set(clusterId, parseForecastWeatherCsv(csvData, clusterId));
+      }
+
+      // Parse cluster weather
+      for (const [clusterId, csvData] of forecastClusterWeatherCsv) {
+        forecastClusterWeather.set(clusterId, parseForecastWeatherCsv(csvData, clusterId));
       }
 
       const sortedTimestamps = [...forecastTimestamps].sort((a, b) => a - b);
-      console.log(`   Loaded ${sortedTimestamps.length} forecast hours across ${forecastClusterWeather.size} clusters`);
+      console.log(`   Loaded ${sortedTimestamps.length} forecast hours (${forecastWindWeatherCsv.size} wind + ${forecastSolarWeatherCsv.size} solar + ${forecastClusterWeatherCsv.size} clusters)`);
+
+      // ═══════════════════════════════════════════════════════════════════════════
+      // AUTO-CALIBRATION (if enabled)
+      // ═══════════════════════════════════════════════════════════════════════════
+
+      if (autoCalibrate) {
+        console.log('\n📊 Running auto-calibration...');
+        console.log(`   Calibration period: ${calibrationStartDate.toISODate()} to ${calibrationEndDate.toISODate()} (${calibrationDays} days)`);
+
+        // Build actual CFac lookup from training data for calibration period
+        const calibrationActuals = new Map<string, number>(); // key: "timestamp_stationCode"
+        const calibrationStartTs = calibrationStartDate.toJSDate().getTime();
+        const calibrationEndTs = calibrationEndDate.endOf('day').toJSDate().getTime();
+
+        for (const record of cfacData) {
+          const ts = record.datetime.getTime();
+          if (ts >= calibrationStartTs && ts <= calibrationEndTs) {
+            const key = `${ts}_${record.stationCode}`;
+            calibrationActuals.set(key, record.capacityFactor);
+          }
+        }
+
+        if (calibrationActuals.size === 0) {
+          console.log('   ⚠️  No actual data found for calibration period - skipping auto-calibration');
+        } else {
+          console.log(`   Found ${calibrationActuals.size} actual data points for calibration`);
+
+          // Use already-loaded training weather for calibration (trainClusterWeather)
+          // Generate calibration predictions and compare
+          let solarBiasSum = 0, solarCount = 0;
+          let windBiasSum = 0, windCount = 0;
+
+          // Calibrate wind using training weather
+          for (const stationCode of windStations) {
+            const model = windHybridModels.get(stationCode);
+            if (!model) continue;
+
+            const windClusterId = `WIND_${stationCode}`;
+            const stationWeather = trainClusterWeather.get(windClusterId);
+            if (!stationWeather) continue;
+
+            for (const [ts, weather] of stationWeather) {
+              // Only use data from calibration period
+              if (ts < calibrationStartTs || ts > calibrationEndTs) continue;
+
+              const key = `${ts}_${stationCode}`;
+              const actual = calibrationActuals.get(key);
+              if (actual === undefined || actual < 0.01) continue;
+
+              const datetime = new Date(ts);
+              const rawPrediction = model.predict(weather, datetime);
+              const predicted = biasCorrector.applyCorrection(stationCode, rawPrediction);
+
+              const bias = predicted - actual;  // Positive = over-forecast, Negative = under-forecast
+              windBiasSum += bias;
+              windCount++;
+            }
+          }
+
+          // Calibrate solar using training weather - with per-hour bias tracking
+          // Track biases by hour for solar (hours 6-18 = daylight)
+          const solarHourlyBiasSum = new Map<number, number>();
+          const solarHourlyCount = new Map<number, number>();
+          for (let h = 0; h < 24; h++) {
+            solarHourlyBiasSum.set(h, 0);
+            solarHourlyCount.set(h, 0);
+          }
+
+          for (const stationCode of solarStations) {
+            const solarClusterId = `SOLAR_${stationCode}`;
+            const stationWeather = trainClusterWeather.get(solarClusterId);
+            if (!stationWeather) continue;
+
+            // Check model availability based on mode
+            if (solarPhysicsOnly) {
+              if (!solarPhysicsModels.has(stationCode)) continue;
+            } else {
+              if (!solarHybridModels.has(stationCode)) continue;
+            }
+
+            for (const [ts, weather] of stationWeather) {
+              // Only use data from calibration period
+              if (ts < calibrationStartTs || ts > calibrationEndTs) continue;
+
+              const key = `${ts}_${stationCode}`;
+              const actual = calibrationActuals.get(key);
+              if (actual === undefined || actual < 0.01) continue;
+
+              const datetime = new Date(ts);
+              const hour = datetime.getHours();
+              let rawPrediction: number;
+
+              if (solarPhysicsOnly) {
+                // Physics-only mode
+                const physicsModel = solarPhysicsModels.get(stationCode)!;
+                const physicsPred = physicsModel.predict(weather.solarRadiation, weather.temperature);
+                const biasCorrection = solarBiasCorrections.get(stationCode) || 0;
+                rawPrediction = physicsPred + biasCorrection;
+              } else {
+                // ML Hybrid mode
+                const model = solarHybridModels.get(stationCode)!;
+                rawPrediction = model.predict(weather, datetime);
+              }
+
+              const predicted = biasCorrector.applyCorrection(stationCode, rawPrediction);
+
+              const bias = predicted - actual;
+              solarBiasSum += bias;
+              solarCount++;
+
+              // Track per-hour biases
+              solarHourlyBiasSum.set(hour, (solarHourlyBiasSum.get(hour) || 0) + bias);
+              solarHourlyCount.set(hour, (solarHourlyCount.get(hour) || 0) + 1);
+            }
+          }
+
+          // Calculate average biases (global)
+          calibratedSolarBias = solarCount > 0 ? solarBiasSum / solarCount : 0;
+          calibratedWindBias = windCount > 0 ? windBiasSum / windCount : 0;
+
+          // Calculate per-hour biases and scale factors for solar
+          console.log(`   Calibration results:`);
+          console.log(`      Solar: ${solarCount} samples, overall avg bias = ${(calibratedSolarBias * 100).toFixed(2)}%`);
+          console.log(`      Wind:  ${windCount} samples, avg bias = ${(calibratedWindBias * 100).toFixed(2)}%`);
+
+          console.log(`   Per-hour solar calibration (daylight hours):`);
+          for (let h = 6; h <= 18; h++) {
+            const count = solarHourlyCount.get(h) || 0;
+            if (count >= 10) {  // Need at least 10 samples for reliable calibration
+              const hourlyBias = (solarHourlyBiasSum.get(h) || 0) / count;
+              // Scale factor: if under-forecasting (negative bias), scale up
+              const hourlyScale = 1 - hourlyBias;
+              // Clamp to reasonable range [0.7, 1.5] to prevent extreme corrections
+              const clampedScale = Math.max(0.7, Math.min(1.5, hourlyScale));
+              solarHourlyScale.set(h, clampedScale);
+
+              const direction = hourlyBias < 0 ? 'UNDER' : 'OVER';
+              console.log(`      H${h.toString().padStart(2)}: bias=${(hourlyBias * 100).toFixed(2).padStart(6)}% (${direction}) → scale=${(clampedScale * 100).toFixed(1)}%`);
+            } else {
+              // Not enough samples, use global scale
+              solarHourlyScale.set(h, 1 - calibratedSolarBias);
+            }
+          }
+
+          // Convert bias to scale factor: if under-forecasting (negative bias), we need to scale up
+          // Scale factor = 1 / (1 + bias) ≈ 1 - bias for small biases
+          // If bias = -0.05 (under by 5%), scale = 1.05 to compensate
+          if (scaleSolar === 0 && scaleAll === 0) {  // Only auto-calibrate if no manual override
+            effectiveSolarScale = 1 - calibratedSolarBias;  // Keep global for fallback
+          }
+          if (scaleWind === 0 && scaleAll === 0) {  // Only auto-calibrate if no manual override
+            effectiveWindScale = 1 - calibratedWindBias;
+          }
+
+          console.log(`   Applied global scale factors (used when hourly calibration unavailable):`);
+          console.log(`      Solar: ${(effectiveSolarScale * 100).toFixed(1)}% (${calibratedSolarBias < 0 ? 'compensating for under-forecast' : 'compensating for over-forecast'})`);
+          console.log(`      Wind:  ${(effectiveWindScale * 100).toFixed(1)}% (${calibratedWindBias < 0 ? 'compensating for under-forecast' : 'compensating for over-forecast'})`);
+        }
+      }
 
       // ═══════════════════════════════════════════════════════════════════════════
       // GENERATE FORECASTS
@@ -2035,50 +2713,93 @@ cfacCommand
       for (const ts of sortedTimestamps) {
         const datetime = new Date(ts);
 
-        // WIND stations: Use Weather-Only MREC Hybrid
+        // WIND stations: Use Enhanced Hybrid with station-specific weather
         for (const stationCode of windStations) {
           const model = windHybridModels.get(stationCode);
           if (!model) continue;
 
-          const clusterId = capacityFactorService.getClusterForStation(stationCode);
-          if (!clusterId) continue;
+          // Use station-specific weather (WIND_${stationCode})
+          const windClusterId = `WIND_${stationCode}`;
+          const stationWeather = forecastClusterWeather.get(windClusterId);
+          if (!stationWeather) continue;
 
-          const clusterWeather = forecastClusterWeather.get(clusterId);
-          if (!clusterWeather) continue;
-
-          const weather = clusterWeather.get(ts);
+          const weather = stationWeather.get(ts);
           if (!weather) continue;
 
-          const predictedCFac = model.predict(weather, datetime);
+          const rawPrediction = model.predict(weather, datetime);
+          const correctedCFac = biasCorrector.applyCorrection(stationCode, rawPrediction);
+          const scaledCFac = correctedCFac * effectiveWindScale;
           forecasts.push({
             datetime,
             stationCode,
-            predictedCFac: Math.max(0, Math.min(1, predictedCFac)),
-            modelType: 'weather-only-mrec-hybrid'
+            predictedCFac: Math.max(0, Math.min(1, scaledCFac)),
+            modelType: 'enhanced-hybrid'
           });
           windPredictions++;
         }
 
-        // SOLAR stations: Use Physics+ML Hybrid
+        // SOLAR stations: Use Physics+ML Hybrid OR Physics-Only with station-specific weather
         for (const stationCode of solarStations) {
-          const model = solarHybridModels.get(stationCode);
-          if (!model) continue;
+          // Use station-specific weather (SOLAR_${stationCode})
+          const solarClusterId = `SOLAR_${stationCode}`;
+          const stationWeather = forecastClusterWeather.get(solarClusterId);
+          if (!stationWeather) continue;
 
-          const clusterId = capacityFactorService.getClusterForStation(stationCode);
-          if (!clusterId) continue;
-
-          const clusterWeather = forecastClusterWeather.get(clusterId);
-          if (!clusterWeather) continue;
-
-          const weather = clusterWeather.get(ts);
+          const weather = stationWeather.get(ts);
           if (!weather) continue;
 
-          const predictedCFac = model.predict(weather, datetime);
+          let rawPrediction: number;
+          let modelType: string;
+
+          if (solarSeasonal) {
+            // DEPRECATED: --solar-seasonal now uses Physics+ML Hybrid (same as default)
+            const model = solarHybridModels.get(stationCode);
+            if (!model) continue;
+
+            rawPrediction = model.predict(weather, datetime);
+            modelType = 'physics-ml-hybrid';
+          } else if (solarMrecHybrid) {
+            // MREC + ML Residual Hybrid mode
+            const model = solarMrecHybridModels.get(stationCode);
+            if (!model || !model.isReady()) continue;
+
+            rawPrediction = model.predict(weather, datetime);
+            modelType = 'mrec-ml-hybrid';
+          } else if (solarMrec) {
+            // MREC Three-Tier mode (iPool style)
+            const model = solarMrecModels.get(stationCode);
+            if (!model || !model.isCalibrated()) continue;
+
+            rawPrediction = model.predict(weather.solarRadiation);
+            modelType = 'mrec-three-tier';
+          } else if (solarPhysicsOnly) {
+            // Physics-Only mode: use SolarIrradianceModel + learned bias correction
+            const physicsModel = solarPhysicsModels.get(stationCode);
+            if (!physicsModel) continue;
+
+            const physicsPred = physicsModel.predict(weather.solarRadiation, weather.temperature);
+            const biasCorrection = solarBiasCorrections.get(stationCode) || 0;
+            rawPrediction = physicsPred + biasCorrection;
+            modelType = 'physics-only-bias';
+          } else {
+            // ML Hybrid mode: use SolarHybridModel
+            const model = solarHybridModels.get(stationCode);
+            if (!model) continue;
+
+            rawPrediction = model.predict(weather, datetime);
+            modelType = 'physics-ml-hybrid';
+          }
+
+          const correctedCFac = biasCorrector.applyCorrection(stationCode, rawPrediction);
+          // Use per-hour scale factor if available, otherwise use global scale
+          const hour = datetime.getHours();
+          const hourlyScale = solarHourlyScale.get(hour) ?? effectiveSolarScale;
+          const scaledCFac = correctedCFac * hourlyScale;
           forecasts.push({
             datetime,
             stationCode,
-            predictedCFac: Math.max(0, Math.min(1, predictedCFac)),
-            modelType: 'physics-ml-hybrid'
+            predictedCFac: Math.max(0, Math.min(1, scaledCFac)),
+            modelType
           });
           solarPredictions++;
         }
@@ -2125,15 +2846,21 @@ cfacCommand
 
           const predictions = modelRouter.predictAll([stationCode], stationWeatherMap, datetime);
           for (const pred of predictions) {
-            forecasts.push(pred);
+            // Apply scaling to other station types
+            const scaledCFac = pred.predictedCFac * effectiveOtherScale;
+            forecasts.push({
+              ...pred,
+              predictedCFac: Math.max(0, Math.min(1, scaledCFac))
+            });
             otherPredictions++;
           }
         }
       }
 
+      const solarModelName = solarMrecHybrid ? 'MREC+ML Hybrid' : solarMrec ? 'MREC Three-Tier' : solarPhysicsOnly ? 'Physics-Only' : solarWeatherConfidence ? 'Weather-Conf ML' : 'Physics+ML Hybrid';
       console.log(`   Generated ${forecasts.length} total predictions:`);
-      console.log(`      🌬️  Wind:  ${windPredictions} predictions (Weather-Only MREC Hybrid)`);
-      console.log(`      ☀️  Solar: ${solarPredictions} predictions (Physics+ML Hybrid)`);
+      console.log(`      🌬️  Wind:  ${windPredictions} predictions (Enhanced Hybrid)`);
+      console.log(`      ☀️  Solar: ${solarPredictions} predictions (${solarModelName})`);
       console.log(`      📊 Other: ${otherPredictions} predictions (Profile-based)`);
 
       // ═══════════════════════════════════════════════════════════════════════════
@@ -2165,6 +2892,23 @@ cfacCommand
       console.log('   ├─ Wind:  Weather-Only MREC Hybrid (expected MAPE ~75.8%)');
       console.log('   ├─ Solar: Physics+ML Hybrid (expected MAPE ~59.6%)');
       console.log('   └─ Other: Profile-based models');
+      if (options.biasCorrection) {
+        console.log('');
+        console.log('   🔧 Bias correction: ENABLED (station-specific adjustments applied)');
+      }
+      if (autoCalibrate && (calibratedSolarBias !== 0 || calibratedWindBias !== 0)) {
+        console.log('');
+        console.log('   📊 Auto-calibrated from recent data:');
+        console.log(`      Calibration period: ${calibrationStartDate.toISODate()} to ${calibrationEndDate.toISODate()}`);
+        if (calibratedSolarBias !== 0) console.log(`      Solar bias: ${(calibratedSolarBias * 100).toFixed(2)}% → scale ${(effectiveSolarScale * 100).toFixed(1)}%`);
+        if (calibratedWindBias !== 0) console.log(`      Wind bias:  ${(calibratedWindBias * 100).toFixed(2)}% → scale ${(effectiveWindScale * 100).toFixed(1)}%`);
+      } else if (effectiveSolarScale !== 1 || effectiveWindScale !== 1 || effectiveOtherScale !== 1) {
+        console.log('');
+        console.log('   📈 Manual scaling applied:');
+        if (effectiveSolarScale !== 1) console.log(`      Solar: ${(effectiveSolarScale * 100).toFixed(1)}% of raw`);
+        if (effectiveWindScale !== 1) console.log(`      Wind:  ${(effectiveWindScale * 100).toFixed(1)}% of raw`);
+        if (effectiveOtherScale !== 1) console.log(`      Other: ${(effectiveOtherScale * 100).toFixed(1)}% of raw`);
+      }
       console.log('');
 
     } catch (error: any) {
@@ -3774,7 +4518,7 @@ mrecCommand
         });
       }
 
-      const mrecModels = await calibrateAllMREC(mrecCalibrationData, (msg) => console.log(`      ${msg}`));
+      const mrecModels = await calibrateAllMREC(mrecCalibrationData, (msg: string) => console.log(`      ${msg}`));
       console.log(`\n      ✅ Calibrated ${mrecModels.size} MREC models`);
 
       // 4b: Train MREC+ML Hybrid
@@ -3822,7 +4566,7 @@ mrecCommand
       const hybridModels = await trainAllMRECHybrid(
         mrecFactorsList,
         hybridTrainingSamples,
-        (msg) => console.log(`      ${msg}`)
+        (msg: string) => console.log(`      ${msg}`)
       );
       console.log(`\n      ✅ Trained ${hybridModels.size} MREC+ML Hybrid models`);
 
@@ -4147,7 +4891,7 @@ mrecCommand
         });
       }
 
-      const mrecModels = await calibrateAllMREC(mrecCalibrationData, (msg) => console.log(`      ${msg}`));
+      const mrecModels = await calibrateAllMREC(mrecCalibrationData, (msg: string) => console.log(`      ${msg}`));
       console.log(`\n      Calibrated ${mrecModels.size} MREC models`);
 
       // 4b: Build training samples for ML hybrids
@@ -4194,7 +4938,7 @@ mrecCommand
       const temporalHybridModels = await trainAllMRECHybrid(
         mrecFactorsList,
         hybridTrainingSamples,
-        (msg) => console.log(`      ${msg}`)
+        (msg: string) => console.log(`      ${msg}`)
       );
       console.log(`\n      Trained ${temporalHybridModels.size} Temporal Hybrid models`);
 
@@ -4203,7 +4947,8 @@ mrecCommand
       const weatherHybridModels = await trainAllWeatherHybrid(
         mrecFactorsList,
         hybridTrainingSamples,
-        (msg) => console.log(`      ${msg}`)
+        false,  // asymmetricLoss
+        (msg: string) => console.log(`      ${msg}`)
       );
       console.log(`\n      Trained ${weatherHybridModels.size} Weather-Only Hybrid models`);
 
@@ -4560,7 +5305,7 @@ mrecCommand
         });
       }
 
-      const solarMrecModels = await calibrateAllSolarMREC(solarMrecCalibrationData, (msg) => console.log(`      ${msg}`));
+      const solarMrecModels = await calibrateAllSolarMREC(solarMrecCalibrationData, (msg: string) => console.log(`      ${msg}`));
       console.log(`\n      ✅ Calibrated ${solarMrecModels.size} Solar MREC models`);
 
       // 4b: Train Solar Hybrid (Physics + ML)
@@ -6373,10 +7118,12 @@ cfacCommand
   .requiredOption('-o, --output <file>', 'Output forecast CSV file')
   .option('--stations <file>', 'Stations JSON file', 'src/data/stations.json')
   .option('--cache <dir>', 'Weather cache directory', './weather_cache')
+  .option('--smooth <factor>', 'Wind smoothing factor 0-1 (0=none, 0.5=moderate, 0.8=heavy)', '0')
   .action(async (options) => {
     try {
       const apiKey = getApiKey();
       const weatherService = createWeatherService(apiKey, options.cache);
+      const smoothFactor = Math.max(0, Math.min(1, parseFloat(options.smooth) || 0));
 
       console.log('\n═══════════════════════════════════════════════════════════════════════════════');
       console.log('          OPTIMAL CAPACITY FACTOR FORECASTING (v3)                              ');
@@ -6559,7 +7306,7 @@ cfacCommand
 
       // 1. WIND: Enhanced Hybrid (MREC base + multiplicative correction)
       console.log('   [1/3] 🌬️  WIND: Calibrating Enhanced Hybrid...');
-      const mrecModels = await calibrateAllMREC(mrecCalibrationData, (msg) => console.log(`      ${msg}`));
+      const mrecModels = await calibrateAllMREC(mrecCalibrationData, (msg: string) => console.log(`      ${msg}`));
       const mrecFactorsList: import('./types/capacityFactor.js').MRECFactors[] = [];
       for (const [, model] of mrecModels) {
         const factors = model.getFactors();
@@ -6571,7 +7318,8 @@ cfacCommand
       const windEnhancedModels = await trainAllEnhancedHybrid(
         mrecFactorsList,
         windTrainingSamples,
-        (msg) => console.log(`      ${msg}`)
+        false,  // asymmetricLoss
+        (msg: string) => console.log(`      ${msg}`)
       );
       console.log(`      ✅ Trained ${windEnhancedModels.size} Wind Enhanced Hybrid models`);
 
@@ -6596,7 +7344,7 @@ cfacCommand
       const otherSamples = allTrainingSamples.filter(s =>
         s.stationType !== StationType.WIND && s.stationType !== StationType.SOLAR
       );
-      await modelRouter.trainAllModels(otherSamples, (msg) => console.log(`      ${msg}`));
+      await modelRouter.trainAllModels(otherSamples, (msg: string) => console.log(`      ${msg}`));
       console.log(`      ✅ Trained ${modelRouter.getModelCount()} profile-based models`);
 
       // ═══════════════════════════════════════════════════════════════════════════
@@ -6721,6 +7469,47 @@ cfacCommand
       console.log(`      📊 Other: ${otherCount} predictions (Profile-based)`);
 
       // ═══════════════════════════════════════════════════════════════════════════
+      // APPLY WIND SMOOTHING (if enabled)
+      // ═══════════════════════════════════════════════════════════════════════════
+
+      if (smoothFactor > 0) {
+        console.log(`\n🌊 Applying wind smoothing (factor: ${smoothFactor.toFixed(2)})...`);
+
+        // Group wind forecasts by station, sorted by time
+        const windForecastsByStation = new Map<string, CFacForecastResult[]>();
+        for (const f of forecasts) {
+          if (f.modelType === 'enhanced-hybrid') {
+            if (!windForecastsByStation.has(f.stationCode)) {
+              windForecastsByStation.set(f.stationCode, []);
+            }
+            windForecastsByStation.get(f.stationCode)!.push(f);
+          }
+        }
+
+        // Apply exponential moving average to each wind station
+        // Formula: smoothed[t] = (1-alpha) * prediction[t] + alpha * smoothed[t-1]
+        const alpha = smoothFactor;
+        let totalSmoothed = 0;
+
+        for (const [stationCode, stationForecasts] of windForecastsByStation) {
+          // Sort by datetime
+          stationForecasts.sort((a, b) => a.datetime.getTime() - b.datetime.getTime());
+
+          // Apply EMA smoothing
+          let prevSmoothed = stationForecasts[0].predictedCFac;
+          for (let i = 0; i < stationForecasts.length; i++) {
+            const original = stationForecasts[i].predictedCFac;
+            const smoothed = (1 - alpha) * original + alpha * prevSmoothed;
+            stationForecasts[i].predictedCFac = Math.max(0, Math.min(1, smoothed));
+            prevSmoothed = smoothed;
+            totalSmoothed++;
+          }
+        }
+
+        console.log(`   Smoothed ${totalSmoothed} wind predictions across ${windForecastsByStation.size} stations`);
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════════
       // WRITE OUTPUT
       // ═══════════════════════════════════════════════════════════════════════════
 
@@ -6759,7 +7548,7 @@ cfacCommand
       console.log(`   📊 Predictions: ${forecasts.length} for ${trainingStations.length} stations`);
       console.log(`   📅 Period: ${options.start} to ${options.end}`);
       console.log('\n   Models used:');
-      console.log('   ├─ Wind:  Enhanced Hybrid (MREC + multiplicative boost)');
+      console.log(`   ├─ Wind:  Enhanced Hybrid (MREC + multiplicative boost)${smoothFactor > 0 ? ` + EMA smoothing (${smoothFactor.toFixed(2)})` : ''}`);
       console.log('   ├─ Solar: Physics+ML Hybrid');
       console.log('   └─ Other: Profile-based models');
 
@@ -6958,7 +7747,7 @@ cfacCommand
 
       // 1. Calibrate base MREC models (shared by most variants)
       console.log('   [1/5] Calibrating base MREC models...');
-      const mrecModels = await calibrateAllMREC(mrecCalibrationData, (msg) => console.log(`      ${msg}`));
+      const mrecModels = await calibrateAllMREC(mrecCalibrationData, (msg: string) => console.log(`      ${msg}`));
       const mrecFactorsList: import('./types/capacityFactor.js').MRECFactors[] = [];
       for (const [, model] of mrecModels) {
         const factors = model.getFactors();
@@ -6978,18 +7767,18 @@ cfacCommand
 
       // 3. Cubic Power Curve Model
       console.log('\n   [3/5] Calibrating Cubic Power Curve models...');
-      const cubicModels = await calibrateAllCubic(mrecCalibrationData, (msg) => console.log(`      ${msg}`));
+      const cubicModels = await calibrateAllCubic(mrecCalibrationData, (msg: string) => console.log(`      ${msg}`));
 
       // 4. Weibull Model
       console.log('\n   [4/5] Calibrating Weibull Distribution models...');
-      const weibullModels = await calibrateAllWeibull(mrecCalibrationData, (msg) => console.log(`      ${msg}`));
+      const weibullModels = await calibrateAllWeibull(mrecCalibrationData, (msg: string) => console.log(`      ${msg}`));
 
       // 5. Bias Correction Model
       console.log('\n   [5/6] Calibrating Bias Correction models...');
       const biasCorrectionModels = await calibrateAllBiasCorrection(
         mrecFactorsList,
         windTrainingSamples,
-        (msg) => console.log(`      ${msg}`)
+        (msg: string) => console.log(`      ${msg}`)
       );
 
       // 6. Enhanced Hybrid Model (multiplicative correction + physics boost)
@@ -6997,7 +7786,8 @@ cfacCommand
       const enhancedHybridModels = await trainAllEnhancedHybrid(
         mrecFactorsList,
         windTrainingSamples,
-        (msg) => console.log(`      ${msg}`)
+        false,
+        (msg: string) => console.log(`      ${msg}`)
       );
 
       // ═══════════════════════════════════════════════════════════════════════════
