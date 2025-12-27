@@ -25,6 +25,14 @@ export type { MRECHybridMetrics } from './WindMRECHybridModel.js';
 export { WindWeatherHybridModel, trainAllWeatherHybrid } from './WindWeatherHybridModel.js';
 export type { WeatherHybridMetrics } from './WindWeatherHybridModel.js';
 
+// 4-Tier MREC Model (physics-based LOW/RAMP/RATED/HIGH regions)
+export { Wind4TierMRECModel, calibrateAll4TierMREC, DEFAULT_WIND_THRESHOLDS } from './Wind4TierMRECModel.js';
+export type { MREC4TierFactors } from './Wind4TierMRECModel.js';
+
+// 4-Tier Hybrid Model (4-tier MREC + region-specific gustRatio features)
+export { Wind4TierHybridModel, trainAll4TierHybrid } from './Wind4TierHybridModel.js';
+export type { Wind4TierHybridMetrics } from './Wind4TierHybridModel.js';
+
 // Bias Correction Model (linear scale + offset correction)
 export { WindBiasCorrectionModel, calibrateAllBiasCorrection } from './WindBiasCorrectionModel.js';
 export type { BiasCorrectionFactors, BiasCorrectionMetrics } from './WindBiasCorrectionModel.js';

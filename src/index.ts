@@ -15,7 +15,7 @@ import { REGION_MAPPINGS, isPhilippineHoliday } from './constants/index.js';
 import { ForecastResult, TrainingSample, RawWeatherData } from './types/index.js';
 import { createWeatherService, DEFAULT_LOCATIONS, capacityFactorService, ClusterLocation } from './services/index.js';
 import { getDatabase, closeDatabase, DatabaseStats, StoredModel } from './database/index.js';
-import { ModelRouter, WindMRECModel, calibrateAllMREC, calibrateAllMRECCFBased, calibrateAllMRECMLOptimized, WindMRECHybridModel, trainAllMRECHybrid, WindWeatherHybridModel, trainAllWeatherHybrid, SolarMRECModel, calibrateAllSolarMREC, SolarHybridModel, SolarIrradianceModel, SolarMRECHybridModel, calibrateAllSolarMRECHybrid, SolarSeasonalMRECModel, calibrateAllSeasonalSolarMREC, WindShearModel, trainAllWindShear, WindCubicModel, calibrateAllCubic, WindWeibullModel, calibrateAllWeibull, WindBiasCorrectionModel, calibrateAllBiasCorrection, WindEnhancedHybridModel, trainAllEnhancedHybrid, BiasCorrector } from './models/capacityFactor/index.js';
+import { ModelRouter, WindMRECModel, calibrateAllMREC, calibrateAllMRECCFBased, calibrateAllMRECMLOptimized, WindMRECHybridModel, trainAllMRECHybrid, WindWeatherHybridModel, trainAllWeatherHybrid, SolarMRECModel, calibrateAllSolarMREC, SolarHybridModel, SolarIrradianceModel, SolarMRECHybridModel, calibrateAllSolarMRECHybrid, SolarSeasonalMRECModel, calibrateAllSeasonalSolarMREC, WindShearModel, trainAllWindShear, WindCubicModel, calibrateAllCubic, WindWeibullModel, calibrateAllWeibull, WindBiasCorrectionModel, calibrateAllBiasCorrection, WindEnhancedHybridModel, trainAllEnhancedHybrid, BiasCorrector, Wind4TierHybridModel, trainAll4TierHybrid } from './models/capacityFactor/index.js';
 import type { SolarMRECCalibrationData } from './models/capacityFactor/index.js';
 import { MRECCalibrationData, WindCFacMethodology } from './types/capacityFactor.js';
 import { CFacWeatherFeatures, StationType, getStationTypeFromCode, CFacForecastResult, CFacTrainingSample } from './types/capacityFactor.js';
@@ -1714,6 +1714,8 @@ cfacCommand
   .option('--solar-mrec-hybrid', 'Use MREC + ML residual hybrid for solar (best of both)')
   .option('--solar-seasonal', 'Use Seasonal MREC for solar (separate calibration for dry/monsoon/transition seasons)')
   .option('--solar-seasonal-adaptive', 'Seasonal adaptive: trains separate dry/wet models, reduces ML weight in dry season (Nov-Apr)')
+  .option('--no-wind-4tier', 'Disable 4-tier MREC wind model (use legacy enhanced-hybrid instead)')
+  .option('--wind-4tier', 'Use 4-tier MREC for wind - DEFAULT (LOW/RAMP/RATED/HIGH regions, ~50% MAPE)')
   .action(async (options) => {
     try {
       const apiKey = getApiKey();
@@ -1727,6 +1729,8 @@ cfacCommand
       const solarMrecHybrid = options.solarMrecHybrid || false;
       const solarSeasonal = options.solarSeasonal || false;
       const solarSeasonalAdaptive = options.solarSeasonalAdaptive || false;
+      // 4-Tier wind model is now the default (50% MAPE vs 107% for enhanced-hybrid)
+      const wind4Tier = options.noWind4tier !== true && options.no_wind_4tier !== true;
 
       // Parse scale factors (manual overrides)
       const scaleAll = parseFloat(options.scale) / 100;  // Convert percent to decimal
@@ -1759,25 +1763,30 @@ cfacCommand
         solarHourlyScale.set(h, 1.0);
       }
 
+      // Per-station scale factors for OTHER stations (hydro, geothermal, etc.)
+      // Key: stationCode, Value: scale factor (initialized to 1.0)
+      const otherStationScale = new Map<string, number>();
+
       console.log('\n═══════════════════════════════════════════════════════════════════════════════');
       console.log('          OPTIMAL CAPACITY FACTOR FORECASTING (v2)                              ');
+      const windModelName = wind4Tier ? '4-Tier MREC Hybrid (region-specific gustRatio)' : 'Weather-Only MREC Hybrid';
       if (solarSeasonalAdaptive) {
-        console.log('   Wind: Weather-Only MREC Hybrid | Solar: SEASONAL ADAPTIVE (dry/wet ML models)');
+        console.log(`   Wind: ${windModelName} | Solar: SEASONAL ADAPTIVE (dry/wet ML models)`);
       } else if (solarSeasonal) {
         // DEPRECATED: --solar-seasonal now uses Physics+ML Hybrid (same as default)
         // The Seasonal MREC model caused severe over-forecasting (+296% errors)
-        console.log('   Wind: Weather-Only MREC Hybrid | Solar: Physics+ML Hybrid                    ');
+        console.log(`   Wind: ${windModelName} | Solar: Physics+ML Hybrid                    `);
         console.log('   NOTE: --solar-seasonal is deprecated; using default hybrid model             ');
       } else if (solarMrecHybrid) {
-        console.log('   Wind: Weather-Only MREC Hybrid | Solar: iPool MREC + ML Residual (per-station)');
+        console.log(`   Wind: ${windModelName} | Solar: iPool MREC + ML Residual (per-station)`);
       } else if (solarMrec) {
-        console.log('   Wind: Weather-Only MREC Hybrid | Solar: iPool MREC Three-Tier (per-station)   ');
+        console.log(`   Wind: ${windModelName} | Solar: iPool MREC Three-Tier (per-station)   `);
       } else if (solarPhysicsOnly) {
-        console.log('   Wind: Weather-Only MREC Hybrid | Solar: Physics-Only + Bias Correction        ');
+        console.log(`   Wind: ${windModelName} | Solar: Physics-Only + Bias Correction        `);
       } else if (solarWeatherConfidence) {
-        console.log('   Wind: Weather-Only MREC Hybrid | Solar: Physics+ML (Weather-Confidence Scaled)');
+        console.log(`   Wind: ${windModelName} | Solar: Physics+ML (Weather-Confidence Scaled)`);
       } else {
-        console.log('   Wind: Weather-Only MREC Hybrid | Solar: Physics+ML Hybrid                    ');
+        console.log(`   Wind: ${windModelName} | Solar: Physics+ML Hybrid                    `);
       }
       if (useXGBoost) {
         console.log('   ML MODEL: XGBoost (gradient boosting)                                         ');
@@ -1842,6 +1851,15 @@ cfacCommand
       const biomassStations = stationsByType.get(StationType.BIOMASS) || [];
       const batteryStations = stationsByType.get(StationType.BATTERY) || [];
       const unknownStations = stationsByType.get(StationType.UNKNOWN) || [];
+      // Combined OTHER stations for calibration (all non-wind, non-solar)
+      const otherStations = [
+        ...hydroRoRStations,
+        ...hydroStorageStations,
+        ...geothermalStations,
+        ...biomassStations,
+        ...batteryStations,
+        ...unknownStations
+      ];
 
       console.log('\n📋 Station types:');
       console.log(`   🌬️  Wind:           ${windStations.length} stations → Weather-Only MREC Hybrid`);
@@ -2170,14 +2188,31 @@ cfacCommand
         }
       }
 
-      // Train Enhanced Hybrid (multiplicative correction - better for peaks)
-      const windHybridModels = await trainAllEnhancedHybrid(
-        mrecFactorsList,
-        windTrainingSamples,
-        asymmetricLoss,
-        (msg: string) => console.log(`      ${msg}`)
-      );
-      console.log(`      ✅ Trained ${windHybridModels.size} Wind Enhanced Hybrid models${asymmetricLoss ? ' (asymmetric loss)' : ''}`);
+      // Train wind models - use 4-tier if requested, otherwise Enhanced Hybrid
+      let windHybridModels: Map<string, WindEnhancedHybridModel>;
+      let wind4TierModels: Map<string, Wind4TierHybridModel> | null = null;
+
+      if (wind4Tier) {
+        // Train 4-Tier Hybrid (LOW/RAMP/RATED/HIGH with region-specific gustRatio)
+        wind4TierModels = await trainAll4TierHybrid(
+          windTrainingSamples,
+          asymmetricLoss,
+          (msg: string) => console.log(`      ${msg}`),
+          useXGBoost
+        );
+        console.log(`      ✅ Trained ${wind4TierModels.size} Wind 4-Tier Hybrid models${asymmetricLoss ? ' (asymmetric loss)' : ''}`);
+        // Create empty enhanced models map for compatibility
+        windHybridModels = new Map();
+      } else {
+        // Train Enhanced Hybrid (multiplicative correction - better for peaks)
+        windHybridModels = await trainAllEnhancedHybrid(
+          mrecFactorsList,
+          windTrainingSamples,
+          asymmetricLoss,
+          (msg: string) => console.log(`      ${msg}`)
+        );
+        console.log(`      ✅ Trained ${windHybridModels.size} Wind Enhanced Hybrid models${asymmetricLoss ? ' (asymmetric loss)' : ''}`);
+      }
 
       // ─────────────────────────────────────────────────────────────────────────────
       // 2. SOLAR: Physics+ML Hybrid or Physics-Only with Bias Correction or MREC models
@@ -2405,12 +2440,20 @@ cfacCommand
         const trainingPredictions: Array<{ stationCode: string; predicted: number; actual: number }> = [];
 
         // Generate predictions on training data for bias learning
-        // WIND: Use Enhanced Hybrid models
+        // WIND: Use 4-Tier or Enhanced Hybrid models
         for (const sample of windTrainingSamples) {
-          const model = windHybridModels.get(sample.stationCode);
-          if (!model) continue;
+          let predicted: number;
 
-          const predicted = model.predict(sample.weather, sample.datetime);
+          if (wind4Tier && wind4TierModels) {
+            const model = wind4TierModels.get(sample.stationCode);
+            if (!model) continue;
+            predicted = model.predict(sample.weather, sample.datetime);
+          } else {
+            const model = windHybridModels.get(sample.stationCode);
+            if (!model) continue;
+            predicted = model.predict(sample.weather, sample.datetime);
+          }
+
           trainingPredictions.push({
             stationCode: sample.stationCode,
             predicted,
@@ -2573,12 +2616,16 @@ cfacCommand
 
           // Calibrate wind using training weather
           for (const stationCode of windStations) {
-            const model = windHybridModels.get(stationCode);
-            if (!model) continue;
-
             const windClusterId = `WIND_${stationCode}`;
             const stationWeather = trainClusterWeather.get(windClusterId);
             if (!stationWeather) continue;
+
+            // Check model availability based on mode
+            if (wind4Tier && wind4TierModels) {
+              if (!wind4TierModels.has(stationCode)) continue;
+            } else {
+              if (!windHybridModels.has(stationCode)) continue;
+            }
 
             for (const [ts, weather] of stationWeather) {
               // Only use data from calibration period
@@ -2589,7 +2636,16 @@ cfacCommand
               if (actual === undefined || actual < 0.01) continue;
 
               const datetime = new Date(ts);
-              const rawPrediction = model.predict(weather, datetime);
+              let rawPrediction: number;
+
+              if (wind4Tier && wind4TierModels) {
+                const model = wind4TierModels.get(stationCode)!;
+                rawPrediction = model.predict(weather, datetime);
+              } else {
+                const model = windHybridModels.get(stationCode)!;
+                rawPrediction = model.predict(weather, datetime);
+              }
+
               const predicted = biasCorrector.applyCorrection(stationCode, rawPrediction);
 
               const bias = predicted - actual;  // Positive = over-forecast, Negative = under-forecast
@@ -2696,6 +2752,72 @@ cfacCommand
           console.log(`   Applied global scale factors (used when hourly calibration unavailable):`);
           console.log(`      Solar: ${(effectiveSolarScale * 100).toFixed(1)}% (${calibratedSolarBias < 0 ? 'compensating for under-forecast' : 'compensating for over-forecast'})`);
           console.log(`      Wind:  ${(effectiveWindScale * 100).toFixed(1)}% (${calibratedWindBias < 0 ? 'compensating for under-forecast' : 'compensating for over-forecast'})`);
+
+          // Calibrate OTHER stations (hydro, geothermal, etc.) - per-station RATIO-based scaling
+          // This is critical for seasonal adjustment (e.g., hydro wet→dry season transition)
+          // Uses ratio-based scaling: scale = avgActual / avgPredicted
+          console.log(`   Calibrating OTHER stations (Hydro, Geo, etc.):`);
+          const otherActualSum = new Map<string, number>();
+          const otherPredSum = new Map<string, number>();
+          const otherSampleCount = new Map<string, number>();
+
+          // Dummy weather object for profile-based models (they ignore weather)
+          const dummyWeather: CFacWeatherFeatures = {
+            temperature: 30,
+            windSpeed: 5,
+            windGust: 8,
+            cloudCover: 50,
+            solarRadiation: 500
+          };
+
+          for (const stationCode of otherStations) {
+            if (!modelRouter.hasModel(stationCode)) continue;
+
+            // Iterate through calibration period timestamps
+            for (const record of cfacData) {
+              const ts = record.datetime.getTime();
+              if (ts < calibrationStartTs || ts > calibrationEndTs) continue;
+              if (record.stationCode !== stationCode) continue;
+
+              const actual = record.capacityFactor;
+              if (actual < 0.01) continue;  // Skip near-zero values (outages)
+
+              const predicted = modelRouter.predict(stationCode, dummyWeather, record.datetime);
+              if (predicted === null || predicted < 0.01) continue;
+
+              // Track sums for ratio-based scaling
+              otherActualSum.set(stationCode, (otherActualSum.get(stationCode) || 0) + actual);
+              otherPredSum.set(stationCode, (otherPredSum.get(stationCode) || 0) + predicted);
+              otherSampleCount.set(stationCode, (otherSampleCount.get(stationCode) || 0) + 1);
+            }
+          }
+
+          // Calculate per-station scale factors using RATIO method
+          let otherCalibrated = 0;
+          for (const stationCode of otherStations) {
+            const count = otherSampleCount.get(stationCode) || 0;
+            if (count >= 10) {  // Need at least 10 samples
+              const avgActual = (otherActualSum.get(stationCode) || 0) / count;
+              const avgPred = (otherPredSum.get(stationCode) || 0) / count;
+
+              // Ratio-based scale: scale = actual/predicted (direct multiplicative correction)
+              const scale = avgPred > 0.01 ? avgActual / avgPred : 1.0;
+              // Clamp to reasonable range [0.2, 2.0] - hydro can have large seasonal swings
+              const clampedScale = Math.max(0.2, Math.min(2.0, scale));
+              otherStationScale.set(stationCode, clampedScale);
+              otherCalibrated++;
+
+              // Only show significant calibrations (>10% difference)
+              if (Math.abs(scale - 1.0) > 0.1) {
+                const direction = scale < 1.0 ? 'OVER-predicting' : 'UNDER-predicting';
+                console.log(`      ${stationCode}: avgActual=${(avgActual * 100).toFixed(1)}%, avgPred=${(avgPred * 100).toFixed(1)}% → scale=${(clampedScale * 100).toFixed(1)}% (${direction})`);
+              }
+            } else {
+              // Not enough samples, use global scale
+              otherStationScale.set(stationCode, effectiveOtherScale);
+            }
+          }
+          console.log(`      Calibrated ${otherCalibrated} stations with sufficient samples`);
         }
       }
 
@@ -2713,11 +2835,8 @@ cfacCommand
       for (const ts of sortedTimestamps) {
         const datetime = new Date(ts);
 
-        // WIND stations: Use Enhanced Hybrid with station-specific weather
+        // WIND stations: Use 4-Tier or Enhanced Hybrid with station-specific weather
         for (const stationCode of windStations) {
-          const model = windHybridModels.get(stationCode);
-          if (!model) continue;
-
           // Use station-specific weather (WIND_${stationCode})
           const windClusterId = `WIND_${stationCode}`;
           const stationWeather = forecastClusterWeather.get(windClusterId);
@@ -2726,14 +2845,30 @@ cfacCommand
           const weather = stationWeather.get(ts);
           if (!weather) continue;
 
-          const rawPrediction = model.predict(weather, datetime);
+          let rawPrediction: number;
+          let modelType: string;
+
+          if (wind4Tier && wind4TierModels) {
+            // 4-Tier MREC Hybrid (region-specific gustRatio)
+            const model = wind4TierModels.get(stationCode);
+            if (!model) continue;
+            rawPrediction = model.predict(weather, datetime);
+            modelType = '4tier-hybrid';
+          } else {
+            // Enhanced Hybrid (default)
+            const model = windHybridModels.get(stationCode);
+            if (!model) continue;
+            rawPrediction = model.predict(weather, datetime);
+            modelType = 'enhanced-hybrid';
+          }
+
           const correctedCFac = biasCorrector.applyCorrection(stationCode, rawPrediction);
           const scaledCFac = correctedCFac * effectiveWindScale;
           forecasts.push({
             datetime,
             stationCode,
             predictedCFac: Math.max(0, Math.min(1, scaledCFac)),
-            modelType: 'enhanced-hybrid'
+            modelType
           });
           windPredictions++;
         }
@@ -2846,8 +2981,9 @@ cfacCommand
 
           const predictions = modelRouter.predictAll([stationCode], stationWeatherMap, datetime);
           for (const pred of predictions) {
-            // Apply scaling to other station types
-            const scaledCFac = pred.predictedCFac * effectiveOtherScale;
+            // Apply per-station scaling (uses calibrated scale if available, else global)
+            const stationScale = otherStationScale.get(stationCode) || effectiveOtherScale;
+            const scaledCFac = pred.predictedCFac * stationScale;
             forecasts.push({
               ...pred,
               predictedCFac: Math.max(0, Math.min(1, scaledCFac))
