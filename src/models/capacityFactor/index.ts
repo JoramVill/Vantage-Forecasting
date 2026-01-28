@@ -33,6 +33,14 @@ export type { MREC4TierFactors } from './Wind4TierMRECModel.js';
 export { Wind4TierHybridModel, trainAll4TierHybrid } from './Wind4TierHybridModel.js';
 export type { Wind4TierHybridMetrics } from './Wind4TierHybridModel.js';
 
+// Physics-Based MREC Model (correct power curve: plateau at rated, ramp-down at high)
+export { WindPhysicsMRECModel, calibrateAllPhysicsMREC, WIND_PHYSICS_DEFAULTS } from './WindPhysicsMRECModel.js';
+export type { PhysicsMRECFactors } from './WindPhysicsMRECModel.js';
+
+// Physics Hybrid Model (physics MREC + weather-only ML residual)
+export { WindPhysicsHybridModel, trainAllPhysicsHybrid } from './WindPhysicsHybridModel.js';
+export type { PhysicsHybridMetrics } from './WindPhysicsHybridModel.js';
+
 // Bias Correction Model (linear scale + offset correction)
 export { WindBiasCorrectionModel, calibrateAllBiasCorrection } from './WindBiasCorrectionModel.js';
 export type { BiasCorrectionFactors, BiasCorrectionMetrics } from './WindBiasCorrectionModel.js';

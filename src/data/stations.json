@@ -73,6 +73,20 @@
       },
       "grid": "CLUZ"
     },
+    "01CASTILEHV": {
+      "name": "Castillejos Solar (HV)",
+      "type": "solar",
+      "operator": "Unknown",
+      "capacity_mw": null,
+      "location": {
+        "municipality": "Castillejos",
+        "province": "Zambales",
+        "region": "Region III",
+        "latitude": 14.9361,
+        "longitude": 120.1997
+      },
+      "grid": "CLUZ"
+    },
     "01CAYANGA": {
       "name": "Cayanga-Bugallon Solar",
       "type": "solar",
@@ -1822,7 +1836,7 @@
       },
       "ZAMBALES_SOLAR": {
         "description": "Solar plants in Zambales",
-        "stations": ["01BOTOLAN", "01SBMA", "01SNMARCELINO"],
+        "stations": ["01BOTOLAN", "01CASTILEHV", "01SBMA", "01SNMARCELINO"],
         "referenceLocation": {
           "name": "San Marcelino, Zambales",
           "latitude": 14.967,

@@ -15,7 +15,7 @@ import { REGION_MAPPINGS, isPhilippineHoliday } from './constants/index.js';
 import { ForecastResult, TrainingSample, RawWeatherData } from './types/index.js';
 import { createWeatherService, DEFAULT_LOCATIONS, capacityFactorService, ClusterLocation } from './services/index.js';
 import { getDatabase, closeDatabase, DatabaseStats, StoredModel } from './database/index.js';
-import { ModelRouter, WindMRECModel, calibrateAllMREC, calibrateAllMRECCFBased, calibrateAllMRECMLOptimized, WindMRECHybridModel, trainAllMRECHybrid, WindWeatherHybridModel, trainAllWeatherHybrid, SolarMRECModel, calibrateAllSolarMREC, SolarHybridModel, SolarIrradianceModel, SolarMRECHybridModel, calibrateAllSolarMRECHybrid, SolarSeasonalMRECModel, calibrateAllSeasonalSolarMREC, WindShearModel, trainAllWindShear, WindCubicModel, calibrateAllCubic, WindWeibullModel, calibrateAllWeibull, WindBiasCorrectionModel, calibrateAllBiasCorrection, WindEnhancedHybridModel, trainAllEnhancedHybrid, BiasCorrector, Wind4TierHybridModel, trainAll4TierHybrid } from './models/capacityFactor/index.js';
+import { ModelRouter, WindMRECModel, calibrateAllMREC, calibrateAllMRECCFBased, calibrateAllMRECMLOptimized, WindMRECHybridModel, trainAllMRECHybrid, WindWeatherHybridModel, trainAllWeatherHybrid, SolarMRECModel, calibrateAllSolarMREC, SolarHybridModel, SolarIrradianceModel, SolarMRECHybridModel, calibrateAllSolarMRECHybrid, SolarSeasonalMRECModel, calibrateAllSeasonalSolarMREC, WindShearModel, trainAllWindShear, WindCubicModel, calibrateAllCubic, WindWeibullModel, calibrateAllWeibull, WindBiasCorrectionModel, calibrateAllBiasCorrection, WindEnhancedHybridModel, trainAllEnhancedHybrid, BiasCorrector, Wind4TierHybridModel, trainAll4TierHybrid, WindPhysicsHybridModel, trainAllPhysicsHybrid } from './models/capacityFactor/index.js';
 import type { SolarMRECCalibrationData } from './models/capacityFactor/index.js';
 import { MRECCalibrationData, WindCFacMethodology } from './types/capacityFactor.js';
 import { CFacWeatherFeatures, StationType, getStationTypeFromCode, CFacForecastResult, CFacTrainingSample } from './types/capacityFactor.js';
@@ -25,6 +25,8 @@ import { OutageSeverity, TimePeriod, GridRegion, OutageRecord } from './types/ou
 import { parseInterconnectorCsv } from './parsers/interconnectorParser.js';
 import { buildInterconnectorTrainingSamples } from './features/interconnectorFeatures.js';
 import { InterconnectorCongestionModel } from './models/interconnector/index.js';
+import { ForecastSchedulerService } from './services/forecastSchedulerService.js';
+import { CapacityUpdateService } from './services/capacityUpdateService.js';
 
 // Default API key (can be overridden by env or config)
 const DEFAULT_API_KEY = 'BJYBHG8K3YS8EFK46233M8L75';
@@ -207,6 +209,8 @@ program
   .option('--scale-workday <percent>', 'Scale workday forecasts by percentage (overrides --scale for workdays)')
   .option('--scale-weekend <percent>', 'Scale weekend (Sat/Sun) forecasts by percentage (overrides --scale for weekends)')
   .option('--scale-holiday <percent>', 'Scale holiday forecasts by percentage (highest priority, overrides other scales)')
+  .option('--scale-peak <percent>', 'Scale peak hour (09:00-21:00) forecasts by percentage')
+  .option('--scale-offpeak <percent>', 'Scale off-peak hour (21:00-09:00) forecasts by percentage')
   .option('--growth <percent>', 'Daily demand growth rate for hybrid model (e.g., 0.01 for 0.01%/day)', '0')
   .option('--cache <dir>', 'Weather cache directory', './weather_cache')
   .option('--use-db', 'Use demand data from database instead of file')
@@ -522,24 +526,40 @@ program
       const scaleWorkday = options.scaleWorkday !== undefined ? 1 + (parseFloat(options.scaleWorkday) / 100) : null;
       const scaleWeekend = options.scaleWeekend !== undefined ? 1 + (parseFloat(options.scaleWeekend) / 100) : null;
       const scaleHoliday = options.scaleHoliday !== undefined ? 1 + (parseFloat(options.scaleHoliday) / 100) : null;
+      const scalePeak = options.scalePeak !== undefined ? 1 + (parseFloat(options.scalePeak) / 100) : null;
+      const scaleOffpeak = options.scaleOffpeak !== undefined ? 1 + (parseFloat(options.scaleOffpeak) / 100) : null;
+
+      // Peak hours: 09:00-21:00 (hours 9-20 inclusive), Off-peak: 21:00-09:00 (hours 21-23, 0-8)
+      const isPeakHour = (hour: number): boolean => hour >= 9 && hour < 21;
 
       // Helper function to get the appropriate scale factor for a given date/time
       const getScaleFactor = (dateTime: Date): number => {
         const dt = DateTime.fromJSDate(dateTime);
         const dateStr = dt.toFormat('yyyy-MM-dd');
         const dow = dt.weekday; // 1=Mon, 7=Sun
+        const hour = dt.hour;
 
-        // Priority: holiday > weekend > workday > base
+        // Start with base scale
+        let dayTypeScale = baseScaleFactor;
+
+        // Day-type priority: holiday > weekend > workday > base
         if (scaleHoliday !== null && isPhilippineHoliday(dateStr)) {
-          return scaleHoliday;
+          dayTypeScale = scaleHoliday;
+        } else if (scaleWeekend !== null && (dow === 6 || dow === 7)) {
+          dayTypeScale = scaleWeekend;
+        } else if (scaleWorkday !== null && dow >= 1 && dow <= 5 && !isPhilippineHoliday(dateStr)) {
+          dayTypeScale = scaleWorkday;
         }
-        if (scaleWeekend !== null && (dow === 6 || dow === 7)) {
-          return scaleWeekend;
+
+        // Apply peak/off-peak scaling on top of day-type scaling (multiplicative)
+        let peakScale = 1.0;
+        if (scalePeak !== null && isPeakHour(hour)) {
+          peakScale = scalePeak;
+        } else if (scaleOffpeak !== null && !isPeakHour(hour)) {
+          peakScale = scaleOffpeak;
         }
-        if (scaleWorkday !== null && dow >= 1 && dow <= 5 && !isPhilippineHoliday(dateStr)) {
-          return scaleWorkday;
-        }
-        return baseScaleFactor;
+
+        return dayTypeScale * peakScale;
       };
 
       console.log('\n🔮 Generating forecasts...');
@@ -554,6 +574,12 @@ program
       }
       if (scaleHoliday !== null) {
         console.log(`  📈 Holiday scaling: ${scaleHoliday.toFixed(4)} (${parseFloat(options.scaleHoliday) > 0 ? '+' : ''}${options.scaleHoliday}%)`);
+      }
+      if (scalePeak !== null) {
+        console.log(`  📈 Peak (09:00-21:00) scaling: ${scalePeak.toFixed(4)} (${parseFloat(options.scalePeak) > 0 ? '+' : ''}${options.scalePeak}%)`);
+      }
+      if (scaleOffpeak !== null) {
+        console.log(`  📈 Off-peak (21:00-09:00) scaling: ${scaleOffpeak.toFixed(4)} (${parseFloat(options.scaleOffpeak) > 0 ? '+' : ''}${options.scaleOffpeak}%)`);
       }
       const forecasts: ForecastResult[] = [];
 
@@ -1757,11 +1783,22 @@ cfacCommand
       let calibratedWindBias = 0;
 
       // Per-hour solar scale factors (key: hour 0-23, value: scale factor)
-      // Initialized to 1.0 for all hours, will be updated by auto-calibration
+      // When auto-calibrate is enabled: initialized to 1.0, will be updated by calibration
+      // When auto-calibrate is disabled: use effectiveSolarScale (manual scale) for all hours
       const solarHourlyScale = new Map<number, number>();
       for (let h = 0; h < 24; h++) {
-        solarHourlyScale.set(h, 1.0);
+        // Use effectiveSolarScale when manual scaling is active (auto-calibrate disabled)
+        // This ensures --scale-solar flag is applied when --no-auto-calibrate is used
+        solarHourlyScale.set(h, autoCalibrate ? 1.0 : effectiveSolarScale);
       }
+
+      // Per-station scale factors for WIND stations (enables station-specific calibration)
+      // Key: stationCode, Value: scale factor (calculated during auto-calibration)
+      const windStationScale = new Map<string, number>();
+
+      // Per-station scale factors for SOLAR stations (enables station-specific calibration)
+      // Key: stationCode, Value: scale factor (calculated during auto-calibration)
+      const solarStationScale = new Map<string, number>();
 
       // Per-station scale factors for OTHER stations (hydro, geothermal, etc.)
       // Key: stationCode, Value: scale factor (initialized to 1.0)
@@ -2058,13 +2095,12 @@ cfacCommand
       );
 
       // Fetch weather for other stations using cluster coordinates
+      // IMPORTANT: Fetch ALL clusters, not just non-wind/solar, because some clusters
+      // contain BOTH solar AND hydro stations (e.g., BATAAN_SOLAR has 01HERMOSA hydro)
+      // Wind/solar stations use their specific weather anyway, so duplicates are harmless
       console.log('   Fetching cluster weather for other station types...');
-      const nonWindSolarClusters = clusters.filter(c =>
-        !windStationLocations.some(w => w.stationCodes.some(s => c.stationCodes.includes(s))) &&
-        !solarStationLocations.some(sol => sol.stationCodes.some(s => c.stationCodes.includes(s)))
-      );
       const trainClusterWeatherCsv = await weatherService.fetchAllClusters(
-        nonWindSolarClusters,
+        clusters,  // Fetch ALL clusters (was: nonWindSolarClusters)
         trainStart,
         trainEnd,
         (msg) => console.log(`   ${msg}`),
@@ -2518,8 +2554,10 @@ cfacCommand
       );
 
       // Fetch forecast weather for other stations (cluster-based)
+      // IMPORTANT: Fetch ALL clusters, not just non-wind/solar, because some clusters
+      // contain BOTH solar AND hydro stations (e.g., BATAAN_SOLAR has 01HERMOSA hydro)
       const forecastClusterWeatherCsv = await weatherService.fetchAllClusters(
-        nonWindSolarClusters,
+        clusters,  // Fetch ALL clusters (was: nonWindSolarClusters)
         options.start,
         options.end,
         (msg) => console.log(`   ${msg}`),
@@ -2614,6 +2652,11 @@ cfacCommand
           let solarBiasSum = 0, solarCount = 0;
           let windBiasSum = 0, windCount = 0;
 
+          // Per-station tracking for wind calibration
+          const windActualSum = new Map<string, number>();
+          const windPredSum = new Map<string, number>();
+          const windSampleCount = new Map<string, number>();
+
           // Calibrate wind using training weather
           for (const stationCode of windStations) {
             const windClusterId = `WIND_${stationCode}`;
@@ -2651,6 +2694,13 @@ cfacCommand
               const bias = predicted - actual;  // Positive = over-forecast, Negative = under-forecast
               windBiasSum += bias;
               windCount++;
+
+              // Track per-station sums for ratio-based scaling
+              if (predicted > 0.01) {
+                windActualSum.set(stationCode, (windActualSum.get(stationCode) || 0) + actual);
+                windPredSum.set(stationCode, (windPredSum.get(stationCode) || 0) + predicted);
+                windSampleCount.set(stationCode, (windSampleCount.get(stationCode) || 0) + 1);
+              }
             }
           }
 
@@ -2752,6 +2802,138 @@ cfacCommand
           console.log(`   Applied global scale factors (used when hourly calibration unavailable):`);
           console.log(`      Solar: ${(effectiveSolarScale * 100).toFixed(1)}% (${calibratedSolarBias < 0 ? 'compensating for under-forecast' : 'compensating for over-forecast'})`);
           console.log(`      Wind:  ${(effectiveWindScale * 100).toFixed(1)}% (${calibratedWindBias < 0 ? 'compensating for under-forecast' : 'compensating for over-forecast'})`);
+
+          // NOTE: Per-station wind calibration is DISABLED because wind patterns are too variable
+          // between seasons. The calibration period (e.g., Dec 18-31) often has very different
+          // wind patterns than the forecast period (e.g., Jan 1-14), causing overcorrection.
+          // Wind uses global bias correction only (effectiveWindScale).
+          // If you want to experiment with per-station wind calibration, uncomment the code below.
+          /*
+          console.log(`   Calibrating WIND stations (per-station):`);
+          let windCalibrated = 0;
+          let windSignificantAdjustments = 0;
+          for (const stationCode of windStations) {
+            const count = windSampleCount.get(stationCode) || 0;
+            if (count >= 10) {
+              const avgActual = (windActualSum.get(stationCode) || 0) / count;
+              const avgPred = (windPredSum.get(stationCode) || 0) / count;
+              const scale = avgPred > 0.01 ? avgActual / avgPred : 1.0;
+              const clampedScale = Math.max(0.7, Math.min(1.4, scale));
+              windStationScale.set(stationCode, clampedScale);
+              windCalibrated++;
+              if (Math.abs(scale - 1.0) > 0.15) {
+                const direction = scale < 1.0 ? 'OVER-predicting' : 'UNDER-predicting';
+                console.log(`      ${stationCode}: avgActual=${(avgActual * 100).toFixed(1)}%, avgPred=${(avgPred * 100).toFixed(1)}% → scale=${(clampedScale * 100).toFixed(1)}% (${direction})`);
+                windSignificantAdjustments++;
+              }
+            } else {
+              windStationScale.set(stationCode, 1.0);
+            }
+          }
+          console.log(`      Calibrated ${windCalibrated} wind stations (${windSignificantAdjustments} with significant adjustments)`);
+          */
+
+          // Calibrate SOLAR stations - per-station RATIO-based scaling
+          // This addresses individual station characteristics (panel efficiency, tracking, inverter, local conditions)
+          console.log(`   Calibrating SOLAR stations (per-station):`);
+          const solarActualSum = new Map<string, number>();
+          const solarPredSum = new Map<string, number>();
+          const solarSampleCount = new Map<string, number>();
+
+          for (const stationCode of solarStations) {
+            const solarClusterId = `SOLAR_${stationCode}`;
+            const stationWeather = trainClusterWeather.get(solarClusterId);
+            if (!stationWeather) continue;
+
+            // Check model availability based on mode
+            let hasModel = false;
+            if (solarMrecHybrid) {
+              hasModel = solarMrecHybridModels.has(stationCode);
+            } else if (solarMrec) {
+              hasModel = solarMrecModels.has(stationCode);
+            } else if (solarPhysicsOnly) {
+              hasModel = solarPhysicsModels.has(stationCode);
+            } else {
+              hasModel = solarHybridModels.has(stationCode);
+            }
+            if (!hasModel) continue;
+
+            for (const [ts, weather] of stationWeather) {
+              // Only use data from calibration period
+              if (ts < calibrationStartTs || ts > calibrationEndTs) continue;
+
+              const key = `${ts}_${stationCode}`;
+              const actual = calibrationActuals.get(key);
+              if (actual === undefined || actual < 0.01) continue;
+
+              const datetime = new Date(ts);
+              const hour = datetime.getHours();
+
+              // Only daylight hours (6-18) are meaningful for solar
+              if (hour < 6 || hour > 18) continue;
+
+              let rawPrediction: number;
+
+              if (solarMrecHybrid) {
+                const model = solarMrecHybridModels.get(stationCode)!;
+                if (!model.isReady()) continue;
+                rawPrediction = model.predict(weather, datetime);
+              } else if (solarMrec) {
+                const model = solarMrecModels.get(stationCode)!;
+                if (!model.isCalibrated()) continue;
+                rawPrediction = model.predict(weather.solarRadiation);
+              } else if (solarPhysicsOnly) {
+                const physicsModel = solarPhysicsModels.get(stationCode)!;
+                const physicsPred = physicsModel.predict(weather.solarRadiation, weather.temperature);
+                const biasCorr = solarBiasCorrections.get(stationCode) || 0;
+                rawPrediction = physicsPred + biasCorr;
+              } else {
+                const model = solarHybridModels.get(stationCode)!;
+                rawPrediction = model.predict(weather, datetime);
+              }
+
+              // Apply existing corrections (bias corrector, hourly scale)
+              const correctedPred = biasCorrector.applyCorrection(stationCode, rawPrediction);
+              const hourlyScale = solarHourlyScale.get(hour) ?? effectiveSolarScale;
+              const predicted = correctedPred * hourlyScale;
+
+              if (predicted < 0.01) continue;  // Skip near-zero predictions
+
+              // Track sums for ratio-based scaling
+              solarActualSum.set(stationCode, (solarActualSum.get(stationCode) || 0) + actual);
+              solarPredSum.set(stationCode, (solarPredSum.get(stationCode) || 0) + predicted);
+              solarSampleCount.set(stationCode, (solarSampleCount.get(stationCode) || 0) + 1);
+            }
+          }
+
+          // Calculate per-station scale factors using RATIO method
+          let solarCalibrated = 0;
+          let solarSignificantAdjustments = 0;
+          for (const stationCode of solarStations) {
+            const count = solarSampleCount.get(stationCode) || 0;
+            if (count >= 10) {  // Need at least 10 samples for reliable calibration
+              const avgActual = (solarActualSum.get(stationCode) || 0) / count;
+              const avgPred = (solarPredSum.get(stationCode) || 0) / count;
+
+              // Ratio-based scale: scale = actual/predicted (direct multiplicative correction)
+              const scale = avgPred > 0.01 ? avgActual / avgPred : 1.0;
+              // Clamp to reasonable range [0.5, 2.0] for solar
+              const clampedScale = Math.max(0.5, Math.min(2.0, scale));
+              solarStationScale.set(stationCode, clampedScale);
+              solarCalibrated++;
+
+              // Only show significant calibrations (>15% difference)
+              if (Math.abs(scale - 1.0) > 0.15) {
+                const direction = scale < 1.0 ? 'OVER-predicting' : 'UNDER-predicting';
+                console.log(`      ${stationCode}: avgActual=${(avgActual * 100).toFixed(1)}%, avgPred=${(avgPred * 100).toFixed(1)}% → scale=${(clampedScale * 100).toFixed(1)}% (${direction})`);
+                solarSignificantAdjustments++;
+              }
+            } else {
+              // Not enough samples, use 1.0 (will rely on hourly scale)
+              solarStationScale.set(stationCode, 1.0);
+            }
+          }
+          console.log(`      Calibrated ${solarCalibrated} solar stations (${solarSignificantAdjustments} with significant adjustments)`);
 
           // Calibrate OTHER stations (hydro, geothermal, etc.) - per-station RATIO-based scaling
           // This is critical for seasonal adjustment (e.g., hydro wet→dry season transition)
@@ -2863,7 +3045,9 @@ cfacCommand
           }
 
           const correctedCFac = biasCorrector.applyCorrection(stationCode, rawPrediction);
-          const scaledCFac = correctedCFac * effectiveWindScale;
+          // Apply: global wind scale * per-station scale (individual calibration)
+          const stationScale = windStationScale.get(stationCode) ?? 1.0;
+          const scaledCFac = correctedCFac * effectiveWindScale * stationScale;
           forecasts.push({
             datetime,
             stationCode,
@@ -2926,10 +3110,11 @@ cfacCommand
           }
 
           const correctedCFac = biasCorrector.applyCorrection(stationCode, rawPrediction);
-          // Use per-hour scale factor if available, otherwise use global scale
+          // Apply: hourly scale (global hour-of-day adjustment) * per-station scale (individual calibration)
           const hour = datetime.getHours();
           const hourlyScale = solarHourlyScale.get(hour) ?? effectiveSolarScale;
-          const scaledCFac = correctedCFac * hourlyScale;
+          const stationScale = solarStationScale.get(stationCode) ?? 1.0;
+          const scaledCFac = correctedCFac * hourlyScale * stationScale;
           forecasts.push({
             datetime,
             stationCode,
@@ -2940,44 +3125,20 @@ cfacCommand
         }
 
         // OTHER stations: Use ModelRouter (profile-based)
+        // Profile-based models (hydro, geothermal, biomass, battery) don't actually need weather
+        // They only use datetime for prediction, but the API still requires a weather map
         for (const stationCode of otherTrainingStations) {
-          const clusterId = capacityFactorService.getClusterForStation(stationCode);
-          const clusterWeather = forecastClusterWeather.get(clusterId || '');
-          let weather: CFacWeatherFeatures | undefined;
-
-          if (clusterWeather) {
-            weather = clusterWeather.get(ts);
-          }
-
-          // Fallback: average weather from all clusters
-          if (!weather) {
-            let sumTemp = 0, sumWind = 0, sumGust = 0, sumSolar = 0, sumCloud = 0, count = 0;
-            for (const [, wMap] of forecastClusterWeather) {
-              const w = wMap.get(ts);
-              if (w) {
-                sumTemp += w.temperature;
-                sumWind += w.windSpeed;
-                sumGust += w.windGust;
-                sumSolar += w.solarRadiation;
-                sumCloud += w.cloudCover;
-                count++;
-              }
-            }
-            if (count > 0) {
-              weather = {
-                temperature: sumTemp / count,
-                windSpeed: sumWind / count,
-                windGust: sumGust / count,
-                solarRadiation: sumSolar / count,
-                cloudCover: sumCloud / count
-              };
-            }
-          }
-
-          if (!weather) continue;
+          // Use dummy weather - profile-based models ignore it anyway
+          const dummyWeather: CFacWeatherFeatures = {
+            temperature: 30,
+            windSpeed: 5,
+            windGust: 8,
+            cloudCover: 50,
+            solarRadiation: 500
+          };
 
           const stationWeatherMap = new Map<string, CFacWeatherFeatures>();
-          stationWeatherMap.set(stationCode, weather);
+          stationWeatherMap.set(stationCode, dummyWeather);
 
           const predictions = modelRouter.predictAll([stationCode], stationWeatherMap, datetime);
           for (const pred of predictions) {
@@ -5236,6 +5397,388 @@ mrecCommand
 
       closeDatabase();
       console.log('✅ Three-way comparison complete!\n');
+
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      if (error.stack) console.error(error.stack);
+      process.exit(1);
+    }
+  });
+
+// CFAC MREC COMPARE-PHYSICS - Compare new physics-based model against existing models
+mrecCommand
+  .command('compare-physics')
+  .description('Compare Physics-Based model vs Weather-Only vs 4-Tier Hybrid')
+  .requiredOption('-t, --training <path>', 'Training data (July-Oct)')
+  .requiredOption('-a, --actual <path>', 'Test/actual data (Nov-Dec)')
+  .option('--cache <dir>', 'Weather cache directory', './weather_cache')
+  .option('--stations <file>', 'Stations JSON file', 'src/data/stations.json')
+  .action(async (options) => {
+    try {
+      const db = getDatabase();
+
+      console.log('\n═══════════════════════════════════════════════════════════════════════════════════════════════');
+      console.log('          PHYSICS-BASED WIND MODEL COMPARISON                                                    ');
+      console.log('   Weather-Only Hybrid vs 4-Tier Hybrid vs NEW Physics Hybrid                                   ');
+      console.log('═══════════════════════════════════════════════════════════════════════════════════════════════\n');
+
+      // Load station metadata
+      await capacityFactorService.loadStations(options.stations);
+      const clusters = capacityFactorService.getClusters();
+
+      // Helper: Proper CSV parsing
+      const parseCSVLine = (line: string): string[] => {
+        const result: string[] = [];
+        let current = '';
+        let inQuotes = false;
+        for (let i = 0; i < line.length; i++) {
+          const char = line[i];
+          if (char === '"') {
+            inQuotes = !inQuotes;
+          } else if (char === ',' && !inQuotes) {
+            result.push(current.trim());
+            current = '';
+          } else {
+            current += char;
+          }
+        }
+        result.push(current.trim());
+        return result;
+      };
+
+      // Step 1: Parse training data
+      console.log('📚 STEP 1: Loading training data (July-October)');
+      console.log('─────────────────────────────────────────────────────────────────────────────\n');
+
+      const trainingData = await capacityFactorService.parseCapacityFactorDirectory(
+        options.training,
+        (msg) => console.log(`   ${msg}`)
+      );
+
+      const trainData = trainingData.filter(r => {
+        const month = r.datetime.getMonth() + 1;
+        return month >= 7 && month <= 10;
+      });
+      console.log(`\n   Training samples: ${trainData.length} records (Jul-Oct)`);
+
+      // Step 2: Parse test data
+      console.log('\n📋 STEP 2: Loading test data (November-December)');
+      console.log('─────────────────────────────────────────────────────────────────────────────\n');
+
+      const testData = await capacityFactorService.parseCapacityFactorDirectory(
+        options.actual,
+        (msg) => console.log(`   ${msg}`)
+      );
+
+      const testRecords = testData.filter(r => {
+        const month = r.datetime.getMonth() + 1;
+        return month >= 11;
+      });
+      console.log(`\n   Test samples: ${testRecords.length} records (Nov-Dec)`);
+
+      // Get wind station codes
+      const windStationCodes = [...new Set(trainData.map(r => r.stationCode))].filter(code =>
+        code.includes('BURGOS') || code.includes('LAOAG') || code.includes('PAGUDPUD') ||
+        code.includes('NABAS_W') || code.includes('STBARBRA_W') || code.includes('DOLORES') ||
+        code.includes('BVISTA')
+      );
+      console.log(`\n   Wind stations to evaluate: ${windStationCodes.join(', ')}`);
+
+      const windClusterIds = new Set<string>();
+      for (const code of windStationCodes) {
+        const clusterId = capacityFactorService.getClusterForStation(code);
+        if (clusterId) windClusterIds.add(clusterId);
+      }
+
+      // Step 3: Load weather data
+      console.log('\n🌤️  STEP 3: Loading weather data');
+      console.log('─────────────────────────────────────────────────────────────────────────────\n');
+
+      const sortedTest = [...testRecords].sort((a, b) => a.datetime.getTime() - b.datetime.getTime());
+      const testStart = DateTime.fromJSDate(sortedTest[0].datetime).toISODate()!;
+      const testEnd = DateTime.fromJSDate(sortedTest[sortedTest.length - 1].datetime).toISODate()!;
+      console.log(`   Test period: ${testStart} to ${testEnd}`);
+
+      const sortedTrain = [...trainData].sort((a, b) => a.datetime.getTime() - b.datetime.getTime());
+      const trainStart = DateTime.fromJSDate(sortedTrain[0].datetime).toISODate()!;
+      const trainEnd = DateTime.fromJSDate(sortedTrain[sortedTrain.length - 1].datetime).toISODate()!;
+      console.log(`   Training period: ${trainStart} to ${trainEnd}`);
+
+      const windClusters = clusters.filter(c => windClusterIds.has(c.clusterId));
+
+      const loadWeatherForPeriod = (start: string, end: string) => {
+        const clusterWeather = new Map<string, Map<number, CFacWeatherFeatures>>();
+
+        for (const cluster of windClusters) {
+          const weatherMap = new Map<number, CFacWeatherFeatures>();
+          let loadedCount = 0;
+
+          let currentDate = DateTime.fromISO(start);
+          const endDate = DateTime.fromISO(end);
+
+          while (currentDate <= endDate) {
+            const yearMonth = currentDate.toFormat('yyyy-MM');
+            const dateStr = currentDate.toISODate()!;
+            const cachePath = join(options.cache, cluster.clusterId, yearMonth, `${dateStr}.csv`);
+
+            if (existsSync(cachePath)) {
+              const csvContent = readFileSync(cachePath, 'utf-8');
+              const lines = csvContent.split('\n').filter(l => l.trim());
+
+              if (lines.length >= 2) {
+                const headers = parseCSVLine(lines[0]).map(h => h.toLowerCase());
+                const datetimeIdx = headers.indexOf('datetime');
+                const tempIdx = headers.indexOf('temp');
+                const windSpeedIdx = headers.indexOf('windspeed');
+                const windSpeed100Idx = headers.indexOf('windspeed100');
+                const windGustIdx = headers.indexOf('windgust');
+                const cloudCoverIdx = headers.indexOf('cloudcover');
+
+                if (datetimeIdx >= 0 && windSpeedIdx >= 0) {
+                  for (let i = 1; i < lines.length; i++) {
+                    const values = parseCSVLine(lines[i]);
+                    const datetimeStr = values[datetimeIdx];
+                    if (!datetimeStr) continue;
+
+                    const dt = DateTime.fromISO(datetimeStr);
+                    if (!dt.isValid) continue;
+
+                    const ts = dt.plus({ hours: 1 }).toMillis();
+
+                    const weather: CFacWeatherFeatures = {
+                      temperature: tempIdx >= 0 ? parseFloat(values[tempIdx]) || 25 : 25,
+                      windSpeed: parseFloat(values[windSpeedIdx]) || 0,
+                      windSpeed100: windSpeed100Idx >= 0 ? parseFloat(values[windSpeed100Idx]) : undefined,
+                      windGust: windGustIdx >= 0 ? parseFloat(values[windGustIdx]) || 0 : 0,
+                      cloudCover: cloudCoverIdx >= 0 ? parseFloat(values[cloudCoverIdx]) || 50 : 50,
+                      solarRadiation: 0,
+                    };
+
+                    weatherMap.set(ts, weather);
+                    loadedCount++;
+                  }
+                }
+              }
+            }
+            currentDate = currentDate.plus({ days: 1 });
+          }
+
+          clusterWeather.set(cluster.clusterId, weatherMap);
+          console.log(`   ${cluster.clusterId}: ${loadedCount} weather records`);
+        }
+
+        return clusterWeather;
+      };
+
+      console.log('\n   Loading training weather...');
+      const trainWeather = loadWeatherForPeriod(trainStart, trainEnd);
+      console.log('\n   Loading test weather...');
+      const testWeather = loadWeatherForPeriod(testStart, testEnd);
+
+      // Step 4: Train all model types
+      console.log('\n🔧 STEP 4: Training all model types');
+      console.log('─────────────────────────────────────────────────────────────────────────────\n');
+
+      // Build training samples
+      const hybridTrainingSamples: CFacTrainingSample[] = [];
+      for (const record of trainData) {
+        if (!windStationCodes.includes(record.stationCode)) continue;
+
+        const clusterId = capacityFactorService.getClusterForStation(record.stationCode);
+        if (!clusterId) continue;
+
+        const weatherMap = trainWeather.get(clusterId);
+        if (!weatherMap) continue;
+
+        const ts = record.datetime.getTime();
+        const weather = weatherMap.get(ts);
+        if (!weather) continue;
+
+        const dt = record.datetime;
+        const dayOfWeek = dt.getDay();
+        hybridTrainingSamples.push({
+          stationCode: record.stationCode,
+          datetime: record.datetime,
+          stationType: StationType.WIND,
+          actualCFac: record.capacityFactor,
+          weather,
+          hour: dt.getHours(),
+          dayOfWeek,
+          month: dt.getMonth() + 1,
+          isWeekend: dayOfWeek === 0 || dayOfWeek === 6
+        });
+      }
+
+      // Calibrate MREC
+      console.log('   [A] Calibrating MREC...');
+      const mrecCalibrationData: MRECCalibrationData[] = hybridTrainingSamples.map(s => ({
+        datetime: s.datetime,
+        stationCode: s.stationCode,
+        capacityFactor: s.actualCFac,
+        windSpeed: s.weather.windSpeed
+      }));
+
+      const mrecModels = await calibrateAllMREC(mrecCalibrationData, (msg: string) => console.log(`      ${msg}`));
+
+      const mrecFactorsList: import('./types/capacityFactor.js').MRECFactors[] = [];
+      for (const [, model] of mrecModels) {
+        const factors = model.getFactors();
+        if (factors && factors.calibrated) {
+          mrecFactorsList.push(factors);
+        }
+      }
+
+      // Train Weather-Only Hybrid
+      console.log('\n   [B] Training Weather-Only Hybrid...');
+      const weatherHybridModels = await trainAllWeatherHybrid(
+        mrecFactorsList,
+        hybridTrainingSamples,
+        false,
+        (msg: string) => console.log(`      ${msg}`)
+      );
+
+      // Train 4-Tier Hybrid (the broken one)
+      console.log('\n   [C] Training 4-Tier Hybrid (original)...');
+      const tier4Models = await trainAll4TierHybrid(
+        hybridTrainingSamples,
+        false,
+        (msg: string) => console.log(`      ${msg}`),
+        false
+      );
+
+      // Train NEW Physics Hybrid
+      console.log('\n   [D] Training NEW Physics Hybrid (fixed power curve)...');
+      const physicsHybridModels = await trainAllPhysicsHybrid(
+        hybridTrainingSamples,
+        false,
+        (msg: string) => console.log(`      ${msg}`),
+        false
+      );
+
+      // Step 5: Evaluate on test data
+      console.log('\n📊 STEP 5: Evaluating all models on test data (Nov-Dec)');
+      console.log('─────────────────────────────────────────────────────────────────────────────\n');
+
+      interface StationResults {
+        weatherMAPE: number;
+        tier4MAPE: number;
+        physicsMAPE: number;
+        samples: number;
+      }
+      const results = new Map<string, StationResults>();
+
+      for (const stationCode of windStationCodes) {
+        const weatherModel = weatherHybridModels.get(stationCode);
+        const tier4Model = tier4Models.get(stationCode);
+        const physicsModel = physicsHybridModels.get(stationCode);
+
+        if (!weatherModel || !tier4Model || !physicsModel) continue;
+
+        const clusterId = capacityFactorService.getClusterForStation(stationCode);
+        if (!clusterId) continue;
+
+        const weatherMap = testWeather.get(clusterId);
+        if (!weatherMap) continue;
+
+        const stationTestRecords = testRecords.filter(r => r.stationCode === stationCode);
+        if (stationTestRecords.length < 10) continue;
+
+        let weatherErrorSum = 0;
+        let tier4ErrorSum = 0;
+        let physicsErrorSum = 0;
+        let validCount = 0;
+
+        for (const record of stationTestRecords) {
+          const ts = record.datetime.getTime();
+          const weather = weatherMap.get(ts);
+          if (!weather) continue;
+
+          const actual = record.capacityFactor;
+          if (actual < 0.01) continue;
+
+          const weatherPred = weatherModel.predict(weather, record.datetime);
+          const tier4Pred = tier4Model.predict(weather, record.datetime);
+          const physicsPred = physicsModel.predict(weather, record.datetime);
+
+          weatherErrorSum += Math.abs((weatherPred - actual) / actual);
+          tier4ErrorSum += Math.abs((tier4Pred - actual) / actual);
+          physicsErrorSum += Math.abs((physicsPred - actual) / actual);
+          validCount++;
+        }
+
+        if (validCount > 0) {
+          results.set(stationCode, {
+            weatherMAPE: (weatherErrorSum / validCount) * 100,
+            tier4MAPE: (tier4ErrorSum / validCount) * 100,
+            physicsMAPE: (physicsErrorSum / validCount) * 100,
+            samples: validCount
+          });
+        }
+      }
+
+      // Print results
+      console.log('┌───────────────────┬───────────────────┬──────────────────┬───────────────────┬─────────┐');
+      console.log('│ Station           │  Weather-Only     │  4-Tier (broken) │  Physics (NEW)    │ Samples │');
+      console.log('├───────────────────┼───────────────────┼──────────────────┼───────────────────┼─────────┤');
+
+      let totalWeatherMAPE = 0;
+      let totalTier4MAPE = 0;
+      let totalPhysicsMAPE = 0;
+      let stationCount = 0;
+
+      for (const [stationCode, result] of results) {
+        const best = Math.min(result.weatherMAPE, result.tier4MAPE, result.physicsMAPE);
+        const weatherMark = result.weatherMAPE === best ? '*' : ' ';
+        const tier4Mark = result.tier4MAPE === best ? '*' : ' ';
+        const physicsMark = result.physicsMAPE === best ? '*' : ' ';
+
+        console.log(`│ ${stationCode.padEnd(17)} │ ${result.weatherMAPE.toFixed(1).padStart(15)}%${weatherMark}│ ${result.tier4MAPE.toFixed(1).padStart(14)}%${tier4Mark}│ ${result.physicsMAPE.toFixed(1).padStart(15)}%${physicsMark}│ ${result.samples.toString().padStart(7)} │`);
+
+        totalWeatherMAPE += result.weatherMAPE;
+        totalTier4MAPE += result.tier4MAPE;
+        totalPhysicsMAPE += result.physicsMAPE;
+        stationCount++;
+      }
+
+      console.log('└───────────────────┴───────────────────┴──────────────────┴───────────────────┴─────────┘');
+      console.log('   (* indicates best performing model for each station)');
+
+      if (stationCount > 0) {
+        const avgWeatherMAPE = totalWeatherMAPE / stationCount;
+        const avgTier4MAPE = totalTier4MAPE / stationCount;
+        const avgPhysicsMAPE = totalPhysicsMAPE / stationCount;
+
+        console.log('\n═══════════════════════════════════════════════════════════════════════════════════════════════');
+        console.log('                                    FINAL SUMMARY                                              ');
+        console.log('═══════════════════════════════════════════════════════════════════════════════════════════════\n');
+
+        console.log('   ┌─────────────────────────────────┬────────────────────┐');
+        console.log('   │ Model                           │ Average MAPE       │');
+        console.log('   ├─────────────────────────────────┼────────────────────┤');
+        console.log(`   │ Weather-Only Hybrid             │ ${avgWeatherMAPE.toFixed(1).padStart(14)}%   │`);
+        console.log(`   │ 4-Tier Hybrid (broken)          │ ${avgTier4MAPE.toFixed(1).padStart(14)}%   │`);
+        console.log(`   │ Physics Hybrid (NEW)            │ ${avgPhysicsMAPE.toFixed(1).padStart(14)}%   │`);
+        console.log('   └─────────────────────────────────┴────────────────────┘');
+
+        const bestMAPE = Math.min(avgWeatherMAPE, avgTier4MAPE, avgPhysicsMAPE);
+        let winner = '';
+        if (bestMAPE === avgPhysicsMAPE) winner = 'Physics Hybrid (NEW)';
+        else if (bestMAPE === avgWeatherMAPE) winner = 'Weather-Only Hybrid';
+        else winner = '4-Tier Hybrid';
+
+        console.log(`\n   🏆 Best Model: ${winner} with ${bestMAPE.toFixed(1)}% MAPE`);
+
+        // Calculate improvement
+        const improvementOver4Tier = ((avgTier4MAPE - avgPhysicsMAPE) / avgTier4MAPE) * 100;
+        const improvementOverWeather = ((avgWeatherMAPE - avgPhysicsMAPE) / avgWeatherMAPE) * 100;
+
+        console.log('\n   📈 Physics Model Improvement:');
+        console.log(`      vs 4-Tier (broken): ${improvementOver4Tier > 0 ? '+' : ''}${improvementOver4Tier.toFixed(1)}%`);
+        console.log(`      vs Weather-Only:    ${improvementOverWeather > 0 ? '+' : ''}${improvementOverWeather.toFixed(1)}%`);
+      }
+
+      closeDatabase();
+      console.log('\n✅ Physics model comparison complete!\n');
 
     } catch (error: any) {
       console.error(`\n❌ Error: ${error.message}`);
@@ -8153,6 +8696,764 @@ cfacCommand
       if (error.stack) {
         console.error(error.stack);
       }
+      process.exit(1);
+    }
+  });
+
+// =============================================================================
+// SCHEDULER COMMANDS - Background forecast service
+// =============================================================================
+
+const scheduler = program.command('scheduler').description('Scheduled forecast generation service');
+
+// scheduler run - Run calibrated daily/weekly forecasts
+scheduler
+  .command('run')
+  .description('Run calibrated daily and weekly forecasts (auto-calibrates before each run)')
+  .option('-d, --date <date>', 'Date to run as (YYYY-MM-DD), default: today')
+  .option('--daily', 'Run only daily forecast (next day)')
+  .option('--weekly', 'Run only weekly forecast (next 7 days)')
+  .option('--demand-only', 'Only generate demand forecasts')
+  .option('--cfac-only', 'Only generate CFAC forecasts')
+  .option('--demand-path <path>', 'Path to demand training data', 'Data Samples/Demand')
+  .option('--cfac-path <path>', 'Path to cfac training data', 'Data Samples/Capacity Factor')
+  .option('--output <dir>', 'Output directory', './output')
+  .option('--db <path>', 'Scheduler database path', './forecast.db')
+  // Calibration options
+  .option('--calib-days <days>', 'Days to use for calibration', '7')
+  .option('--calib-threshold <percent>', 'Max acceptable calibration deviation', '5')
+  .option('--max-iterations <n>', 'Max calibration iterations', '3')
+  // Demand model options
+  .option('--demand-model <type>', 'Demand model: hybrid, regression, xgboost', 'hybrid')
+  // CFAC model options
+  .option('--use-xgboost', 'Use XGBoost for CFAC residual models')
+  .option('--asymmetric-loss', 'Penalize under-predictions 2x for CFAC')
+  .option('--bias-correction', 'Enable station-specific bias correction')
+  .action(async (options) => {
+    try {
+      const service = new ForecastSchedulerService({
+        demandDataPath: options.demandPath,
+        cfacDataPath: options.cfacPath,
+        outputDir: options.output,
+        dbPath: options.db,
+        // Calibration options
+        calibrationDays: parseInt(options.calibDays) || 7,
+        calibrationThreshold: parseInt(options.calibThreshold) || 5,
+        maxCalibrationIterations: parseInt(options.maxIterations) || 3,
+        // Demand options
+        demandModel: options.demandModel,
+        // CFAC options
+        useXgboost: options.useXgboost || false,
+        asymmetricLoss: options.asymmetricLoss || false,
+        biasCorrection: options.biasCorrection || false
+      });
+
+      const asOfDate = options.date || DateTime.now().toISODate()!;
+      let forecastType: 'demand' | 'cfac' | 'both' = 'both';
+      if (options.demandOnly) forecastType = 'demand';
+      if (options.cfacOnly) forecastType = 'cfac';
+
+      let horizon: 'daily' | 'weekly' | 'both' = 'both';
+      if (options.daily && !options.weekly) horizon = 'daily';
+      if (options.weekly && !options.daily) horizon = 'weekly';
+
+      const result = await service.runCalibratedForecasts(asOfDate, {
+        forecastType,
+        horizon,
+        verbose: true
+      });
+
+      const summary = service.getRunsSummary();
+      console.log('\n📊 Run Summary:');
+      console.log(`   Total runs: ${summary.total}`);
+      console.log(`   Completed: ${summary.completed}`);
+
+      service.close();
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+// scheduler backfill - Generate calibrated forecasts for a date range
+scheduler
+  .command('backfill')
+  .description('Generate calibrated forecasts for each date in a range')
+  .requiredOption('-s, --start <date>', 'Start date (YYYY-MM-DD)')
+  .requiredOption('-e, --end <date>', 'End date (YYYY-MM-DD)')
+  .option('--daily', 'Generate only daily forecasts')
+  .option('--weekly', 'Generate only weekly forecasts')
+  .option('--demand-only', 'Only generate demand forecasts')
+  .option('--cfac-only', 'Only generate CFAC forecasts')
+  .option('--demand-path <path>', 'Path to demand training data', 'Data Samples/Demand')
+  .option('--cfac-path <path>', 'Path to cfac training data', 'Data Samples/Capacity Factor')
+  .option('--output <dir>', 'Output directory', './output')
+  .option('--db <path>', 'Scheduler database path', './forecast.db')
+  .option('--calib-days <days>', 'Days to use for calibration', '7')
+  .action(async (options) => {
+    try {
+      const service = new ForecastSchedulerService({
+        demandDataPath: options.demandPath,
+        cfacDataPath: options.cfacPath,
+        outputDir: options.output,
+        dbPath: options.db,
+        calibrationDays: parseInt(options.calibDays) || 7
+      });
+
+      let horizon: 'daily' | 'weekly' | 'both' = 'both';
+      if (options.daily && !options.weekly) horizon = 'daily';
+      if (options.weekly && !options.daily) horizon = 'weekly';
+
+      let forecastType: 'demand' | 'cfac' | 'both' = 'both';
+      if (options.demandOnly) forecastType = 'demand';
+      if (options.cfacOnly) forecastType = 'cfac';
+
+      const start = DateTime.fromISO(options.start);
+      const end = DateTime.fromISO(options.end);
+      let current = start;
+      let runCount = 0;
+
+      console.log(`\n🔄 Backfilling calibrated forecasts from ${options.start} to ${options.end}`);
+
+      while (current <= end) {
+        const dateStr = current.toISODate()!;
+        console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+        console.log(`Processing: ${dateStr}`);
+
+        try {
+          await service.runCalibratedForecasts(dateStr, {
+            horizon,
+            forecastType,
+            verbose: false
+          });
+          runCount++;
+          console.log(`   ✓ ${dateStr} complete`);
+        } catch (error: any) {
+          console.log(`   ✗ ${dateStr}: ${error.message}`);
+        }
+
+        current = current.plus({ days: 1 });
+      }
+
+      console.log(`\n✅ Backfill complete: ${runCount} days processed`);
+
+      service.close();
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+// scheduler history - Show calibration history
+scheduler
+  .command('history')
+  .description('Show calibration and forecast run history')
+  .option('--db <path>', 'Database path', './forecast.db')
+  .option('-n, --limit <number>', 'Number of recent records to show', '10')
+  .action(async (options) => {
+    try {
+      const service = new ForecastSchedulerService({
+        demandDataPath: 'Data Samples/Demand',
+        cfacDataPath: 'Data Samples/Capacity Factor',
+        outputDir: './output',
+        dbPath: options.db
+      });
+
+      const history = service.getCalibrationHistory(parseInt(options.limit) || 10);
+      const summary = service.getRunsSummary();
+
+      console.log('\n📊 Calibration History:');
+      console.log('┌──────────────┬────────────┬────────────┬────────────────────────────┐');
+      console.log('│     Date     │ Wind Scale │ Solar Scale│          Status            │');
+      console.log('├──────────────┼────────────┼────────────┼────────────────────────────┤');
+      for (const h of history) {
+        const windScale = h.wind_scale > 0 ? `+${h.wind_scale}%` : `${h.wind_scale}%`;
+        const solarScale = h.solar_scale > 0 ? `+${h.solar_scale}%` : `${h.solar_scale}%`;
+        const status = h.within_threshold ? '✅ Within threshold' : '⚠️  Exceeded threshold';
+        console.log(`│ ${h.calibration_date.padEnd(12)} │ ${windScale.padStart(10)} │ ${solarScale.padStart(10)} │ ${status.padEnd(26)} │`);
+      }
+      console.log('└──────────────┴────────────┴────────────┴────────────────────────────┘');
+
+      console.log('\n📊 Run Summary:');
+      console.log(`   Total runs: ${summary.total}`);
+      console.log(`   Completed: ${summary.completed}`);
+      console.log(`   Failed: ${summary.failed}`);
+
+      service.close();
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+// scheduler status - Show scheduler status and history
+scheduler
+  .command('status')
+  .description('Show forecast scheduler status and run history')
+  .option('--db <path>', 'Database path', './forecast.db')
+  .option('-n, --limit <number>', 'Number of recent runs to show', '10')
+  .action(async (options) => {
+    try {
+      const Database = (await import('better-sqlite3')).default;
+      const db = new Database(options.db);
+
+      // Ensure tables exist
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS forecast_runs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_date TEXT NOT NULL,
+          run_time TEXT NOT NULL,
+          forecast_type TEXT NOT NULL,
+          horizon TEXT NOT NULL,
+          forecast_start TEXT NOT NULL,
+          forecast_end TEXT NOT NULL,
+          model_used TEXT,
+          training_mape REAL,
+          status TEXT DEFAULT 'pending',
+          records_generated INTEGER,
+          duration_ms INTEGER,
+          error_message TEXT,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS forecast_evaluations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_id INTEGER NOT NULL,
+          evaluated_at TEXT NOT NULL,
+          records_matched INTEGER,
+          records_unmatched INTEGER,
+          mape REAL,
+          mae REAL,
+          rmse REAL,
+          bias REAL,
+          breakdown TEXT,
+          notes TEXT
+        );
+      `);
+
+      const summary = db.prepare(`
+        SELECT
+          COUNT(*) as total,
+          SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+          SUM(CASE WHEN status = 'evaluated' THEN 1 ELSE 0 END) as evaluated,
+          SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
+          SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending
+        FROM forecast_runs
+      `).get() as any;
+
+      console.log('\n📊 Forecast Scheduler Status\n');
+      console.log('┌─────────────────────────────────────┐');
+      console.log(`│ Total runs:     ${String(summary?.total || 0).padStart(18)} │`);
+      console.log(`│ Completed:      ${String(summary?.completed || 0).padStart(18)} │`);
+      console.log(`│ Evaluated:      ${String(summary?.evaluated || 0).padStart(18)} │`);
+      console.log(`│ Pending:        ${String(summary?.pending || 0).padStart(18)} │`);
+      console.log(`│ Failed:         ${String(summary?.failed || 0).padStart(18)} │`);
+      console.log('└─────────────────────────────────────┘');
+
+      const avgMape = db.prepare(`
+        SELECT AVG(mape) as avg_mape, MIN(mape) as min_mape, MAX(mape) as max_mape
+        FROM forecast_evaluations
+      `).get() as any;
+
+      if (avgMape?.avg_mape) {
+        console.log('\n📈 Evaluation Metrics:');
+        console.log(`   Avg MAPE: ${avgMape.avg_mape.toFixed(2)}%`);
+        console.log(`   Min MAPE: ${avgMape.min_mape.toFixed(2)}%`);
+        console.log(`   Max MAPE: ${avgMape.max_mape.toFixed(2)}%`);
+      }
+
+      const recentRuns = db.prepare(`
+        SELECT r.*, e.mape, e.mae
+        FROM forecast_runs r
+        LEFT JOIN forecast_evaluations e ON r.id = e.run_id
+        ORDER BY r.run_date DESC, r.run_time DESC
+        LIMIT ?
+      `).all(parseInt(options.limit)) as any[];
+
+      if (recentRuns.length > 0) {
+        console.log(`\n📋 Recent Runs (last ${options.limit}):\n`);
+        console.log('┌──────────────┬─────────┬─────────┬────────────┬──────────┬─────────┐');
+        console.log('│ Run Date     │ Type    │ Horizon │ Target     │ Status   │ MAPE    │');
+        console.log('├──────────────┼─────────┼─────────┼────────────┼──────────┼─────────┤');
+
+        for (const run of recentRuns) {
+          const mape = run.mape ? `${run.mape.toFixed(1)}%` : '-';
+          console.log(`│ ${run.run_date} │ ${run.forecast_type.padEnd(7)} │ ${run.horizon.padEnd(7)} │ ${run.forecast_start} │ ${run.status.padEnd(8)} │ ${mape.padStart(7)} │`);
+        }
+        console.log('└──────────────┴─────────┴─────────┴────────────┴──────────┴─────────┘');
+      }
+
+      db.close();
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+// scheduler service - Run as background service
+scheduler
+  .command('service')
+  .description('Run as a background service (generates forecasts daily with auto-calibration)')
+  .option('--hour <hour>', 'Hour to run daily forecasts (0-23)', '6')
+  .option('--interval <minutes>', 'Check interval in minutes', '60')
+  .option('--demand-path <path>', 'Path to demand training data', 'Data Samples/Demand')
+  .option('--cfac-path <path>', 'Path to cfac training data', 'Data Samples/Capacity Factor')
+  .option('--output <dir>', 'Output directory', './output')
+  .option('--db <path>', 'Scheduler database path', './forecast.db')
+  // Calibration options
+  .option('--calib-days <days>', 'Days to use for calibration', '7')
+  .option('--calib-threshold <percent>', 'Max acceptable calibration deviation', '5')
+  .option('--max-iterations <n>', 'Max calibration iterations', '3')
+  // CFAC model options
+  .option('--use-xgboost', 'Use XGBoost for CFAC residual models')
+  .option('--bias-correction', 'Enable station-specific bias correction')
+  .action(async (options) => {
+    try {
+      const service = new ForecastSchedulerService({
+        demandDataPath: options.demandPath,
+        cfacDataPath: options.cfacPath,
+        outputDir: options.output,
+        dbPath: options.db,
+        useDb: true,
+        calibrationDays: parseInt(options.calibDays) || 7,
+        calibrationThreshold: parseFloat(options.calibThreshold) || 5,
+        maxCalibrationIterations: parseInt(options.maxIterations) || 3,
+        useXgboost: options.useXgboost || false,
+        biasCorrection: options.biasCorrection || false
+      });
+
+      // Run as service (blocks indefinitely)
+      await service.runAsService({
+        runHour: parseInt(options.hour),
+        interval: parseInt(options.interval)
+      });
+
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+// CAPACITY command group - Manage station capacity data
+const capacityCmd = program.command('capacity').description('Manage station capacity database and check for IEMOP updates');
+
+// capacity check - Check for updates from IEMOP
+capacityCmd
+  .command('check')
+  .description('Check IEMOP for new or changed stations')
+  .option('--force', 'Force refresh from IEMOP even if cache is fresh')
+  .option('--cache <dir>', 'Cache directory for IEMOP data', './iemop_cache')
+  .option('--stations <path>', 'Path to stations.json', './src/data/stations.json')
+  .option('-o, --output <file>', 'Output report to file')
+  .option('-v, --verbose', 'Show detailed progress')
+  .action(async (options) => {
+    try {
+      console.log('\n🔍 Checking IEMOP for station updates...\n');
+
+      const service = new CapacityUpdateService(options.cache, options.stations);
+      const report = await service.checkForUpdates(options.force, options.verbose);
+
+      // Display report
+      const reportText = service.generateReport(report);
+      console.log(reportText);
+
+      // Save report if output specified
+      if (options.output) {
+        writeFileSync(options.output, reportText);
+        console.log(`\n📄 Report saved to: ${options.output}`);
+      }
+
+      // Summary status
+      if (report.changes.length === 0) {
+        console.log('\n✅ Station database is up to date!');
+      } else {
+        console.log(`\n⚠️  Found ${report.changes.length} changes requiring attention.`);
+
+        const newStations = report.changes.filter(c => c.type === 'NEW_STATION');
+        if (newStations.length > 0) {
+          console.log(`\n📋 New stations requiring research:`);
+          for (const change of newStations) {
+            console.log(`   - ${change.stationCode}`);
+          }
+          console.log(`\nRun 'iload capacity research --station <code>' to research a new station.`);
+        }
+      }
+
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+// capacity compare - Compare local genlist with stations.json
+capacityCmd
+  .command('compare')
+  .description('Compare local genlist.csv with stations.json')
+  .requiredOption('-g, --genlist <file>', 'Path to genlist.csv file')
+  .option('--stations <path>', 'Path to stations.json', './src/data/stations.json')
+  .option('-v, --verbose', 'Show detailed output')
+  .action(async (options) => {
+    try {
+      console.log('\n📊 Comparing genlist.csv with stations.json...\n');
+
+      const service = new CapacityUpdateService('./iemop_cache', options.stations);
+      const { IEMOPDownloadService } = await import('./services/iemopDownloadService.js');
+      const downloader = new IEMOPDownloadService();
+
+      // Parse genlist
+      const records = downloader.parseGenlistCSV(options.genlist);
+      console.log(`Loaded ${records.length} records from genlist.csv`);
+
+      // Load stations.json
+      const stationsJson = service.loadStationsJSON();
+      const genlistStations = downloader.getUniqueStations(records);
+
+      // Compare
+      console.log(`\nGenlist unique stations: ${genlistStations.size}`);
+      console.log(`Our stations.json:       ${Object.keys(stationsJson.stations).length}`);
+
+      // Find missing in our database
+      const missing: string[] = [];
+      for (const [code] of genlistStations) {
+        if (!stationsJson.stations[code]) {
+          missing.push(code);
+        }
+      }
+
+      if (missing.length > 0) {
+        console.log(`\n⚠️  ${missing.length} stations in genlist not in our database:`);
+        for (const code of missing.sort()) {
+          const data = genlistStations.get(code)!;
+          console.log(`   ${code} (${data.region}) - ${data.resources.length} resources`);
+        }
+      } else {
+        console.log('\n✅ All genlist stations are in our database!');
+      }
+
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+// capacity research - Generate research prompt for a station
+capacityCmd
+  .command('research')
+  .description('Generate research prompt for a new station')
+  .requiredOption('-s, --station <code>', 'Station code to research')
+  .option('-g, --genlist <file>', 'Path to genlist.csv (uses cache if not specified)')
+  .option('--cache <dir>', 'Cache directory', './iemop_cache')
+  .action(async (options) => {
+    try {
+      const { IEMOPDownloadService } = await import('./services/iemopDownloadService.js');
+      const downloader = new IEMOPDownloadService(options.cache);
+
+      // Get genlist
+      let genlistPath = options.genlist;
+      if (!genlistPath) {
+        genlistPath = downloader.getCachedGenlistPath();
+        if (!genlistPath) {
+          console.log('No cached genlist found. Downloading from IEMOP...');
+          const result = await downloader.downloadMNM('ALL', true);
+          if (!result.success) {
+            throw new Error(`Failed to download MNM data: ${result.error}`);
+          }
+          genlistPath = downloader.getCachedGenlistPath();
+        }
+      }
+
+      if (!genlistPath) {
+        throw new Error('No genlist.csv available');
+      }
+
+      const records = downloader.parseGenlistCSV(genlistPath);
+      const service = new CapacityUpdateService(options.cache);
+
+      const prompts = service.generateResearchPrompts([options.station], records);
+      const prompt = prompts.get(options.station);
+
+      if (!prompt) {
+        console.log(`\n⚠️  Station ${options.station} not found in genlist`);
+        process.exit(1);
+      }
+
+      console.log('\n' + '='.repeat(80));
+      console.log('RESEARCH PROMPT');
+      console.log('='.repeat(80));
+      console.log(prompt);
+      console.log('='.repeat(80));
+      console.log('\nCopy the above prompt to an LLM for research, then use:');
+      console.log(`  iload capacity add --station ${options.station} --data <json_file>`);
+
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+// capacity add - Add a new station to stations.json
+capacityCmd
+  .command('add')
+  .description('Add a new station to stations.json')
+  .requiredOption('-s, --station <code>', 'Station code')
+  .option('-d, --data <file>', 'JSON file with station data')
+  .option('-n, --name <name>', 'Station name')
+  .option('-t, --type <type>', 'Station type (solar, wind, hydro, etc.)')
+  .option('--operator <name>', 'Operator name')
+  .option('--capacity <mw>', 'Capacity in MW')
+  .option('--lat <lat>', 'Latitude')
+  .option('--lon <lon>', 'Longitude')
+  .option('--grid <grid>', 'Grid (CLUZ, CVIS, CMIN)')
+  .option('--stations <path>', 'Path to stations.json', './src/data/stations.json')
+  .action(async (options) => {
+    try {
+      const service = new CapacityUpdateService('./iemop_cache', options.stations);
+
+      let data: any = {};
+
+      // Load from JSON file if provided
+      if (options.data) {
+        const content = readFileSync(options.data, 'utf-8');
+        data = JSON.parse(content);
+      }
+
+      // Override with command line options
+      if (options.name) data.name = options.name;
+      if (options.type) data.type = options.type;
+      if (options.operator) data.operator = options.operator;
+      if (options.capacity) data.capacity_mw = parseFloat(options.capacity);
+      if (options.grid) data.grid = options.grid;
+
+      if (options.lat && options.lon) {
+        data.location = data.location || {};
+        data.location.latitude = parseFloat(options.lat);
+        data.location.longitude = parseFloat(options.lon);
+      }
+
+      service.addNewStation(options.station, data);
+      console.log(`\n✅ Added station ${options.station} to stations.json`);
+
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+// capacity download - Download fresh data from IEMOP
+capacityCmd
+  .command('download')
+  .description('Download fresh MNM data from IEMOP')
+  .option('--cache <dir>', 'Cache directory', './iemop_cache')
+  .option('-v, --verbose', 'Show detailed progress')
+  .action(async (options) => {
+    try {
+      console.log('\n📥 Downloading MNM data from IEMOP...\n');
+
+      const { IEMOPDownloadService } = await import('./services/iemopDownloadService.js');
+      const downloader = new IEMOPDownloadService(options.cache);
+
+      const result = await downloader.downloadMNM('ALL', options.verbose);
+
+      if (result.success) {
+        console.log(`\n✅ Downloaded successfully: ${result.filePath}`);
+      } else {
+        console.log(`\n❌ Download failed: ${result.error}`);
+      }
+
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+// capacity cfac-check - Check CFAC CSV files for new renewable stations
+capacityCmd
+  .command('cfac-check')
+  .description('Compare CFAC CSV columns against stations.json to detect new renewable stations')
+  .requiredOption('-t, --training <path>', 'Path to CFAC training data folder')
+  .option('--stations <path>', 'Path to stations.json', './src/data/stations.json')
+  .option('--type <types>', 'Station types to check (comma-separated: solar,wind,hydro)', 'solar,wind,hydro')
+  .option('-o, --output <file>', 'Output report to file')
+  .option('-v, --verbose', 'Show detailed output')
+  .action(async (options) => {
+    try {
+      console.log('\n🔍 Checking CFAC data for new renewable stations...\n');
+
+      const service = new CapacityUpdateService('./iemop_cache', options.stations);
+      const stationsJson = service.loadStationsJSON();
+
+      // Get station types to check
+      const typesToCheck = options.type.toLowerCase().split(',').map((t: string) => t.trim());
+      console.log(`📋 Checking for types: ${typesToCheck.join(', ')}`);
+
+      // Read all CSV files in the training directory
+      const trainingDir = options.training;
+      if (!existsSync(trainingDir)) {
+        throw new Error(`Training directory not found: ${trainingDir}`);
+      }
+
+      const csvFiles = fs.readdirSync(trainingDir)
+        .filter(f => f.toLowerCase().endsWith('.csv'));
+
+      if (csvFiles.length === 0) {
+        throw new Error(`No CSV files found in ${trainingDir}`);
+      }
+
+      console.log(`📂 Found ${csvFiles.length} CFAC CSV files`);
+
+      // Extract all unique station codes from CSV headers
+      const allStationCodes = new Set<string>();
+      for (const csvFile of csvFiles) {
+        const filePath = join(trainingDir, csvFile);
+        const content = readFileSync(filePath, 'utf-8');
+        const firstLine = content.split('\n')[0];
+        const headers = firstLine.split(',').map(h => h.trim());
+
+        // Skip first column (DateTimeEnding)
+        for (let i = 1; i < headers.length; i++) {
+          if (headers[i]) {
+            allStationCodes.add(headers[i]);
+          }
+        }
+      }
+
+      console.log(`📊 Found ${allStationCodes.size} unique stations in CFAC data\n`);
+
+      // Filter by renewable types
+      const renewableStations: { code: string; type: string }[] = [];
+      for (const code of allStationCodes) {
+        const stationType = getStationTypeFromCode(code);
+        let typeStr: string;
+
+        switch (stationType) {
+          case StationType.SOLAR: typeStr = 'solar'; break;
+          case StationType.WIND: typeStr = 'wind'; break;
+          case StationType.HYDRO_RUN_OF_RIVER:
+          case StationType.HYDRO_STORAGE: typeStr = 'hydro'; break;
+          case StationType.GEOTHERMAL: typeStr = 'geothermal'; break;
+          case StationType.BIOMASS: typeStr = 'biomass'; break;
+          case StationType.BATTERY: typeStr = 'battery'; break;
+          default: typeStr = 'other';
+        }
+
+        if (typesToCheck.includes(typeStr)) {
+          renewableStations.push({ code, type: typeStr });
+        }
+      }
+
+      console.log(`🌿 Renewable stations (${typesToCheck.join('/')}): ${renewableStations.length}`);
+
+      // Check which are missing from stations.json
+      const missingStations: { code: string; type: string }[] = [];
+      const presentStations: { code: string; type: string }[] = [];
+
+      for (const station of renewableStations) {
+        if (!stationsJson.stations[station.code]) {
+          missingStations.push(station);
+        } else {
+          presentStations.push(station);
+        }
+      }
+
+      // Group by type for display
+      const missingByType = new Map<string, string[]>();
+      for (const station of missingStations) {
+        if (!missingByType.has(station.type)) {
+          missingByType.set(station.type, []);
+        }
+        missingByType.get(station.type)!.push(station.code);
+      }
+
+      const presentByType = new Map<string, string[]>();
+      for (const station of presentStations) {
+        if (!presentByType.has(station.type)) {
+          presentByType.set(station.type, []);
+        }
+        presentByType.get(station.type)!.push(station.code);
+      }
+
+      // Display results
+      console.log('\n' + '='.repeat(70));
+      console.log('CFAC COVERAGE REPORT');
+      console.log('='.repeat(70));
+
+      console.log('\n📊 SUMMARY:');
+      console.log(`   Total renewable in CFAC:    ${renewableStations.length}`);
+      console.log(`   In stations.json:           ${presentStations.length}`);
+      console.log(`   Missing from stations.json: ${missingStations.length}`);
+      console.log(`   Coverage:                   ${(100 * presentStations.length / renewableStations.length).toFixed(1)}%`);
+
+      // Show coverage by type
+      console.log('\n📋 BY TYPE:');
+      for (const type of typesToCheck) {
+        const present = presentByType.get(type)?.length || 0;
+        const missing = missingByType.get(type)?.length || 0;
+        const total = present + missing;
+        const coverage = total > 0 ? (100 * present / total).toFixed(1) : '0.0';
+        const emoji = type === 'solar' ? '☀️ ' : type === 'wind' ? '🌬️ ' : type === 'hydro' ? '💧' : '🔋';
+        console.log(`   ${emoji} ${type.toUpperCase().padEnd(8)}: ${present}/${total} (${coverage}% coverage)`);
+      }
+
+      if (missingStations.length === 0) {
+        console.log('\n✅ All renewable stations in CFAC data are in stations.json!');
+      } else {
+        console.log('\n' + '-'.repeat(70));
+        console.log('⚠️  MISSING STATIONS (need to be added to stations.json):');
+        console.log('-'.repeat(70));
+
+        for (const [type, codes] of missingByType) {
+          console.log(`\n[${type.toUpperCase()}] (${codes.length} stations):`);
+          for (const code of codes.sort()) {
+            console.log(`   - ${code}`);
+          }
+        }
+
+        console.log('\n💡 To add a missing station:');
+        console.log('   iload capacity research --station <code>   # Get research prompt');
+        console.log('   iload capacity add --station <code> ...    # Add station');
+      }
+
+      if (options.verbose) {
+        console.log('\n' + '-'.repeat(70));
+        console.log('PRESENT STATIONS:');
+        console.log('-'.repeat(70));
+        for (const [type, codes] of presentByType) {
+          console.log(`\n[${type.toUpperCase()}] (${codes.length} stations):`);
+          console.log(`   ${codes.sort().join(', ')}`);
+        }
+      }
+
+      console.log('\n' + '='.repeat(70));
+
+      // Save report if output specified
+      if (options.output) {
+        const reportLines: string[] = [];
+        reportLines.push('CFAC COVERAGE REPORT');
+        reportLines.push(`Generated: ${new Date().toISOString()}`);
+        reportLines.push(`Training data: ${trainingDir}`);
+        reportLines.push('');
+        reportLines.push('SUMMARY:');
+        reportLines.push(`Total renewable in CFAC: ${renewableStations.length}`);
+        reportLines.push(`In stations.json: ${presentStations.length}`);
+        reportLines.push(`Missing: ${missingStations.length}`);
+        reportLines.push(`Coverage: ${(100 * presentStations.length / renewableStations.length).toFixed(1)}%`);
+        reportLines.push('');
+
+        if (missingStations.length > 0) {
+          reportLines.push('MISSING STATIONS:');
+          for (const [type, codes] of missingByType) {
+            reportLines.push(`[${type}]`);
+            for (const code of codes.sort()) {
+              reportLines.push(`  ${code}`);
+            }
+          }
+        }
+
+        writeFileSync(options.output, reportLines.join('\n'));
+        console.log(`📄 Report saved to: ${options.output}`);
+      }
+
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
       process.exit(1);
     }
   });

@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from 'fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { DateTime } from 'luxon';
 import { getDatabase, closeDatabase, DatabaseService } from '../database/index.js';
@@ -220,6 +220,108 @@ export class WeatherService {
       return readFileSync(filePath, 'utf8');
     }
     return null;
+  }
+
+  /**
+   * Validate cached weather data for completeness
+   * Returns true if data is valid, false if it appears incomplete/stale
+   *
+   * Detection logic:
+   * - Solar clusters (SOLAR_*): Daylight hours (6-18) should have solarradiation > 0
+   * - Wind clusters (WIND_*): windspeed100 values should be present (not empty)
+   * - If hourly data rows have mostly empty values, data is incomplete
+   */
+  private validateCachedWeatherData(csvData: string, clusterId: string, date: string): { valid: boolean; reason?: string } {
+    const lines = csvData.split('\n').filter(l => l.trim());
+    if (lines.length < 2) {
+      return { valid: false, reason: 'No data rows' };
+    }
+
+    const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+    const datetimeIdx = headers.indexOf('datetime');
+    const solarIdx = headers.indexOf('solarradiation');
+    const windspeed100Idx = headers.indexOf('windspeed100');
+    const windspeedIdx = headers.indexOf('windspeed');
+
+    // Check if this is a solar or wind cluster
+    const isSolarCluster = clusterId.startsWith('SOLAR_');
+    const isWindCluster = clusterId.startsWith('WIND_');
+
+    let emptyCount = 0;
+    let daylightEmptySolar = 0;
+    let daylightHours = 0;
+    let windEmptyCount = 0;
+    let totalRows = 0;
+
+    for (let i = 1; i < lines.length; i++) {
+      // Use parseCSVLine to handle quoted fields with commas (e.g., "15.2889,120.0256")
+      const values = this.parseCSVLine(lines[i]);
+      totalRows++;
+
+      // Get hour from datetime (format: 2026-01-10T01:00:00)
+      const datetime = values[datetimeIdx] || '';
+      const hourMatch = datetime.match(/T(\d{2}):/);
+      const hour = hourMatch ? parseInt(hourMatch[1], 10) : -1;
+
+      // Check for empty row (all values after datetime are empty)
+      const dataValues = values.slice(4); // Skip datetime, name, lat, lon
+      const allEmpty = dataValues.every(v => !v || v.trim() === '');
+      if (allEmpty) {
+        emptyCount++;
+      }
+
+      // Solar validation: daylight hours should have solarradiation > 0
+      if (isSolarCluster && solarIdx >= 0 && hour >= 6 && hour <= 18) {
+        daylightHours++;
+        const solarValue = parseFloat(values[solarIdx] || '0');
+        if (solarValue === 0 || isNaN(solarValue) || values[solarIdx]?.trim() === '') {
+          daylightEmptySolar++;
+        }
+      }
+
+      // Wind validation: windspeed100 or windspeed should be present
+      if (isWindCluster) {
+        const ws100 = values[windspeed100Idx]?.trim() || '';
+        const ws = values[windspeedIdx]?.trim() || '';
+        if (ws100 === '' && ws === '') {
+          windEmptyCount++;
+        }
+      }
+    }
+
+    // Validation rules:
+    // 1. If more than 50% of rows are completely empty, data is incomplete
+    if (totalRows > 0 && emptyCount / totalRows > 0.5) {
+      return { valid: false, reason: `${emptyCount}/${totalRows} rows are empty (${Math.round(emptyCount/totalRows*100)}%)` };
+    }
+
+    // 2. Solar: If more than 80% of daylight hours have zero/empty solarradiation, data is incomplete
+    if (isSolarCluster && daylightHours > 0 && daylightEmptySolar / daylightHours > 0.8) {
+      return { valid: false, reason: `${daylightEmptySolar}/${daylightHours} daylight hours have no solar radiation data` };
+    }
+
+    // 3. Wind: If more than 50% of rows have no wind speed data, data is incomplete
+    if (isWindCluster && totalRows > 0 && windEmptyCount / totalRows > 0.5) {
+      return { valid: false, reason: `${windEmptyCount}/${totalRows} rows have no wind speed data` };
+    }
+
+    return { valid: true };
+  }
+
+  /**
+   * Delete a cached weather file
+   */
+  private deleteCachedData(locationId: string, date: string): boolean {
+    const filePath = this.getCacheFilePath(locationId, date);
+    if (existsSync(filePath)) {
+      try {
+        unlinkSync(filePath);
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+    return false;
   }
 
   /**
@@ -560,12 +662,32 @@ export class WeatherService {
     for (const date of dates) {
       try {
         let csvData: string | null = null;
+        let needsDownload = false;
 
         // Check cache first (using cacheKey which includes wind suffix)
         if (this.hasCachedData(cacheKey, date)) {
           csvData = this.readCachedData(cacheKey, date);
-          cachedCount++;
+
+          // Validate cached data for completeness (prevents stale forecast data issues)
+          if (csvData) {
+            const validation = this.validateCachedWeatherData(csvData, cluster.clusterId, date);
+            if (!validation.valid) {
+              onProgress?.(`  Cache invalid for ${cluster.clusterId} ${date}: ${validation.reason} - refreshing...`);
+              this.deleteCachedData(cacheKey, date);
+              csvData = null;
+              needsDownload = true;
+            } else {
+              cachedCount++;
+            }
+          } else {
+            needsDownload = true;
+          }
         } else {
+          needsDownload = true;
+        }
+
+        // Download if needed (not in cache or cache was invalid)
+        if (needsDownload) {
           // Download from API using coordinates
           onProgress?.(`  Downloading ${cluster.clusterId} ${date}${isWindCluster ? ' (100m wind)' : ''}...`);
           csvData = await this.downloadDayDataByCoords(

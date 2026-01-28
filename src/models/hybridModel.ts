@@ -75,6 +75,15 @@ export class HybridModel {
   private growthFactor: number = 0; // Daily growth rate (e.g., 0.0001 = 0.01% per day)
   private recentDaysCount: number = 7;
 
+  // Weekend correction factors learned from validation data
+  // These correct for systematic over-forecasting on weekends (especially CLUZ)
+  // Key: region, Value: { saturday: factor, sunday: factor }
+  private weekendCorrectionFactors: Map<string, { saturday: number; sunday: number }> = new Map([
+    ['CLUZ', { saturday: 0.947, sunday: 0.951 }],  // CLUZ weekends over-forecast by ~5%
+    ['CVIS', { saturday: 1.009, sunday: 0.980 }],  // CVIS close to accurate
+    ['CMIN', { saturday: 0.999, sunday: 1.018 }],  // CMIN close to accurate
+  ]);
+
   constructor(options?: { growthFactor?: number; recentDaysCount?: number }) {
     if (options?.growthFactor !== undefined) {
       this.growthFactor = options.growthFactor;
@@ -431,7 +440,22 @@ export class HybridModel {
       };
     }
 
-    return this.interpolate(features, profile);
+    let prediction = this.interpolate(features, profile);
+
+    // Apply weekend correction factor to fix systematic over-forecasting
+    // This correction is based on observed forecast vs actual bias
+    if (prediction !== undefined) {
+      const correction = this.weekendCorrectionFactors.get(region);
+      if (correction) {
+        if (features.isSaturday === 1) {
+          prediction *= correction.saturday;
+        } else if (features.isSunday === 1) {
+          prediction *= correction.sunday;
+        }
+      }
+    }
+
+    return prediction;
   }
 
   /**

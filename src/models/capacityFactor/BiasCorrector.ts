@@ -130,6 +130,12 @@ export class BiasCorrector {
       return rawPrediction;
     }
 
+    // Dont apply bias correction to nighttime predictions (solar should be 0)
+    // This prevents negative biases from creating non-zero values at night
+    if (rawPrediction < 0.001) {
+      return rawPrediction;
+    }
+
     const bias = this.biasMap.get(stationCode);
     if (!bias) {
       // No bias data for this station, return as-is

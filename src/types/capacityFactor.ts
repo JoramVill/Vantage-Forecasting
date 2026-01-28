@@ -240,22 +240,28 @@ const STATION_TYPE_MAPPING: Record<string, StationType> = {
   '01BOTOLAN': StationType.SOLAR,    // Botolan Solar, Zambales
 
   // Solar stations (without _S suffix)
+  '01CASTILEHV': StationType.SOLAR,  // Castillejos Solar (HV) - Zambales
   '01CAYANGA': StationType.SOLAR,
   '01CLARK': StationType.SOLAR,
-  '01HERMOSA': StationType.SOLAR,
+  // '01HERMOSA': StationType.SOLAR, // REMOVED - 01HERMOSA is hydro, 01HERMOSA_S is solar
   '01LIMAY': StationType.SOLAR,
   '01SNMARCELINO': StationType.SOLAR,
   '01SNRAFAEL': StationType.SOLAR,
-  '01SNTGO': StationType.SOLAR,
+  // '01SNTGO': StationType.SOLAR, // REMOVED - 01SNTGO is hydro, 01SNTGO_S is solar
   '03CALAMBA': StationType.SOLAR,
+  '03CALACA': StationType.SOLAR,   // Calaca Solar Power Plant (not coal)
   // '03CLACA': StationType.SOLAR,  // REMOVED - this is aggregated coal+solar+battery, use 03CLACA_S for solar
   '03DASMAEHV': StationType.SOLAR,
   '05CALUNG': StationType.SOLAR,
   '06HELIOS': StationType.SOLAR,
   '11KIBAW': StationType.SOLAR,
 
+  // Biomass stations (non-standard naming)
+  '01HERMOSA': StationType.BIOMASS,  // Hermosa Biomass (01HERMOSA_S is the solar)
+
   // Hydro stations (without _H suffix) - run-of-river
   '01BYOMBNG': StationType.HYDRO_RUN_OF_RIVER,
+  '01SNTGO': StationType.HYDRO_RUN_OF_RIVER,    // Santiago Hydro (01SNTGO_S is the solar)
   '03CALAUAN': StationType.HYDRO_RUN_OF_RIVER,
   '03LABO': StationType.HYDRO_RUN_OF_RIVER,
   '03NAGA': StationType.HYDRO_RUN_OF_RIVER,
@@ -315,8 +321,9 @@ const STATION_TYPE_MAPPING: Record<string, StationType> = {
   '04CENTRAL': StationType.HYDRO_RUN_OF_RIVER, // Central Visayas Hydro
   '07CORELLA': StationType.HYDRO_RUN_OF_RIVER, // Corella Hydro (Bohol)
 
-  // Coal stations (excluded from must-run forecasting - these shouldn't be in CFac data)
-  '03CALACA': StationType.UNKNOWN,    // Calaca Coal (dispatchable, not must-run)
+  // Dispatchable/unknown stations (excluded from must-run forecasting)
+  // Note: 03CALACA is now mapped to SOLAR above (Calaca Solar Power Plant)
+  '03CLACA': StationType.UNKNOWN,     // Calaca Coal (dispatchable) - 03CLACA_S is the solar
   '10GNPK': StationType.UNKNOWN,      // GNPower Kauswagan Coal (dispatchable)
 };
 

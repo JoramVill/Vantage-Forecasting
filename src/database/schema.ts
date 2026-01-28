@@ -1,6 +1,6 @@
 // Database schema definitions
 
-export const SCHEMA_VERSION = 4;  // Updated for MREC wind capacity factor tables
+export const SCHEMA_VERSION = 5;  // Updated for scheduled forecast service
 
 export const CREATE_TABLES_SQL = `
 -- Schema version tracking
@@ -249,6 +249,83 @@ CREATE INDEX IF NOT EXISTS idx_mrec_calibrated ON mrec_factors(calibrated);
 CREATE INDEX IF NOT EXISTS idx_wind_cfac_datetime ON wind_cfac_history(datetime);
 CREATE INDEX IF NOT EXISTS idx_wind_cfac_station ON wind_cfac_history(station_code);
 CREATE INDEX IF NOT EXISTS idx_wind_cfac_datetime_station ON wind_cfac_history(datetime, station_code);
+
+-- ============================================
+-- SCHEDULED FORECAST SERVICE TABLES
+-- ============================================
+
+-- Forecast runs - tracks when forecasts were generated
+CREATE TABLE IF NOT EXISTS forecast_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_date TEXT NOT NULL,              -- Date the forecast was generated (YYYY-MM-DD)
+  run_time TEXT NOT NULL,              -- Time the forecast was generated (ISO 8601)
+  forecast_type TEXT NOT NULL,         -- 'demand' or 'cfac'
+  horizon TEXT NOT NULL,               -- 'daily' (next day) or 'weekly' (7 days ahead)
+  forecast_start TEXT NOT NULL,        -- First date being forecast (YYYY-MM-DD)
+  forecast_end TEXT NOT NULL,          -- Last date being forecast (YYYY-MM-DD)
+  model_used TEXT,                     -- Model name/type used
+  training_mape REAL,                  -- Training MAPE at time of forecast
+  status TEXT DEFAULT 'pending',       -- 'pending', 'completed', 'evaluated', 'failed'
+  records_generated INTEGER,
+  duration_ms INTEGER,
+  error_message TEXT,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Demand forecasts - stores hourly demand forecast values
+CREATE TABLE IF NOT EXISTS demand_forecasts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL REFERENCES forecast_runs(id),
+  datetime TEXT NOT NULL,              -- Hour being forecast (ISO 8601)
+  region TEXT NOT NULL,                -- CLUZ, CVIS, CMIN
+  forecast_value REAL NOT NULL,        -- Forecast demand in MW
+  actual_value REAL,                   -- Actual demand (filled in during evaluation)
+  error_mw REAL,                       -- Absolute error in MW
+  error_pct REAL,                      -- Percentage error
+  UNIQUE(run_id, datetime, region)
+);
+
+-- Capacity factor forecasts - stores hourly cfac forecast values
+CREATE TABLE IF NOT EXISTS cfac_forecasts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL REFERENCES forecast_runs(id),
+  datetime TEXT NOT NULL,              -- Hour being forecast (ISO 8601)
+  station_code TEXT NOT NULL,          -- Station code
+  station_type TEXT NOT NULL,          -- wind, solar, hydro, etc.
+  forecast_value REAL NOT NULL,        -- Forecast capacity factor (0-1)
+  actual_value REAL,                   -- Actual capacity factor (filled in during evaluation)
+  error_abs REAL,                      -- Absolute error
+  error_pct REAL,                      -- Percentage error
+  UNIQUE(run_id, datetime, station_code)
+);
+
+-- Forecast evaluations - summary metrics per run
+CREATE TABLE IF NOT EXISTS forecast_evaluations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL REFERENCES forecast_runs(id),
+  evaluated_at TEXT NOT NULL,
+  records_matched INTEGER,
+  records_unmatched INTEGER,
+  mape REAL,
+  mae REAL,
+  rmse REAL,
+  bias REAL,
+  -- Per-region/station breakdown (JSON)
+  breakdown TEXT,
+  notes TEXT,
+  UNIQUE(run_id)
+);
+
+-- Indexes for forecast tables
+CREATE INDEX IF NOT EXISTS idx_forecast_runs_date ON forecast_runs(run_date);
+CREATE INDEX IF NOT EXISTS idx_forecast_runs_type ON forecast_runs(forecast_type, horizon);
+CREATE INDEX IF NOT EXISTS idx_forecast_runs_status ON forecast_runs(status);
+CREATE INDEX IF NOT EXISTS idx_demand_forecasts_run ON demand_forecasts(run_id);
+CREATE INDEX IF NOT EXISTS idx_demand_forecasts_datetime ON demand_forecasts(datetime);
+CREATE INDEX IF NOT EXISTS idx_demand_forecasts_region ON demand_forecasts(region);
+CREATE INDEX IF NOT EXISTS idx_cfac_forecasts_run ON cfac_forecasts(run_id);
+CREATE INDEX IF NOT EXISTS idx_cfac_forecasts_datetime ON cfac_forecasts(datetime);
+CREATE INDEX IF NOT EXISTS idx_cfac_forecasts_station ON cfac_forecasts(station_code);
 `;
 
 export const REGION_MAPPING: Record<string, string> = {

@@ -55,12 +55,12 @@ const holidayCache: Map<number, string[]> = new Map();
 
 // Special proclaimed holidays (one-time presidential proclamations not in date-holidays package)
 // Add holidays here that are declared by special proclamation
+// NOTE: Only add holidays that are ACTUALLY observed (verify with demand data patterns)
+// Dec 9, 2025 was removed - actual demand showed normal workday levels, not holiday behavior
 const PH_HOLIDAYS_PROCLAIMED: Record<number, string[]> = {
   2024: [],
-  2025: [
-    '2025-12-09', // Special non-working day (Presidential Proclamation)
-  ],
-  2026: [],
+  2025: [],
+  2026: ['2026-01-02', '2026-01-03'], // New Year extended - most people returned to work on Monday Jan 5
 };
 
 /**
@@ -161,7 +161,7 @@ export const PH_HOLIDAYS_STATIC: Record<number, string[]> = {
     '2025-01-01', '2025-01-29', '2025-02-25', '2025-04-01', '2025-04-09',
     '2025-04-17', '2025-04-18', '2025-04-19', '2025-05-01', '2025-05-12',
     '2025-06-06', '2025-06-12', '2025-08-21', '2025-08-25', '2025-11-01',
-    '2025-11-02', '2025-11-30', '2025-12-08', '2025-12-09', '2025-12-24', '2025-12-25',
+    '2025-11-02', '2025-11-30', '2025-12-08', '2025-12-24', '2025-12-25',
     '2025-12-30', '2025-12-31'
   ],
   2026: [

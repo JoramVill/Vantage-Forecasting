@@ -366,10 +366,23 @@ export class CapacityFactorService {
         const weatherKey = dt.toFormat('yyyy-MM-dd HH:mm');
         const weather = weatherData.get(weatherKey);
 
-        if (!weather) {
-          // No weather data for this timestamp, skip
+        // Profile-based models (hydro, geothermal, biomass, battery) don't need weather
+        // Only wind and solar require weather data for training
+        const isWeatherDependent = stationType === StationType.WIND || stationType === StationType.SOLAR;
+
+        if (!weather && isWeatherDependent) {
+          // No weather data for weather-dependent station, skip
           continue;
         }
+
+        // For profile-based models without weather, use dummy values (they're not used anyway)
+        const effectiveWeather: CFacWeatherFeatures = weather || {
+          temperature: 30,
+          windSpeed: 5,
+          windGust: 8,
+          cloudCover: 50,
+          solarRadiation: 500,
+        };
 
         // Calculate lag features
         const lag1h = ts - 1 * 60 * 60 * 1000;
@@ -393,7 +406,7 @@ export class CapacityFactorService {
           stationCode,
           stationType,
           actualCFac: record.capacityFactor,
-          weather,
+          weather: effectiveWeather,
           hour,
           dayOfWeek,
           month,
