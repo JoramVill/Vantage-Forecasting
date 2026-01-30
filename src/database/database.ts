@@ -1521,6 +1521,550 @@ export class DatabaseService {
       this.db.exec('DELETE FROM wind_cfac_history');
     }
   }
+
+  // ============ CLUSTER WEATHER (Capacity Factor) ============
+
+  /**
+   * Import cluster weather data from parsed CSV
+   * Automatically routes to historical or forecast table based on date
+   * Archives existing forecast data before overwriting
+   *
+   * @param records - Array of cluster weather records
+   * @param locationId - Cluster/station ID (e.g., 'SOLAR_01BOTOLAN', 'WIND_01BURGOS')
+   * @param fetchedAt - When this data was fetched (ISO string)
+   * @param source - Data source identifier
+   */
+  importClusterWeather(
+    records: Array<{
+      datetime: string;
+      temp?: number;
+      dew?: number;
+      humidity?: number;
+      precip?: number;
+      precipprob?: number;
+      pressure?: number;
+      windgust?: number;
+      windspeed?: number;
+      winddir?: number;
+      windspeed50?: number;
+      winddir50?: number;
+      windspeed80?: number;
+      winddir80?: number;
+      windspeed100?: number;
+      winddir100?: number;
+      cloudcover?: number;
+      visibility?: number;
+      solarradiation?: number;
+      solarenergy?: number;
+      uvindex?: number;
+      dniradiation?: number;
+      difradiation?: number;
+      ghiradiation?: number;
+      conditions?: string;
+    }>,
+    locationId: string,
+    fetchedAt: string,
+    source: string = 'api'
+  ): { historical: number; forecast: number; archived: number } {
+    const today = DateTime.now().startOf('day');
+    let historicalCount = 0;
+    let forecastCount = 0;
+    let archivedCount = 0;
+
+    // Prepare statements
+    const insertHistorical = this.db.prepare(`
+      INSERT INTO cluster_weather_historical (
+        location_id, datetime, temp, dew, humidity, precip, precipprob, pressure,
+        windgust, windspeed, winddir, windspeed50, winddir50, windspeed80, winddir80,
+        windspeed100, winddir100, cloudcover, visibility, solarradiation, solarenergy,
+        uvindex, dniradiation, difradiation, ghiradiation, conditions, source
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(location_id, datetime) DO NOTHING
+    `);
+
+    const selectExistingForecast = this.db.prepare(`
+      SELECT * FROM cluster_weather_forecast WHERE location_id = ? AND datetime = ?
+    `);
+
+    const insertArchive = this.db.prepare(`
+      INSERT INTO cluster_weather_forecast_archive (
+        location_id, datetime, fetched_at, lead_time_hours,
+        temp, dew, humidity, precip, precipprob, pressure,
+        windgust, windspeed, winddir, windspeed50, winddir50, windspeed80, winddir80,
+        windspeed100, winddir100, cloudcover, visibility, solarradiation, solarenergy,
+        uvindex, dniradiation, difradiation, ghiradiation, conditions, source
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const deleteForecasRecord = this.db.prepare(`
+      DELETE FROM cluster_weather_forecast WHERE location_id = ? AND datetime = ?
+    `);
+
+    const insertForecast = this.db.prepare(`
+      INSERT INTO cluster_weather_forecast (
+        location_id, datetime, fetched_at,
+        temp, dew, humidity, precip, precipprob, pressure,
+        windgust, windspeed, winddir, windspeed50, winddir50, windspeed80, winddir80,
+        windspeed100, winddir100, cloudcover, visibility, solarradiation, solarenergy,
+        uvindex, dniradiation, difradiation, ghiradiation, conditions, source
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(location_id, datetime) DO UPDATE SET
+        fetched_at = excluded.fetched_at,
+        temp = excluded.temp, dew = excluded.dew, humidity = excluded.humidity,
+        precip = excluded.precip, precipprob = excluded.precipprob, pressure = excluded.pressure,
+        windgust = excluded.windgust, windspeed = excluded.windspeed, winddir = excluded.winddir,
+        windspeed50 = excluded.windspeed50, winddir50 = excluded.winddir50,
+        windspeed80 = excluded.windspeed80, winddir80 = excluded.winddir80,
+        windspeed100 = excluded.windspeed100, winddir100 = excluded.winddir100,
+        cloudcover = excluded.cloudcover, visibility = excluded.visibility,
+        solarradiation = excluded.solarradiation, solarenergy = excluded.solarenergy,
+        uvindex = excluded.uvindex, dniradiation = excluded.dniradiation,
+        difradiation = excluded.difradiation, ghiradiation = excluded.ghiradiation,
+        conditions = excluded.conditions, source = excluded.source
+    `);
+
+    const transaction = this.db.transaction(() => {
+      for (const record of records) {
+        const recordDate = DateTime.fromISO(record.datetime.split('T')[0]);
+        const isHistorical = recordDate < today;
+
+        if (isHistorical) {
+          // Archive any existing forecast record before replacing with historical data
+          const existingForecast = selectExistingForecast.get(locationId, record.datetime) as any;
+          if (existingForecast) {
+            const existingFetchedAt = DateTime.fromISO(existingForecast.fetched_at);
+            const targetTime = DateTime.fromISO(record.datetime);
+            const leadTimeHours = Math.round(targetTime.diff(existingFetchedAt, 'hours').hours);
+
+            insertArchive.run(
+              locationId, record.datetime, existingForecast.fetched_at, leadTimeHours,
+              existingForecast.temp, existingForecast.dew, existingForecast.humidity,
+              existingForecast.precip, existingForecast.precipprob, existingForecast.pressure,
+              existingForecast.windgust, existingForecast.windspeed, existingForecast.winddir,
+              existingForecast.windspeed50, existingForecast.winddir50,
+              existingForecast.windspeed80, existingForecast.winddir80,
+              existingForecast.windspeed100, existingForecast.winddir100,
+              existingForecast.cloudcover, existingForecast.visibility,
+              existingForecast.solarradiation, existingForecast.solarenergy,
+              existingForecast.uvindex, existingForecast.dniradiation,
+              existingForecast.difradiation, existingForecast.ghiradiation,
+              existingForecast.conditions, existingForecast.source
+            );
+            archivedCount++;
+
+            // Remove the now-archived forecast record
+            deleteForecasRecord.run(locationId, record.datetime);
+          }
+
+          // Historical data - insert into historical table (never overwrites)
+          const result = insertHistorical.run(
+            locationId, record.datetime,
+            record.temp, record.dew, record.humidity, record.precip, record.precipprob, record.pressure,
+            record.windgust, record.windspeed, record.winddir,
+            record.windspeed50, record.winddir50, record.windspeed80, record.winddir80,
+            record.windspeed100, record.winddir100,
+            record.cloudcover, record.visibility, record.solarradiation, record.solarenergy,
+            record.uvindex, record.dniradiation, record.difradiation, record.ghiradiation,
+            record.conditions, source
+          );
+          if (result.changes > 0) historicalCount++;
+        } else {
+          // Forecast data - archive existing, then insert/update
+          const existing = selectExistingForecast.get(locationId, record.datetime) as any;
+
+          if (existing) {
+            // Calculate lead time for the existing forecast before archiving
+            const existingFetchedAt = DateTime.fromISO(existing.fetched_at);
+            const targetTime = DateTime.fromISO(record.datetime);
+            const leadTimeHours = Math.round(targetTime.diff(existingFetchedAt, 'hours').hours);
+
+            // Archive the existing forecast
+            insertArchive.run(
+              locationId, record.datetime, existing.fetched_at, leadTimeHours,
+              existing.temp, existing.dew, existing.humidity, existing.precip, existing.precipprob, existing.pressure,
+              existing.windgust, existing.windspeed, existing.winddir,
+              existing.windspeed50, existing.winddir50, existing.windspeed80, existing.winddir80,
+              existing.windspeed100, existing.winddir100,
+              existing.cloudcover, existing.visibility, existing.solarradiation, existing.solarenergy,
+              existing.uvindex, existing.dniradiation, existing.difradiation, existing.ghiradiation,
+              existing.conditions, existing.source
+            );
+            archivedCount++;
+          }
+
+          // Insert/update forecast
+          insertForecast.run(
+            locationId, record.datetime, fetchedAt,
+            record.temp, record.dew, record.humidity, record.precip, record.precipprob, record.pressure,
+            record.windgust, record.windspeed, record.winddir,
+            record.windspeed50, record.winddir50, record.windspeed80, record.winddir80,
+            record.windspeed100, record.winddir100,
+            record.cloudcover, record.visibility, record.solarradiation, record.solarenergy,
+            record.uvindex, record.dniradiation, record.difradiation, record.ghiradiation,
+            record.conditions, source
+          );
+          forecastCount++;
+        }
+      }
+    });
+
+    transaction();
+    return { historical: historicalCount, forecast: forecastCount, archived: archivedCount };
+  }
+
+  /**
+   * Get cluster weather data for a location and date range
+   * Automatically merges historical and forecast data
+   * Historical data takes precedence over forecast for overlapping dates
+   */
+  getClusterWeather(
+    locationId: string,
+    startDate: string,
+    endDate: string
+  ): Array<{
+    datetime: string;
+    isHistorical: boolean;
+    temp?: number;
+    dew?: number;
+    humidity?: number;
+    precip?: number;
+    windgust?: number;
+    windspeed?: number;
+    winddir?: number;
+    windspeed50?: number;
+    winddir50?: number;
+    windspeed80?: number;
+    winddir80?: number;
+    windspeed100?: number;
+    winddir100?: number;
+    cloudcover?: number;
+    visibility?: number;
+    solarradiation?: number;
+    solarenergy?: number;
+    uvindex?: number;
+    dniradiation?: number;
+    difradiation?: number;
+    ghiradiation?: number;
+    conditions?: string;
+    fetchedAt?: string;
+  }> {
+    // Get historical data
+    const historical = this.db.prepare(`
+      SELECT *, 1 as is_historical FROM cluster_weather_historical
+      WHERE location_id = ? AND datetime >= ? AND datetime <= ?
+    `).all(locationId, startDate + 'T00:00:00', endDate + 'T23:59:59') as any[];
+
+    // Get forecast data
+    const forecast = this.db.prepare(`
+      SELECT *, 0 as is_historical FROM cluster_weather_forecast
+      WHERE location_id = ? AND datetime >= ? AND datetime <= ?
+    `).all(locationId, startDate + 'T00:00:00', endDate + 'T23:59:59') as any[];
+
+    // Merge: historical takes precedence
+    const historicalDatetimes = new Set(historical.map(r => r.datetime));
+    const merged = [
+      ...historical,
+      ...forecast.filter(r => !historicalDatetimes.has(r.datetime))
+    ];
+
+    // Sort by datetime
+    merged.sort((a, b) => a.datetime.localeCompare(b.datetime));
+
+    return merged.map(r => ({
+      datetime: r.datetime,
+      isHistorical: r.is_historical === 1,
+      temp: r.temp,
+      dew: r.dew,
+      humidity: r.humidity,
+      precip: r.precip,
+      windgust: r.windgust,
+      windspeed: r.windspeed,
+      winddir: r.winddir,
+      windspeed50: r.windspeed50,
+      winddir50: r.winddir50,
+      windspeed80: r.windspeed80,
+      winddir80: r.winddir80,
+      windspeed100: r.windspeed100,
+      winddir100: r.winddir100,
+      cloudcover: r.cloudcover,
+      visibility: r.visibility,
+      solarradiation: r.solarradiation,
+      solarenergy: r.solarenergy,
+      uvindex: r.uvindex,
+      dniradiation: r.dniradiation,
+      difradiation: r.difradiation,
+      ghiradiation: r.ghiradiation,
+      conditions: r.conditions,
+      fetchedAt: r.fetched_at
+    }));
+  }
+
+  /**
+   * Get dates that have stale forecast data (older than maxAgeHours)
+   */
+  getClusterStaleForecastDates(
+    locationId: string,
+    startDate: string,
+    endDate: string,
+    maxAgeHours: number = 24
+  ): string[] {
+    const cutoffTime = DateTime.now().minus({ hours: maxAgeHours }).toISO();
+
+    const rows = this.db.prepare(`
+      SELECT DISTINCT DATE(datetime) as date
+      FROM cluster_weather_forecast
+      WHERE location_id = ?
+        AND datetime >= ?
+        AND datetime <= ?
+        AND fetched_at < ?
+    `).all(locationId, startDate + 'T00:00:00', endDate + 'T23:59:59', cutoffTime) as any[];
+
+    return rows.map(r => r.date);
+  }
+
+  /**
+   * Get past dates that only have forecast data (need historical replacement)
+   */
+  getClusterDatesNeedingHistorical(
+    locationId: string,
+    startDate: string,
+    endDate: string
+  ): string[] {
+    const today = DateTime.now().startOf('day').toISODate();
+
+    // Find dates that:
+    // 1. Are in the past (< today)
+    // 2. Have forecast data but no historical data
+    const rows = this.db.prepare(`
+      SELECT DISTINCT DATE(f.datetime) as date
+      FROM cluster_weather_forecast f
+      LEFT JOIN cluster_weather_historical h
+        ON f.location_id = h.location_id AND f.datetime = h.datetime
+      WHERE f.location_id = ?
+        AND f.datetime >= ?
+        AND f.datetime <= ?
+        AND DATE(f.datetime) < ?
+        AND h.id IS NULL
+    `).all(locationId, startDate + 'T00:00:00', endDate + 'T23:59:59', today) as any[];
+
+    return rows.map(r => r.date);
+  }
+
+  /**
+   * Get missing dates for cluster weather within a range
+   * Returns dates that need to be fetched:
+   * 1. No data at all
+   * 2. Past dates with only forecast data (need historical)
+   * 3. Future dates with stale forecast data (older than maxAgeHours)
+   */
+  getClusterMissingDates(
+    locationId: string,
+    startDate: string,
+    endDate: string,
+    maxForecastAgeHours: number = 24
+  ): string[] {
+    const today = DateTime.now().startOf('day');
+
+    // Get dates that have ANY data (historical or forecast)
+    const historicalDates = new Set(
+      (this.db.prepare(`
+        SELECT DISTINCT DATE(datetime) as date FROM cluster_weather_historical
+        WHERE location_id = ? AND datetime >= ? AND datetime <= ?
+      `).all(locationId, startDate + 'T00:00:00', endDate + 'T23:59:59') as any[]).map(r => r.date)
+    );
+
+    const forecastDates = new Set(
+      (this.db.prepare(`
+        SELECT DISTINCT DATE(datetime) as date FROM cluster_weather_forecast
+        WHERE location_id = ? AND datetime >= ? AND datetime <= ?
+      `).all(locationId, startDate + 'T00:00:00', endDate + 'T23:59:59') as any[]).map(r => r.date)
+    );
+
+    // Get stale and needs-historical dates
+    const staleDates = new Set(this.getClusterStaleForecastDates(locationId, startDate, endDate, maxForecastAgeHours));
+    const needsHistoricalDates = new Set(this.getClusterDatesNeedingHistorical(locationId, startDate, endDate));
+
+    // Generate all dates in range
+    const allDates: string[] = [];
+    let current = DateTime.fromISO(startDate);
+    const end = DateTime.fromISO(endDate);
+
+    while (current <= end) {
+      const dateStr = current.toISODate()!;
+      const isPast = current < today;
+
+      // Need to fetch if:
+      // 1. No data at all (not in historical AND not in forecast)
+      // 2. Past date needs historical replacement
+      // 3. Future date has stale forecast
+      const hasHistorical = historicalDates.has(dateStr);
+      const hasForecast = forecastDates.has(dateStr);
+
+      if (!hasHistorical && !hasForecast) {
+        allDates.push(dateStr);
+      } else if (isPast && needsHistoricalDates.has(dateStr)) {
+        allDates.push(dateStr);
+      } else if (!isPast && staleDates.has(dateStr)) {
+        allDates.push(dateStr);
+      }
+
+      current = current.plus({ days: 1 });
+    }
+
+    return allDates;
+  }
+
+  /**
+   * Promote forecast data to historical table for past dates
+   * Called when past dates have forecast data that should become permanent
+   * This copies data from forecast table to historical table
+   */
+  promoteClusterForecastToHistorical(locationId: string): { promoted: number; archived: number } {
+    const today = DateTime.now().startOf('day').toISODate();
+    let promoted = 0;
+    let archived = 0;
+
+    const selectPast = this.db.prepare(`
+      SELECT * FROM cluster_weather_forecast
+      WHERE location_id = ? AND DATE(datetime) < ?
+    `);
+
+    const insertHistorical = this.db.prepare(`
+      INSERT INTO cluster_weather_historical (
+        location_id, datetime, temp, dew, humidity, precip, precipprob, pressure,
+        windgust, windspeed, winddir, windspeed50, winddir50, windspeed80, winddir80,
+        windspeed100, winddir100, cloudcover, visibility, solarradiation, solarenergy,
+        uvindex, dniradiation, difradiation, ghiradiation, conditions, source
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(location_id, datetime) DO NOTHING
+    `);
+
+    const insertArchive = this.db.prepare(`
+      INSERT INTO cluster_weather_forecast_archive (
+        location_id, datetime, fetched_at, lead_time_hours,
+        temp, dew, humidity, precip, precipprob, pressure,
+        windgust, windspeed, winddir, windspeed50, winddir50, windspeed80, winddir80,
+        windspeed100, winddir100, cloudcover, visibility, solarradiation, solarenergy,
+        uvindex, dniradiation, difradiation, ghiradiation, conditions, source
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const deleteForecast = this.db.prepare(`
+      DELETE FROM cluster_weather_forecast
+      WHERE location_id = ? AND DATE(datetime) < ?
+    `);
+
+    const transaction = this.db.transaction(() => {
+      const rows = selectPast.all(locationId, today) as any[];
+
+      for (const row of rows) {
+        // Archive the forecast record before promoting
+        if (row.fetched_at) {
+          const fetchedAt = DateTime.fromISO(row.fetched_at);
+          const targetTime = DateTime.fromISO(row.datetime);
+          const leadTimeHours = Math.round(targetTime.diff(fetchedAt, 'hours').hours);
+
+          insertArchive.run(
+            locationId, row.datetime, row.fetched_at, leadTimeHours,
+            row.temp, row.dew, row.humidity, row.precip, row.precipprob, row.pressure,
+            row.windgust, row.windspeed, row.winddir,
+            row.windspeed50, row.winddir50, row.windspeed80, row.winddir80,
+            row.windspeed100, row.winddir100,
+            row.cloudcover, row.visibility, row.solarradiation, row.solarenergy,
+            row.uvindex, row.dniradiation, row.difradiation, row.ghiradiation,
+            row.conditions, row.source
+          );
+          archived++;
+        }
+
+        const result = insertHistorical.run(
+          row.location_id, row.datetime,
+          row.temp, row.dew, row.humidity, row.precip, row.precipprob, row.pressure,
+          row.windgust, row.windspeed, row.winddir,
+          row.windspeed50, row.winddir50, row.windspeed80, row.winddir80,
+          row.windspeed100, row.winddir100,
+          row.cloudcover, row.visibility, row.solarradiation, row.solarenergy,
+          row.uvindex, row.dniradiation, row.difradiation, row.ghiradiation,
+          row.conditions, 'promoted_from_forecast'
+        );
+        if (result.changes > 0) promoted++;
+      }
+
+      // Delete promoted records from forecast table
+      deleteForecast.run(locationId, today);
+    });
+
+    transaction();
+    return { promoted, archived };
+  }
+
+  /**
+   * Get cluster weather statistics
+   */
+  getClusterWeatherStats(locationId?: string): {
+    historical: { records: number; locations: number; dateRange: { start: string | null; end: string | null } };
+    forecast: { records: number; locations: number; staleRecords: number };
+    archive: { records: number; oldestFetch: string | null };
+  } {
+    const locFilter = locationId ? ' WHERE location_id = ?' : '';
+    const params = locationId ? [locationId] : [];
+
+    const histStats = this.db.prepare(`
+      SELECT COUNT(*) as count, COUNT(DISTINCT location_id) as locations,
+             MIN(datetime) as min_dt, MAX(datetime) as max_dt
+      FROM cluster_weather_historical${locFilter}
+    `).get(...params) as any;
+
+    const fcStats = this.db.prepare(`
+      SELECT COUNT(*) as count, COUNT(DISTINCT location_id) as locations
+      FROM cluster_weather_forecast${locFilter}
+    `).get(...params) as any;
+
+    const cutoff = DateTime.now().minus({ hours: 24 }).toISO();
+    const staleCount = (this.db.prepare(`
+      SELECT COUNT(*) as count FROM cluster_weather_forecast
+      ${locFilter ? locFilter + ' AND' : ' WHERE'} fetched_at < ?
+    `).get(...params, cutoff) as any).count;
+
+    const archiveStats = this.db.prepare(`
+      SELECT COUNT(*) as count, MIN(fetched_at) as oldest
+      FROM cluster_weather_forecast_archive${locFilter}
+    `).get(...params) as any;
+
+    return {
+      historical: {
+        records: histStats.count,
+        locations: histStats.locations,
+        dateRange: { start: histStats.min_dt, end: histStats.max_dt }
+      },
+      forecast: {
+        records: fcStats.count,
+        locations: fcStats.locations,
+        staleRecords: staleCount
+      },
+      archive: {
+        records: archiveStats.count,
+        oldestFetch: archiveStats.oldest
+      }
+    };
+  }
+
+  /**
+   * Clear cluster weather data (for maintenance/testing)
+   */
+  clearClusterWeather(locationId?: string, tableType?: 'historical' | 'forecast' | 'archive' | 'all'): void {
+    const tables = tableType === 'all' || !tableType
+      ? ['cluster_weather_historical', 'cluster_weather_forecast', 'cluster_weather_forecast_archive']
+      : [`cluster_weather_${tableType}`];
+
+    for (const table of tables) {
+      if (locationId) {
+        this.db.prepare(`DELETE FROM ${table} WHERE location_id = ?`).run(locationId);
+      } else {
+        this.db.exec(`DELETE FROM ${table}`);
+      }
+    }
+  }
 }
 
 // Singleton instance

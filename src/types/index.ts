@@ -26,6 +26,53 @@ export interface RawWeatherData {
   uvindex: number;
 }
 
+// Extended weather data for capacity factor forecasting
+// Includes hub-height wind data and extended solar irradiance
+export interface ClusterWeatherRecord {
+  locationId: string;
+  datetime: string;
+
+  // Basic weather
+  temp?: number;
+  dew?: number;
+  humidity?: number;
+  precip?: number;
+  precipprob?: number;
+  pressure?: number;
+
+  // Wind (10m standard)
+  windgust?: number;
+  windspeed?: number;
+  winddir?: number;
+
+  // Wind hub-height (50m, 80m, 100m)
+  windspeed50?: number;
+  winddir50?: number;
+  windspeed80?: number;
+  winddir80?: number;
+  windspeed100?: number;
+  winddir100?: number;
+
+  // Solar/sky
+  cloudcover?: number;
+  visibility?: number;
+  solarradiation?: number;
+  solarenergy?: number;
+  uvindex?: number;
+
+  // Extended solar irradiance (W/m²)
+  dniradiation?: number;
+  difradiation?: number;
+  ghiradiation?: number;
+
+  // Conditions
+  conditions?: string;
+
+  // Metadata (for forecast records)
+  fetchedAt?: string;
+  isForecast?: boolean;
+}
+
 // Demand data from CSV (hourly)
 export interface RawDemandData {
   dateTimeEnding: string;

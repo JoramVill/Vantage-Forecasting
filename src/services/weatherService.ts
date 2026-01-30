@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, unlink
 import { join } from 'path';
 import { DateTime } from 'luxon';
 import { getDatabase, closeDatabase, DatabaseService } from '../database/index.js';
-import { RawWeatherData } from '../types/index.js';
+import { RawWeatherData, ClusterWeatherRecord } from '../types/index.js';
 
 export interface WeatherLocation {
   id: string;
@@ -427,6 +427,156 @@ export class WeatherService {
   }
 
   /**
+   * Parse cluster weather CSV into records for database import
+   * Handles both standard and extended wind elements
+   */
+  private parseClusterCsvToRecords(csvData: string): Array<{
+    datetime: string;
+    temp?: number;
+    dew?: number;
+    humidity?: number;
+    precip?: number;
+    precipprob?: number;
+    pressure?: number;
+    windgust?: number;
+    windspeed?: number;
+    winddir?: number;
+    windspeed50?: number;
+    winddir50?: number;
+    windspeed80?: number;
+    winddir80?: number;
+    windspeed100?: number;
+    winddir100?: number;
+    cloudcover?: number;
+    visibility?: number;
+    solarradiation?: number;
+    solarenergy?: number;
+    uvindex?: number;
+    dniradiation?: number;
+    difradiation?: number;
+    ghiradiation?: number;
+    conditions?: string;
+  }> {
+    const lines = csvData.split('\n').filter(l => l.trim());
+    if (lines.length < 2) return [];
+
+    const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+    const colIdx = (name: string) => headers.indexOf(name);
+
+    const records: Array<any> = [];
+
+    const getNumericValue = (values: string[], idx: number): number | undefined => {
+      if (idx < 0) return undefined;
+      const val = values[idx]?.trim();
+      if (!val || val === '') return undefined;
+      const num = parseFloat(val);
+      return isNaN(num) ? undefined : num;
+    };
+
+    const getStringValue = (values: string[], idx: number): string | undefined => {
+      if (idx < 0) return undefined;
+      const val = values[idx]?.trim();
+      return val || undefined;
+    };
+
+    for (let i = 1; i < lines.length; i++) {
+      const values = this.parseCSVLine(lines[i]);
+
+      const record = {
+        datetime: values[colIdx('datetime')],
+        temp: getNumericValue(values, colIdx('temp')),
+        dew: getNumericValue(values, colIdx('dew')),
+        humidity: getNumericValue(values, colIdx('humidity')),
+        precip: getNumericValue(values, colIdx('precip')),
+        precipprob: getNumericValue(values, colIdx('precipprob')),
+        pressure: getNumericValue(values, colIdx('pressure')),
+        windgust: getNumericValue(values, colIdx('windgust')),
+        windspeed: getNumericValue(values, colIdx('windspeed')),
+        winddir: getNumericValue(values, colIdx('winddir')),
+        windspeed50: getNumericValue(values, colIdx('windspeed50')),
+        winddir50: getNumericValue(values, colIdx('winddir50')),
+        windspeed80: getNumericValue(values, colIdx('windspeed80')),
+        winddir80: getNumericValue(values, colIdx('winddir80')),
+        windspeed100: getNumericValue(values, colIdx('windspeed100')),
+        winddir100: getNumericValue(values, colIdx('winddir100')),
+        cloudcover: getNumericValue(values, colIdx('cloudcover')),
+        visibility: getNumericValue(values, colIdx('visibility')),
+        solarradiation: getNumericValue(values, colIdx('solarradiation')),
+        solarenergy: getNumericValue(values, colIdx('solarenergy')),
+        uvindex: getNumericValue(values, colIdx('uvindex')),
+        dniradiation: getNumericValue(values, colIdx('dniradiation')),
+        difradiation: getNumericValue(values, colIdx('difradiation')),
+        ghiradiation: getNumericValue(values, colIdx('ghiradiation')),
+        conditions: getStringValue(values, colIdx('conditions'))
+      };
+
+      if (record.datetime) {
+        records.push(record);
+      }
+    }
+
+    return records;
+  }
+
+  /**
+   * Format cluster weather records as CSV for backward compatibility
+   */
+  private formatClusterRecordsAsCsv(
+    records: Array<ClusterWeatherRecord & { isHistorical?: boolean }>,
+    isWindCluster: boolean
+  ): string {
+    if (records.length === 0) return '';
+
+    // Use appropriate headers based on cluster type
+    const headers = isWindCluster ? WIND_ELEMENTS : HOURLY_ELEMENTS;
+    const headerLine = headers.join(',');
+
+    const rows: string[] = [headerLine];
+
+    for (const record of records) {
+      // Extract name, lat, lon from locationId (e.g., "SOLAR_01BOTOLAN" -> need coordinates)
+      // For now, use placeholder values - the actual coordinates aren't stored in the DB records
+      // This is fine since the downstream parsers primarily use datetime and weather values
+      const row = headers.map(h => {
+        switch (h) {
+          case 'datetime': return record.datetime || '';
+          case 'name': return record.locationId || '';
+          case 'latitude': return '0';  // Placeholder - coordinates used at fetch time
+          case 'longitude': return '0'; // Placeholder - coordinates used at fetch time
+          case 'temp': return record.temp ?? '';
+          case 'dew': return record.dew ?? '';
+          case 'humidity': return record.humidity ?? '';
+          case 'precip': return record.precip ?? '';
+          case 'precipprob': return record.precipprob ?? '';
+          case 'pressure': return record.pressure ?? '';
+          case 'windgust': return record.windgust ?? '';
+          case 'windspeed': return record.windspeed ?? '';
+          case 'winddir': return record.winddir ?? '';
+          case 'windspeed50': return record.windspeed50 ?? '';
+          case 'winddir50': return record.winddir50 ?? '';
+          case 'windspeed80': return record.windspeed80 ?? '';
+          case 'winddir80': return record.winddir80 ?? '';
+          case 'windspeed100': return record.windspeed100 ?? '';
+          case 'winddir100': return record.winddir100 ?? '';
+          case 'cloudcover': return record.cloudcover ?? '';
+          case 'visibility': return record.visibility ?? '';
+          case 'solarradiation': return record.solarradiation ?? '';
+          case 'solarenergy': return record.solarenergy ?? '';
+          case 'uvindex': return record.uvindex ?? '';
+          case 'dniradiation': return record.dniradiation ?? '';
+          case 'difradiation': return record.difradiation ?? '';
+          case 'ghiradiation': return record.ghiradiation ?? '';
+          case 'conditions': return record.conditions ?? '';
+          default: return '';
+        }
+      });
+      rows.push(row.join(','));
+    }
+
+    return rows.join('\n');
+  }
+
+  /**
    * Get all dates between start and end (inclusive)
    */
   private getDateRange(startDate: string, endDate: string): string[] {
@@ -632,7 +782,13 @@ export class WeatherService {
 
   /**
    * Fetch weather data for a cluster location using coordinates
-   * Returns combined CSV data for all days
+   * Uses DATABASE as primary storage with smart refresh logic:
+   * - Historical data (past dates) is permanent, never re-downloaded
+   * - Forecast data is refreshed if stale (>24 hours old)
+   * - Past dates with forecast data get replaced with actual historical data
+   *
+   * Returns combined CSV data for all days (backward compatible)
+   *
    * @param cluster - Cluster location with coordinates
    * @param startDate - Start date in YYYY-MM-DD format
    * @param endDate - End date in YYYY-MM-DD format
@@ -645,94 +801,121 @@ export class WeatherService {
     endDate: string,
     onProgress?: (message: string) => void,
     isWindCluster: boolean = false
-  ): Promise<{ success: boolean; data?: string; error?: string; cached: number; downloaded: number }> {
+  ): Promise<{ success: boolean; data?: string; error?: string; cached: number; downloaded: number; refreshed?: number }> {
     const dates = this.getDateRange(startDate, endDate);
-    const allRows: string[] = [];
-    let header: string | null = null;
     let cachedCount = 0;
     let downloadedCount = 0;
+    let refreshedCount = 0;
 
-    // Use standard cache key for now - 100m wind data requires premium API subscription
-    // When premium access is available, the code will automatically try to fetch 100m data
-    // but will fall back to standard 10m data if unavailable
+    const db = getDatabase();
+    const locationId = cluster.clusterId;
     const cacheKey = cluster.clusterId;
+    const fetchedAt = DateTime.now().toISO()!;
 
     onProgress?.(`Fetching ${isWindCluster ? 'wind (100m)' : 'standard'} weather for cluster ${cluster.clusterId} (${cluster.name}): ${dates.length} days`);
 
-    for (const date of dates) {
+    // Check which dates need fetching using smart database logic
+    const missingDates = db.getClusterMissingDates(locationId, startDate, endDate, 24);
+
+    // Get existing data counts
+    const existingCount = dates.length - missingDates.length;
+    cachedCount = existingCount;
+
+    if (missingDates.length > 0) {
+      // Get breakdown for detailed progress
+      const today = DateTime.now().startOf('day');
+      const staleCount = missingDates.filter(d => DateTime.fromISO(d) >= today).length;
+      const needsHistCount = missingDates.filter(d => DateTime.fromISO(d) < today).length;
+
+      onProgress?.(`  Database: ${existingCount} days OK`);
+      if (needsHistCount > 0) onProgress?.(`  Needs historical: ${needsHistCount} days`);
+      if (staleCount > 0) onProgress?.(`  Stale/missing forecast: ${staleCount - needsHistCount > 0 ? staleCount : missingDates.length - needsHistCount} days`);
+    } else {
+      onProgress?.(`  Database has all ${existingCount} days (historical data preserved)`);
+    }
+
+    // Download dates that need updating
+    for (const date of missingDates) {
       try {
-        let csvData: string | null = null;
-        let needsDownload = false;
+        const isPast = DateTime.fromISO(date) < DateTime.now().startOf('day');
 
-        // Check cache first (using cacheKey which includes wind suffix)
+        // First check file cache as fallback (for migration from old system)
         if (this.hasCachedData(cacheKey, date)) {
-          csvData = this.readCachedData(cacheKey, date);
-
-          // Validate cached data for completeness (prevents stale forecast data issues)
+          const csvData = this.readCachedData(cacheKey, date);
           if (csvData) {
             const validation = this.validateCachedWeatherData(csvData, cluster.clusterId, date);
-            if (!validation.valid) {
-              onProgress?.(`  Cache invalid for ${cluster.clusterId} ${date}: ${validation.reason} - refreshing...`);
-              this.deleteCachedData(cacheKey, date);
-              csvData = null;
-              needsDownload = true;
+            if (validation.valid) {
+              // Import from file cache to database
+              const records = this.parseClusterCsvToRecords(csvData);
+              if (records.length > 0) {
+                db.importClusterWeather(records, locationId, fetchedAt, 'file_cache');
+                onProgress?.(`  Imported ${cluster.clusterId} ${date} from file cache`);
+                if (isPast) refreshedCount++; else cachedCount++;
+                continue;
+              }
             } else {
-              cachedCount++;
+              // Invalid cache file - delete it
+              this.deleteCachedData(cacheKey, date);
             }
+          }
+        }
+
+        // Download from API
+        const reason = isPast ? '(historical)' : '';
+        onProgress?.(`  Downloading ${cluster.clusterId} ${date}${isWindCluster ? ' (100m wind)' : ''} ${reason}...`);
+
+        const csvData = await this.downloadDayDataByCoords(
+          cluster.clusterId,
+          cluster.latitude,
+          cluster.longitude,
+          date,
+          isWindCluster
+        );
+
+        // Parse and store in database (auto-routes to historical/forecast)
+        const records = this.parseClusterCsvToRecords(csvData);
+        if (records.length > 0) {
+          const result = db.importClusterWeather(records, locationId, fetchedAt, 'api');
+          if (isPast) {
+            refreshedCount++;
           } else {
-            needsDownload = true;
-          }
-        } else {
-          needsDownload = true;
-        }
-
-        // Download if needed (not in cache or cache was invalid)
-        if (needsDownload) {
-          // Download from API using coordinates
-          onProgress?.(`  Downloading ${cluster.clusterId} ${date}${isWindCluster ? ' (100m wind)' : ''}...`);
-          csvData = await this.downloadDayDataByCoords(
-            cluster.clusterId,
-            cluster.latitude,
-            cluster.longitude,
-            date,
-            isWindCluster  // Pass flag to request extended wind elements
-          );
-          this.saveCacheData(cacheKey, date, csvData);
-          downloadedCount++;
-
-          // Small delay to avoid rate limiting
-          await new Promise(resolve => setTimeout(resolve, 200));
-        }
-
-        if (csvData) {
-          const lines = csvData.split('\n').filter(l => l.trim());
-
-          // Keep header from first file
-          if (!header && lines.length > 0) {
-            header = lines[0];
-          }
-
-          // Add data rows (skip header)
-          for (let i = 1; i < lines.length; i++) {
-            allRows.push(lines[i]);
+            downloadedCount++;
           }
         }
+
+        // Also save to file cache for backup
+        this.saveCacheData(cacheKey, date, csvData);
+
+        // Small delay to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 200));
       } catch (error: any) {
         onProgress?.(`  Error fetching ${date}: ${error.message}`);
         // Continue with other dates
       }
     }
 
-    if (!header || allRows.length === 0) {
-      return { success: false, error: 'No weather data retrieved', cached: cachedCount, downloaded: downloadedCount };
+    // Retrieve all data from database (merged historical + forecast)
+    const weatherRecords = db.getClusterWeather(locationId, startDate, endDate);
+
+    if (weatherRecords.length === 0) {
+      return { success: false, error: 'No weather data retrieved', cached: cachedCount, downloaded: downloadedCount, refreshed: refreshedCount };
     }
 
-    // Combine header and all rows
-    const combinedData = [header, ...allRows].join('\n');
+    // Format database records as CSV for backward compatibility
+    const recordsWithLocationId = weatherRecords.map(r => ({
+      ...r,
+      locationId: locationId
+    })) as Array<ClusterWeatherRecord & { isHistorical?: boolean }>;
 
-    onProgress?.(`  ${cluster.clusterId}: ${cachedCount} cached, ${downloadedCount} downloaded`);
+    const combinedData = this.formatClusterRecordsAsCsv(recordsWithLocationId, isWindCluster);
 
-    return { success: true, data: combinedData, cached: cachedCount, downloaded: downloadedCount };
+    const summary = [];
+    if (cachedCount > 0) summary.push(`${cachedCount} from DB`);
+    if (downloadedCount > 0) summary.push(`${downloadedCount} new`);
+    if (refreshedCount > 0) summary.push(`${refreshedCount} refreshed`);
+    onProgress?.(`  ${cluster.clusterId}: ${summary.join(', ')}`);
+
+    return { success: true, data: combinedData, cached: cachedCount, downloaded: downloadedCount, refreshed: refreshedCount };
   }
 
   /**

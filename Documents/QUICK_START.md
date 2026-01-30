@@ -1,161 +1,242 @@
-# iLoad Forecasting Utility - Quick Start Guide
+# Quick Start Guide
 
-## Build & Run
-
-```bash
-# 1. Build the project
-npm run build
-
-# 2. Run CLI commands
-node dist/index.js <command> [options]
-
-# Or install globally
-npm link
-iload <command> [options]
-```
-
-## Available Commands
-
-| Command | Description |
-|---------|-------------|
-| `train` | Train demand forecasting models |
-| `forecast` | Generate demand forecasts (auto-fetches weather) |
-| `evaluate` | Compare forecast vs actual demand |
-| `cfac` | Capacity factor forecasting for renewables |
-| `outage` | Outage analysis and probability forecasting |
-| `db` | Database management |
-| `forecast-all` | Generate both demand and capacity factor forecasts |
-| `info` | Display data file information |
+Get running with the iLoad Forecasting Utility in 5 minutes. This tool forecasts power generation and demand for the Philippine grid.
 
 ---
 
-## Quick Examples
+## Prerequisites
 
-### 1. Generate Demand Forecast (Simplest)
+- Node.js 16+ and npm
+- Windows/Linux/macOS
+
+---
+
+## Install & Build
 
 ```bash
-# Using database data (recommended)
+npm install
+npm run build
+```
+
+---
+
+## Most Common Commands
+
+### 1. Capacity Factor Forecast (Primary Use Case)
+
+**Basic forecast:**
+```bash
+node dist/index.js cfac forecast2 \
+  -t "Data Samples/Capacity Factor" \
+  -s 2026-01-01 -e 2026-01-31 \
+  -o output/cfac_january.csv
+```
+
+**Optimal for solar stations:**
+```bash
+node dist/index.js cfac forecast2 \
+  -t "Data Samples/Capacity Factor" \
+  -s 2026-01-01 -e 2026-01-31 \
+  -o output/cfac_january.csv \
+  --use-xgboost --asymmetric-loss
+```
+
+**Bias correction for wind:**
+```bash
+node dist/index.js cfac forecast2 \
+  -t "Data Samples/Capacity Factor" \
+  -s 2026-01-01 -e 2026-01-31 \
+  -o output/cfac_january.csv \
+  --bias-correction
+```
+
+### 2. Demand Forecast
+
+```bash
 node dist/index.js forecast \
-  --start 2025-11-01 \
-  --end 2025-12-31 \
-  --model hybrid \
-  --use-db \
-  --output forecast_nov_dec.csv
+  -d "Data Samples/Demand" \
+  -s 2026-01-01 -e 2026-01-31 \
+  -o output/demand_january.csv \
+  --model hybrid
 ```
 
-### 2. Generate Demand Forecast (from file)
+### 3. Evaluate Forecast Accuracy
 
+**Capacity factor evaluation:**
 ```bash
-node dist/index.js forecast \
-  --demand "Data Samples/Demand/DemandHr_November.csv" \
-  --start 2025-12-01 \
-  --end 2025-12-07 \
-  --model hybrid \
-  --output forecast.csv
+node dist/index.js cfac evaluate \
+  -f output/cfac_january.csv \
+  -a "Data Samples/Capacity Factor/MRHCFac_actual.csv" \
+  -o output/evaluation.txt
 ```
 
-### 3. Generate Capacity Factor Forecast
-
-```bash
-node dist/index.js cfac forecast \
-  --start 2025-11-01 \
-  --end 2025-12-31 \
-  --training "Data Samples/Capacity Factor" \
-  --output cfac_forecast.csv
-```
-
-### 4. Generate Both Forecasts at Once
-
-```bash
-node dist/index.js forecast-all \
-  --demand "Data Samples/Demand" \
-  --cfac "Data Samples/Capacity Factor" \
-  --start 2025-11-01 \
-  --end 2025-12-31 \
-  --model hybrid \
-  --output-demand demand_forecast.csv \
-  --output-cfac cfac_forecast.csv
-```
-
-### 5. Evaluate Forecast Accuracy
-
+**Demand evaluation:**
 ```bash
 node dist/index.js evaluate \
-  --forecast forecast.csv \
-  --actual "Data Samples/Demand/DemandHr_Actual.csv"
+  -f output/demand_january.csv \
+  -a "Data Samples/Demand/actual.csv"
 ```
 
-### 6. Outage Analysis
+### 4. Scheduler (Automated Daily Forecasts)
 
+**Run today's forecasts:**
 ```bash
-# Analyze historical outages
-node dist/index.js outage analyze \
-  --data "Data Samples/Outages"
-
-# Weather-adjusted outage probability forecast
-node dist/index.js outage weather-forecast \
-  --start 2025-11-01 \
-  --end 2025-12-31
+node dist/index.js scheduler run
 ```
 
----
-
-## Database Management
-
-### Import Data
-
+**Backfill date range:**
 ```bash
-# Import demand data
-node dist/index.js db import -t demand -f "Data Samples/Demand/DemandHr.csv"
-
-# Import weather data
-node dist/index.js db import -t weather -f "weather_manila.csv" -l Manila
+node dist/index.js scheduler backfill -s 2026-01-01 -e 2026-01-31
 ```
 
-### Check Database Status
+**Check scheduler status:**
+```bash
+node dist/index.js scheduler status
+```
 
+### 5. Database Management
+
+**Check database status:**
 ```bash
 node dist/index.js db status
 ```
 
----
-
-## Model Types
-
-| Model | Best For | Description |
-|-------|----------|-------------|
-| `hybrid` | **Recommended** | Region-specific learned patterns, best shape accuracy |
-| `regression` | Fast training | Linear regression, interpretable coefficients |
-| `xgboost` | Complex patterns | Gradient boosting, highest R² but slower |
-
----
-
-## Key Features
-
-- **Auto Weather Fetching**: Automatically downloads weather data from Visual Crossing API
-- **Database Storage**: Store demand/weather data for reuse
-- **Three Demand Models**: Hybrid (recommended), Regression, XGBoost
-- **Capacity Factor Forecasting**: 117 renewable/must-run stations
-- **Outage Probability**: Weather-adjusted outage forecasting
-- **Region-Specific Learning**: Hybrid model learns each region's unique patterns
-
----
-
-## Getting Help
-
+**Import new data:**
 ```bash
-# General help
-node dist/index.js --help
-
-# Command-specific help
-node dist/index.js forecast --help
-node dist/index.js cfac --help
-node dist/index.js outage --help
-node dist/index.js db --help
+node dist/index.js db import -d "Data Samples/Demand" -c "Data Samples/Capacity Factor"
 ```
 
 ---
 
-## Next Steps
+## Key Concepts
 
-See [CLI_USAGE.md](./CLI_USAGE.md) for detailed documentation of all commands and options.
+### Philippine Grid Regions
+| Region Code | Region Name | Weather City |
+|-------------|-------------|--------------|
+| CLUZ | Luzon | Manila |
+| CVIS | Visayas | Cebu City |
+| CMIN | Mindanao | Davao City |
+
+### Station Types
+- **Wind** - Turbines (suffix `_W` or specific codes like `01BURGOS`)
+- **Solar** - PV arrays (suffix `_S`)
+- **Hydro** - Run-of-river and storage (suffix `_H`)
+- **Geothermal** - Steam plants (suffix `_G`, `_GP`)
+- **Biomass** - Bio-fueled plants (suffix `_BI`, `_BG`, `_BL`)
+- **Battery** - Energy storage (suffix `_B`)
+
+### Weather Data
+- Automatically fetched from Visual Crossing API
+- Station-specific coordinates for wind/solar (100m hub-height for wind)
+- Cluster-based for other station types
+- Cached locally in `./weather_cache/`
+
+### Auto-Calibration
+- 14-day lookback period adjusts forecasts to recent patterns
+- Reduces systematic bias in predictions
+- Automatically enabled (use `--no-auto-calibrate` to disable)
+
+### Data Storage
+- SQLite database: `data/iload.db` or `forecast.db`
+- Stores historical data, forecasts, and model metadata
+- View with SQLite browser or CLI
+
+---
+
+## Output Format
+
+CSV files with columns:
+- **DateTimeEnding** - Hour-ending timestamp (M/D/YYYY H:MM format)
+- **Station/Region columns** - Capacity factor (0-1) or demand (MW)
+
+Example:
+```csv
+DateTimeEnding,01BURGOS_W,01LAOAG_W,CLUZ,CVIS,CMIN
+1/1/2026 1:00,0.45,0.52,8500,2100,1800
+1/1/2026 2:00,0.48,0.55,8200,2050,1750
+```
+
+---
+
+## GUI (Optional)
+
+Launch graphical interface:
+```bash
+cd gui
+npm install
+npm run dev
+```
+
+Package for distribution:
+```bash
+npm run electron:build
+```
+
+---
+
+## Model Performance (Typical MAPE)
+
+| Type | Model | MAPE | Notes |
+|------|-------|------|-------|
+| Demand | Region-Aware Hybrid | 2-4% | XGBoost + weekend correction |
+| Wind | Enhanced Hybrid | ~76% | MREC + ML with 100m data |
+| Solar | Physics+ML Hybrid | ~16% | Irradiance + XGBoost |
+| Hydro/Geo/Bio | Profile-based | varies | Historical patterns |
+
+---
+
+## Need Help?
+
+### Full Documentation
+- **CLI_REFERENCE.md** - Complete command reference with all flags
+- **CAPACITY_FACTOR_GUIDE.md** - Deep dive into capacity factor forecasting
+- **METHODOLOGY_REPORT.md** - Comprehensive methodology for clients
+- **USER_GUIDE.md** - Workflows and advanced examples
+- **TECHNICAL_OVERVIEW.md** - Architecture and internals
+- **AI_AGENT_GUIDE.md** - Guide for AI assistants working with this codebase
+
+### Quick Reference
+Start with: **DOCUMENTATION_INDEX.md** in `Documents/` folder
+
+---
+
+## Common Issues
+
+**Weather cache errors?**
+```bash
+rm -rf weather_cache
+```
+
+**Database locked?**
+Close any open database connections or viewers.
+
+**Import failures?**
+Check CSV format matches expected schema (see CLI_REFERENCE.md).
+
+---
+
+## Example Workflow
+
+1. **Import historical data:**
+   ```bash
+   node dist/index.js db import -d "Data Samples/Demand" -c "Data Samples/Capacity Factor"
+   ```
+
+2. **Generate capacity factor forecast:**
+   ```bash
+   node dist/index.js cfac forecast2 -t "Data Samples/Capacity Factor" -s 2026-02-01 -e 2026-02-28 -o output/cfac_feb.csv --use-xgboost --asymmetric-loss
+   ```
+
+3. **Generate demand forecast:**
+   ```bash
+   node dist/index.js forecast -d "Data Samples/Demand" -s 2026-02-01 -e 2026-02-28 -o output/demand_feb.csv --model hybrid
+   ```
+
+4. **Evaluate when actuals arrive:**
+   ```bash
+   node dist/index.js cfac evaluate -f output/cfac_feb.csv -a "Data Samples/Capacity Factor/actuals_feb.csv" -o output/feb_eval.txt
+   ```
+
+---
+
+**You're ready to forecast!** Run your first command and check the `output/` folder for results.

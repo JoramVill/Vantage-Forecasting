@@ -1,6 +1,6 @@
 // Database schema definitions
 
-export const SCHEMA_VERSION = 5;  // Updated for scheduled forecast service
+export const SCHEMA_VERSION = 6;  // Updated for cluster weather tables (historical/forecast separation)
 
 export const CREATE_TABLES_SQL = `
 -- Schema version tracking
@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS demand_records (
   UNIQUE(datetime, region)
 );
 
--- Weather records (historical and forecast)
+-- Weather records (historical and forecast) - for DEMAND forecasting (3 regions)
 CREATE TABLE IF NOT EXISTS weather_records (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   datetime TEXT NOT NULL,
@@ -39,6 +39,168 @@ CREATE TABLE IF NOT EXISTS weather_records (
   source TEXT,
   imported_at TEXT DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(datetime, region)
+);
+
+-- ============================================
+-- CLUSTER WEATHER TABLES (Capacity Factor)
+-- Supports extended wind (hub-height) and solar (irradiance) fields
+-- Separate historical/forecast tables with archive for accuracy analysis
+-- ============================================
+
+-- Cluster weather - Historical (actual observed data)
+-- Data is PERMANENT and never overwritten once stored
+CREATE TABLE IF NOT EXISTS cluster_weather_historical (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  location_id TEXT NOT NULL,           -- e.g., 'SOLAR_01BOTOLAN', 'WIND_01BURGOS', 'LUZON_HYDRO'
+  datetime TEXT NOT NULL,              -- ISO 8601 format
+
+  -- Basic weather
+  temp REAL,
+  dew REAL,
+  humidity REAL,
+  precip REAL,
+  precipprob REAL,
+  pressure REAL,
+
+  -- Wind (10m standard)
+  windgust REAL,
+  windspeed REAL,
+  winddir REAL,
+
+  -- Wind hub-height (50m, 80m, 100m)
+  windspeed50 REAL,
+  winddir50 REAL,
+  windspeed80 REAL,
+  winddir80 REAL,
+  windspeed100 REAL,
+  winddir100 REAL,
+
+  -- Solar/sky
+  cloudcover REAL,
+  visibility REAL,
+  solarradiation REAL,
+  solarenergy REAL,
+  uvindex REAL,
+
+  -- Extended solar irradiance
+  dniradiation REAL,                   -- Direct Normal Irradiance (W/m²)
+  difradiation REAL,                   -- Diffuse Horizontal Irradiance (W/m²)
+  ghiradiation REAL,                   -- Global Horizontal Irradiance (W/m²)
+
+  -- Conditions
+  conditions TEXT,
+
+  -- Metadata
+  imported_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  source TEXT,                         -- 'api', 'cache_migration', etc.
+
+  UNIQUE(location_id, datetime)
+);
+
+-- Cluster weather - Forecast (latest predictions, gets refreshed)
+-- Data older than 24h gets refreshed with newer forecasts
+-- When date passes into the past, data is promoted to historical table
+CREATE TABLE IF NOT EXISTS cluster_weather_forecast (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  location_id TEXT NOT NULL,
+  datetime TEXT NOT NULL,              -- The hour being forecast
+
+  -- Basic weather
+  temp REAL,
+  dew REAL,
+  humidity REAL,
+  precip REAL,
+  precipprob REAL,
+  pressure REAL,
+
+  -- Wind (10m standard)
+  windgust REAL,
+  windspeed REAL,
+  winddir REAL,
+
+  -- Wind hub-height
+  windspeed50 REAL,
+  winddir50 REAL,
+  windspeed80 REAL,
+  winddir80 REAL,
+  windspeed100 REAL,
+  winddir100 REAL,
+
+  -- Solar/sky
+  cloudcover REAL,
+  visibility REAL,
+  solarradiation REAL,
+  solarenergy REAL,
+  uvindex REAL,
+
+  -- Extended solar irradiance
+  dniradiation REAL,
+  difradiation REAL,
+  ghiradiation REAL,
+
+  -- Conditions
+  conditions TEXT,
+
+  -- Forecast metadata
+  fetched_at TEXT NOT NULL,            -- When this forecast was downloaded
+  source TEXT,
+
+  UNIQUE(location_id, datetime)
+);
+
+-- Cluster weather - Forecast Archive (versioned history for accuracy analysis)
+-- Append-only, stores every forecast version before it gets overwritten
+-- Enables comparison: "How accurate was 24h-ahead vs 72h-ahead forecast?"
+CREATE TABLE IF NOT EXISTS cluster_weather_forecast_archive (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  location_id TEXT NOT NULL,
+  datetime TEXT NOT NULL,              -- The hour that was forecast
+  fetched_at TEXT NOT NULL,            -- When this forecast was made
+
+  -- Lead time calculation: datetime - fetched_at
+  lead_time_hours INTEGER,             -- How many hours ahead this forecast was
+
+  -- Basic weather
+  temp REAL,
+  dew REAL,
+  humidity REAL,
+  precip REAL,
+  precipprob REAL,
+  pressure REAL,
+
+  -- Wind (10m standard)
+  windgust REAL,
+  windspeed REAL,
+  winddir REAL,
+
+  -- Wind hub-height
+  windspeed50 REAL,
+  winddir50 REAL,
+  windspeed80 REAL,
+  winddir80 REAL,
+  windspeed100 REAL,
+  winddir100 REAL,
+
+  -- Solar/sky
+  cloudcover REAL,
+  visibility REAL,
+  solarradiation REAL,
+  solarenergy REAL,
+  uvindex REAL,
+
+  -- Extended solar irradiance
+  dniradiation REAL,
+  difradiation REAL,
+  ghiradiation REAL,
+
+  -- Conditions
+  conditions TEXT,
+
+  -- Archive metadata
+  archived_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  source TEXT
+
+  -- No UNIQUE constraint - allows multiple forecast versions for same datetime
 );
 
 -- Trained models
@@ -134,6 +296,23 @@ CREATE INDEX IF NOT EXISTS idx_demand_datetime_region ON demand_records(datetime
 CREATE INDEX IF NOT EXISTS idx_weather_datetime ON weather_records(datetime);
 CREATE INDEX IF NOT EXISTS idx_weather_region ON weather_records(region);
 CREATE INDEX IF NOT EXISTS idx_weather_datetime_region ON weather_records(datetime, region);
+
+-- Indexes for cluster weather historical
+CREATE INDEX IF NOT EXISTS idx_cluster_hist_location ON cluster_weather_historical(location_id);
+CREATE INDEX IF NOT EXISTS idx_cluster_hist_datetime ON cluster_weather_historical(datetime);
+CREATE INDEX IF NOT EXISTS idx_cluster_hist_loc_dt ON cluster_weather_historical(location_id, datetime);
+
+-- Indexes for cluster weather forecast
+CREATE INDEX IF NOT EXISTS idx_cluster_fc_location ON cluster_weather_forecast(location_id);
+CREATE INDEX IF NOT EXISTS idx_cluster_fc_datetime ON cluster_weather_forecast(datetime);
+CREATE INDEX IF NOT EXISTS idx_cluster_fc_loc_dt ON cluster_weather_forecast(location_id, datetime);
+CREATE INDEX IF NOT EXISTS idx_cluster_fc_fetched ON cluster_weather_forecast(fetched_at);
+
+-- Indexes for cluster weather forecast archive
+CREATE INDEX IF NOT EXISTS idx_cluster_archive_location ON cluster_weather_forecast_archive(location_id);
+CREATE INDEX IF NOT EXISTS idx_cluster_archive_datetime ON cluster_weather_forecast_archive(datetime);
+CREATE INDEX IF NOT EXISTS idx_cluster_archive_fetched ON cluster_weather_forecast_archive(fetched_at);
+CREATE INDEX IF NOT EXISTS idx_cluster_archive_lead_time ON cluster_weather_forecast_archive(lead_time_hours);
 
 CREATE INDEX IF NOT EXISTS idx_models_active ON models(is_active);
 CREATE INDEX IF NOT EXISTS idx_models_type ON models(model_type);

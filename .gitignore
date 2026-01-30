@@ -43,3 +43,7 @@ config.json
 context.md
 /Data Samples
 /gui/release
+data/iload.db
+forecast.db
+data/iload.db
+/data
