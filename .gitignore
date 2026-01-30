@@ -48,3 +48,4 @@ forecast.db
 data/iload.db
 /data
 data/iload.db
+*.db
