@@ -34,6 +34,77 @@ export const DEFAULT_LOCATIONS: WeatherLocation[] = [
   { id: 'davao', name: 'Davao City', region: 'mindanao', demandColumn: 'CMIN' }
 ];
 
+// Zonal weather locations - 42 cities (3 per zone) for 14-zone demand forecasting
+export const ZONAL_LOCATIONS: WeatherLocation[] = [
+  // 01NLUZ - Northern Luzon (Region I, II, III, CAR)
+  { id: '01nluz_sanfernando', name: 'San Fernando, Pampanga', region: 'luzon', demandColumn: '01NLUZ' },
+  { id: '01nluz_baguio', name: 'Baguio', region: 'luzon', demandColumn: '01NLUZ' },
+  { id: '01nluz_tuguegarao', name: 'Tuguegarao', region: 'luzon', demandColumn: '01NLUZ' },
+  // 02METRO - Metro Manila (NCR)
+  { id: '02metro_manila', name: 'Manila', region: 'luzon', demandColumn: '02METRO' },
+  { id: '02metro_quezoncity', name: 'Quezon City', region: 'luzon', demandColumn: '02METRO' },
+  { id: '02metro_makati', name: 'Makati', region: 'luzon', demandColumn: '02METRO' },
+  // 03SLUZ - Southern Luzon (CALABARZON, MIMAROPA, Bicol)
+  { id: '03sluz_batangas', name: 'Batangas', region: 'luzon', demandColumn: '03SLUZ' },
+  { id: '03sluz_lucena', name: 'Lucena', region: 'luzon', demandColumn: '03SLUZ' },
+  { id: '03sluz_legazpi', name: 'Legazpi', region: 'luzon', demandColumn: '03SLUZ' },
+  // 04LEYTE - Leyte / Eastern Visayas
+  { id: '04leyte_tacloban', name: 'Tacloban', region: 'visayas', demandColumn: '04LEYTE' },
+  { id: '04leyte_ormoc', name: 'Ormoc', region: 'visayas', demandColumn: '04LEYTE' },
+  { id: '04leyte_catbalogan', name: 'Catbalogan', region: 'visayas', demandColumn: '04LEYTE' },
+  // 05CEBU - Cebu
+  { id: '05cebu_cebucity', name: 'Cebu City', region: 'visayas', demandColumn: '05CEBU' },
+  { id: '05cebu_mandaue', name: 'Mandaue', region: 'visayas', demandColumn: '05CEBU' },
+  { id: '05cebu_lapulapu', name: 'Lapu-Lapu', region: 'visayas', demandColumn: '05CEBU' },
+  // 06NEGROS - Negros
+  { id: '06negros_bacolod', name: 'Bacolod', region: 'visayas', demandColumn: '06NEGROS' },
+  { id: '06negros_dumaguete', name: 'Dumaguete', region: 'visayas', demandColumn: '06NEGROS' },
+  { id: '06negros_kabankalan', name: 'Kabankalan', region: 'visayas', demandColumn: '06NEGROS' },
+  // 07BOHOL - Bohol
+  { id: '07bohol_tagbilaran', name: 'Tagbilaran', region: 'visayas', demandColumn: '07BOHOL' },
+  { id: '07bohol_ubay', name: 'Ubay', region: 'visayas', demandColumn: '07BOHOL' },
+  { id: '07bohol_talibon', name: 'Talibon', region: 'visayas', demandColumn: '07BOHOL' },
+  // 08PANAY - Panay / Western Visayas
+  { id: '08panay_iloilo', name: 'Iloilo City', region: 'visayas', demandColumn: '08PANAY' },
+  { id: '08panay_roxas', name: 'Roxas', region: 'visayas', demandColumn: '08PANAY' },
+  { id: '08panay_kalibo', name: 'Kalibo', region: 'visayas', demandColumn: '08PANAY' },
+  // 09NWMIN - Northwest Mindanao (Zamboanga Peninsula)
+  { id: '09nwmin_zamboanga', name: 'Zamboanga City', region: 'mindanao', demandColumn: '09NWMIN' },
+  { id: '09nwmin_pagadian', name: 'Pagadian', region: 'mindanao', demandColumn: '09NWMIN' },
+  { id: '09nwmin_dipolog', name: 'Dipolog', region: 'mindanao', demandColumn: '09NWMIN' },
+  // 10LANAO - Lanao
+  { id: '10lanao_iligan', name: 'Iligan', region: 'mindanao', demandColumn: '10LANAO' },
+  { id: '10lanao_marawi', name: 'Marawi', region: 'mindanao', demandColumn: '10LANAO' },
+  { id: '10lanao_ozamiz', name: 'Ozamiz', region: 'mindanao', demandColumn: '10LANAO' },
+  // 11NCMIN - North Central Mindanao
+  { id: '11ncmin_cagayandeorocity', name: 'Cagayan de Oro', region: 'mindanao', demandColumn: '11NCMIN' },
+  { id: '11ncmin_malaybalay', name: 'Malaybalay', region: 'mindanao', demandColumn: '11NCMIN' },
+  { id: '11ncmin_valencia', name: 'Valencia', region: 'mindanao', demandColumn: '11NCMIN' },
+  // 12NEMIN - Northeast Mindanao (Caraga)
+  { id: '12nemin_butuan', name: 'Butuan', region: 'mindanao', demandColumn: '12NEMIN' },
+  { id: '12nemin_surigao', name: 'Surigao City', region: 'mindanao', demandColumn: '12NEMIN' },
+  { id: '12nemin_bislig', name: 'Bislig', region: 'mindanao', demandColumn: '12NEMIN' },
+  // 13SEMIN - Southeast Mindanao (Davao Region)
+  { id: '13semin_davao', name: 'Davao City', region: 'mindanao', demandColumn: '13SEMIN' },
+  { id: '13semin_tagum', name: 'Tagum', region: 'mindanao', demandColumn: '13SEMIN' },
+  { id: '13semin_panabo', name: 'Panabo', region: 'mindanao', demandColumn: '13SEMIN' },
+  // 14SWMIN - Southwest Mindanao (SOCCSKSARGEN)
+  { id: '14swmin_gensantos', name: 'General Santos', region: 'mindanao', demandColumn: '14SWMIN' },
+  { id: '14swmin_koronadal', name: 'Koronadal', region: 'mindanao', demandColumn: '14SWMIN' },
+  { id: '14swmin_cotabato', name: 'Cotabato City', region: 'mindanao', demandColumn: '14SWMIN' }
+];
+
+// Get zonal locations grouped by zone code
+export function getZonalLocationsByZone(): Map<string, WeatherLocation[]> {
+  const map = new Map<string, WeatherLocation[]>();
+  for (const loc of ZONAL_LOCATIONS) {
+    const existing = map.get(loc.demandColumn) || [];
+    existing.push(loc);
+    map.set(loc.demandColumn, existing);
+  }
+  return map;
+}
+
 // Weather elements to fetch (matching existing format)
 // Now includes extended solar radiation components for better PV modeling
 const HOURLY_ELEMENTS = [

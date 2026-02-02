@@ -2083,3 +2083,20 @@ export function closeDatabase(): void {
     dbInstance = null;
   }
 }
+
+// Zonal database singleton
+let zonalDbInstance: DatabaseService | null = null;
+
+export function getZonalDatabase(dbPath?: string): DatabaseService {
+  if (!zonalDbInstance) {
+    zonalDbInstance = new DatabaseService(dbPath || join(process.cwd(), 'data', 'iload_zonal.db'));
+  }
+  return zonalDbInstance;
+}
+
+export function closeZonalDatabase(): void {
+  if (zonalDbInstance) {
+    zonalDbInstance.close();
+    zonalDbInstance = null;
+  }
+}

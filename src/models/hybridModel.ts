@@ -189,6 +189,70 @@ export class HybridModel {
   }
 
   /**
+   * Learn weekend correction factors dynamically from training data.
+   * Computes Saturday and Sunday correction factors per region/zone.
+   * For the old 3-region system, falls back to hardcoded values.
+   * For the 14-zone system, learns from data.
+   */
+  public learnWeekendCorrections(
+    trainingData: { datetime: Date; region: string; demand: number; predictedDemand: number }[]
+  ): void {
+    // Group data by region
+    const regionData = new Map<string, { actual: number[]; predicted: number[]; dayType: string[] }>();
+
+    for (const sample of trainingData) {
+      const dt = sample.datetime instanceof Date ? sample.datetime : new Date(sample.datetime);
+      const day = dt.getDay();
+      let dayType = 'weekday';
+      if (day === 6) dayType = 'saturday';
+      if (day === 0) dayType = 'sunday';
+
+      if (!regionData.has(sample.region)) {
+        regionData.set(sample.region, { actual: [], predicted: [], dayType: [] });
+      }
+      const rd = regionData.get(sample.region)!;
+      rd.actual.push(sample.demand);
+      rd.predicted.push(sample.predictedDemand);
+      rd.dayType.push(dayType);
+    }
+
+    // For each region, compute weekend correction
+    for (const [region, data] of regionData) {
+      // Skip if we already have hardcoded values for this region (CLUZ, CVIS, CMIN)
+      if (this.weekendCorrectionFactors.has(region)) continue;
+
+      let satActualSum = 0, satPredSum = 0, satCount = 0;
+      let sunActualSum = 0, sunPredSum = 0, sunCount = 0;
+
+      for (let i = 0; i < data.actual.length; i++) {
+        if (data.dayType[i] === 'saturday' && data.predicted[i] > 0) {
+          satActualSum += data.actual[i];
+          satPredSum += data.predicted[i];
+          satCount++;
+        } else if (data.dayType[i] === 'sunday' && data.predicted[i] > 0) {
+          sunActualSum += data.actual[i];
+          sunPredSum += data.predicted[i];
+          sunCount++;
+        }
+      }
+
+      // Need at least 4 samples per day type (about 1 weekend)
+      const saturday = satCount >= 4 ? satActualSum / satPredSum : 1.0;
+      const sunday = sunCount >= 4 ? sunActualSum / sunPredSum : 1.0;
+
+      // Clamp to reasonable range (0.85 - 1.15)
+      const clamp = (v: number) => Math.max(0.85, Math.min(1.15, v));
+
+      this.weekendCorrectionFactors.set(region, {
+        saturday: clamp(saturday),
+        sunday: clamp(sunday)
+      });
+
+      console.log(`  Weekend correction for ${region}: Sat=${clamp(saturday).toFixed(3)}, Sun=${clamp(sunday).toFixed(3)} (${satCount}/${sunCount} samples)`);
+    }
+  }
+
+  /**
    * Learn region-specific shape characteristics from training data
    * This replaces hardcoded TEMP_SENSITIVITY with data-driven values
    */

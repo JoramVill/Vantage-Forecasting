@@ -512,5 +512,60 @@ export const REGION_MAPPING: Record<string, string> = {
   'cebu': 'CVIS',
   'cebu city': 'CVIS',
   'davao': 'CMIN',
-  'davao city': 'CMIN'
+  'davao city': 'CMIN',
+  // Zonal mappings (42 cities -> 14 zones)
+  // Northern Luzon
+  'san fernando': '01NLUZ',
+  'san fernando, pampanga': '01NLUZ',
+  'baguio': '01NLUZ',
+  'tuguegarao': '01NLUZ',
+  // Metro Manila
+  'quezon city': '02METRO',
+  'makati': '02METRO',
+  // Southern Luzon
+  'batangas': '03SLUZ',
+  'lucena': '03SLUZ',
+  'legazpi': '03SLUZ',
+  // Eastern Visayas
+  'tacloban': '04LEYTE',
+  'ormoc': '04LEYTE',
+  'catbalogan': '04LEYTE',
+  // Cebu
+  'mandaue': '05CEBU',
+  'lapu-lapu': '05CEBU',
+  // Negros
+  'bacolod': '06NEGROS',
+  'dumaguete': '06NEGROS',
+  'kabankalan': '06NEGROS',
+  // Bohol
+  'tagbilaran': '07BOHOL',
+  'ubay': '07BOHOL',
+  'talibon': '07BOHOL',
+  // Panay
+  'iloilo city': '08PANAY',
+  'roxas': '08PANAY',
+  'kalibo': '08PANAY',
+  // NW Mindanao
+  'zamboanga city': '09NWMIN',
+  'pagadian': '09NWMIN',
+  'dipolog': '09NWMIN',
+  // Lanao
+  'iligan': '10LANAO',
+  'marawi': '10LANAO',
+  'ozamiz': '10LANAO',
+  // NC Mindanao
+  'cagayan de oro': '11NCMIN',
+  'malaybalay': '11NCMIN',
+  'valencia': '11NCMIN',
+  // NE Mindanao
+  'butuan': '12NEMIN',
+  'surigao city': '12NEMIN',
+  'bislig': '12NEMIN',
+  // SE Mindanao
+  'tagum': '13SEMIN',
+  'panabo': '13SEMIN',
+  // SW Mindanao
+  'general santos': '14SWMIN',
+  'koronadal': '14SWMIN',
+  'cotabato city': '14SWMIN'
 };

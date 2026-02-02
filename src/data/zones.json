@@ -1,0 +1,354 @@
+{
+  "zones": [
+    {
+      "code": "01NLUZ",
+      "name": "Northern Luzon",
+      "parentRegion": "luzon",
+      "cities": [
+        {
+          "id": "01nluz_sanfernando",
+          "name": "San Fernando, Pampanga",
+          "latitude": 15.03,
+          "longitude": 120.69
+        },
+        {
+          "id": "01nluz_baguio",
+          "name": "Baguio",
+          "latitude": 16.41,
+          "longitude": 120.60
+        },
+        {
+          "id": "01nluz_tuguegarao",
+          "name": "Tuguegarao",
+          "latitude": 17.61,
+          "longitude": 121.73
+        }
+      ]
+    },
+    {
+      "code": "02METRO",
+      "name": "Metro Manila",
+      "parentRegion": "luzon",
+      "cities": [
+        {
+          "id": "02metro_manila",
+          "name": "Manila",
+          "latitude": 14.60,
+          "longitude": 120.98
+        },
+        {
+          "id": "02metro_quezoncity",
+          "name": "Quezon City",
+          "latitude": 14.65,
+          "longitude": 121.04
+        },
+        {
+          "id": "02metro_makati",
+          "name": "Makati",
+          "latitude": 14.55,
+          "longitude": 121.03
+        }
+      ]
+    },
+    {
+      "code": "03SLUZ",
+      "name": "Southern Luzon",
+      "parentRegion": "luzon",
+      "cities": [
+        {
+          "id": "03sluz_batangas",
+          "name": "Batangas",
+          "latitude": 13.76,
+          "longitude": 121.06
+        },
+        {
+          "id": "03sluz_lucena",
+          "name": "Lucena",
+          "latitude": 13.93,
+          "longitude": 121.62
+        },
+        {
+          "id": "03sluz_legazpi",
+          "name": "Legazpi",
+          "latitude": 13.14,
+          "longitude": 123.73
+        }
+      ]
+    },
+    {
+      "code": "04LEYTE",
+      "name": "Leyte/Eastern Visayas",
+      "parentRegion": "visayas",
+      "cities": [
+        {
+          "id": "04leyte_tacloban",
+          "name": "Tacloban",
+          "latitude": 11.25,
+          "longitude": 124.96
+        },
+        {
+          "id": "04leyte_ormoc",
+          "name": "Ormoc",
+          "latitude": 11.00,
+          "longitude": 124.61
+        },
+        {
+          "id": "04leyte_catbalogan",
+          "name": "Catbalogan",
+          "latitude": 11.78,
+          "longitude": 124.89
+        }
+      ]
+    },
+    {
+      "code": "05CEBU",
+      "name": "Cebu",
+      "parentRegion": "visayas",
+      "cities": [
+        {
+          "id": "05cebu_cebucity",
+          "name": "Cebu City",
+          "latitude": 10.31,
+          "longitude": 123.89
+        },
+        {
+          "id": "05cebu_mandaue",
+          "name": "Mandaue",
+          "latitude": 10.33,
+          "longitude": 123.92
+        },
+        {
+          "id": "05cebu_lapulapu",
+          "name": "Lapu-Lapu",
+          "latitude": 10.31,
+          "longitude": 123.95
+        }
+      ]
+    },
+    {
+      "code": "06NEGROS",
+      "name": "Negros",
+      "parentRegion": "visayas",
+      "cities": [
+        {
+          "id": "06negros_bacolod",
+          "name": "Bacolod",
+          "latitude": 10.68,
+          "longitude": 122.97
+        },
+        {
+          "id": "06negros_dumaguete",
+          "name": "Dumaguete",
+          "latitude": 9.31,
+          "longitude": 123.31
+        },
+        {
+          "id": "06negros_kabankalan",
+          "name": "Kabankalan",
+          "latitude": 9.59,
+          "longitude": 122.82
+        }
+      ]
+    },
+    {
+      "code": "07BOHOL",
+      "name": "Bohol",
+      "parentRegion": "visayas",
+      "cities": [
+        {
+          "id": "07bohol_tagbilaran",
+          "name": "Tagbilaran",
+          "latitude": 9.65,
+          "longitude": 123.85
+        },
+        {
+          "id": "07bohol_ubay",
+          "name": "Ubay",
+          "latitude": 10.06,
+          "longitude": 124.47
+        },
+        {
+          "id": "07bohol_talibon",
+          "name": "Talibon",
+          "latitude": 10.11,
+          "longitude": 124.28
+        }
+      ]
+    },
+    {
+      "code": "08PANAY",
+      "name": "Panay/Western Visayas",
+      "parentRegion": "visayas",
+      "cities": [
+        {
+          "id": "08panay_iloilo",
+          "name": "Iloilo City",
+          "latitude": 10.70,
+          "longitude": 122.56
+        },
+        {
+          "id": "08panay_roxas",
+          "name": "Roxas",
+          "latitude": 11.59,
+          "longitude": 122.75
+        },
+        {
+          "id": "08panay_kalibo",
+          "name": "Kalibo",
+          "latitude": 11.71,
+          "longitude": 122.37
+        }
+      ]
+    },
+    {
+      "code": "09NWMIN",
+      "name": "Northwest Mindanao",
+      "parentRegion": "mindanao",
+      "cities": [
+        {
+          "id": "09nwmin_zamboanga",
+          "name": "Zamboanga City",
+          "latitude": 6.91,
+          "longitude": 122.07
+        },
+        {
+          "id": "09nwmin_pagadian",
+          "name": "Pagadian",
+          "latitude": 7.83,
+          "longitude": 123.44
+        },
+        {
+          "id": "09nwmin_dipolog",
+          "name": "Dipolog",
+          "latitude": 8.59,
+          "longitude": 123.34
+        }
+      ]
+    },
+    {
+      "code": "10LANAO",
+      "name": "Lanao",
+      "parentRegion": "mindanao",
+      "cities": [
+        {
+          "id": "10lanao_iligan",
+          "name": "Iligan",
+          "latitude": 8.23,
+          "longitude": 124.24
+        },
+        {
+          "id": "10lanao_marawi",
+          "name": "Marawi",
+          "latitude": 7.99,
+          "longitude": 124.29
+        },
+        {
+          "id": "10lanao_ozamiz",
+          "name": "Ozamiz",
+          "latitude": 8.15,
+          "longitude": 123.85
+        }
+      ]
+    },
+    {
+      "code": "11NCMIN",
+      "name": "North Central Mindanao",
+      "parentRegion": "mindanao",
+      "cities": [
+        {
+          "id": "11ncmin_cagayandeorocity",
+          "name": "Cagayan de Oro",
+          "latitude": 8.48,
+          "longitude": 124.65
+        },
+        {
+          "id": "11ncmin_malaybalay",
+          "name": "Malaybalay",
+          "latitude": 8.16,
+          "longitude": 125.13
+        },
+        {
+          "id": "11ncmin_valencia",
+          "name": "Valencia",
+          "latitude": 7.90,
+          "longitude": 125.09
+        }
+      ]
+    },
+    {
+      "code": "12NEMIN",
+      "name": "Northeast Mindanao",
+      "parentRegion": "mindanao",
+      "cities": [
+        {
+          "id": "12nemin_butuan",
+          "name": "Butuan",
+          "latitude": 8.95,
+          "longitude": 125.54
+        },
+        {
+          "id": "12nemin_surigao",
+          "name": "Surigao City",
+          "latitude": 9.79,
+          "longitude": 125.50
+        },
+        {
+          "id": "12nemin_bislig",
+          "name": "Bislig",
+          "latitude": 8.22,
+          "longitude": 126.36
+        }
+      ]
+    },
+    {
+      "code": "13SEMIN",
+      "name": "Southeast Mindanao",
+      "parentRegion": "mindanao",
+      "cities": [
+        {
+          "id": "13semin_davao",
+          "name": "Davao City",
+          "latitude": 7.07,
+          "longitude": 125.61
+        },
+        {
+          "id": "13semin_tagum",
+          "name": "Tagum",
+          "latitude": 7.45,
+          "longitude": 125.81
+        },
+        {
+          "id": "13semin_panabo",
+          "name": "Panabo",
+          "latitude": 7.31,
+          "longitude": 125.68
+        }
+      ]
+    },
+    {
+      "code": "14SWMIN",
+      "name": "Southwest Mindanao",
+      "parentRegion": "mindanao",
+      "cities": [
+        {
+          "id": "14swmin_gensantos",
+          "name": "General Santos",
+          "latitude": 6.11,
+          "longitude": 125.17
+        },
+        {
+          "id": "14swmin_koronadal",
+          "name": "Koronadal",
+          "latitude": 6.50,
+          "longitude": 124.85
+        },
+        {
+          "id": "14swmin_cotabato",
+          "name": "Cotabato City",
+          "latitude": 7.22,
+          "longitude": 124.25
+        }
+      ]
+    }
+  ]
+}

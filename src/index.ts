@@ -2,7 +2,7 @@
 import { Command } from 'commander';
 import { DateTime } from 'luxon';
 import fs, { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
-import { join, dirname } from 'path';
+import { join, dirname, basename } from 'path';
 import { parse } from 'csv-parse/sync';
 import { parseDemandCsv, parseWeatherCsv, type ParsedDemandData } from './parsers/index.js';
 import { mergeData } from './utils/index.js';
@@ -27,6 +27,12 @@ import { buildInterconnectorTrainingSamples } from './features/interconnectorFea
 import { InterconnectorCongestionModel } from './models/interconnector/index.js';
 import { ForecastSchedulerService } from './services/forecastSchedulerService.js';
 import { CapacityUpdateService } from './services/capacityUpdateService.js';
+import { mergeZonalData, MergedRecord } from './utils/index.js';
+import { extractZonalFeatures } from './features/featureEngineering.js';
+import { ZONAL_LOCATIONS, getZonalLocationsByZone, WeatherService } from './services/index.js';
+import { getZonalDatabase, closeZonalDatabase } from './database/index.js';
+import { loadZonalConfig, getZoneCodes } from './constants/index.js';
+import { ZonalMergedRecord } from './types/index.js';
 
 // Default API key (can be overridden by env or config)
 const DEFAULT_API_KEY = 'BJYBHG8K3YS8EFK46233M8L75';
@@ -47,6 +53,363 @@ function getApiKey(): string {
     } catch {}
   }
   return DEFAULT_API_KEY;
+}
+
+/**
+ * Run zonal demand forecast for 14 sub-regions
+ * Uses 42 weather cities (3 per zone) with city1 as representative for the hybrid model
+ */
+async function runZonalForecast(options: any): Promise<void> {
+  const apiKey = getApiKey();
+
+  // Parse demand data (parser auto-detects 14 zone columns)
+  console.log('\n🗺️  ZONAL MODE: 14 sub-region demand forecast');
+  console.log('🔄 Loading demand data...');
+  let demandData: ParsedDemandData;
+
+  if (options.useDb || !options.demand) {
+    const db = getZonalDatabase();
+    const trainDays = parseInt(options.trainDays) || 90;
+    const forecastStart = DateTime.fromISO(options.start);
+    const trainEnd = forecastStart.minus({ days: 1 }).toISODate()!;
+    const trainStart = forecastStart.minus({ days: trainDays }).toISODate()!;
+    console.log(`  📂 Loading from zonal database: ${trainStart} to ${trainEnd}`);
+    demandData = db.getDemandData(trainStart, trainEnd);
+    closeZonalDatabase();
+    if (demandData.records.length === 0) {
+      console.error('❌ No zonal demand data in database. Import with: iload db import -t demand -f <folder> --zonal');
+      process.exit(1);
+    }
+    console.log(`  📊 Demand: ${demandData.records.length} records from zonal database`);
+  } else {
+    demandData = parseDemandCsv(options.demand);
+    if (demandData.filesProcessed && demandData.filesProcessed > 1) {
+      console.log(`  📊 Demand: ${demandData.records.length} records from ${demandData.filesProcessed} files`);
+    } else {
+      console.log(`  📊 Demand: ${demandData.records.length} records`);
+    }
+  }
+
+  const zones = [...new Set(demandData.records.map(r => r.region))];
+  console.log(`  🗺️  Zones detected: ${zones.length} (${zones.join(', ')})`);
+  console.log(`  📅 Range: ${DateTime.fromJSDate(demandData.startDate).toISODate()} to ${DateTime.fromJSDate(demandData.endDate).toISODate()}`);
+
+  // Create weather service with 42 zonal locations
+  const zonalWeatherService = new WeatherService({
+    apiKey,
+    cacheDir: options.cache || join(process.cwd(), 'weather_cache'),
+    locations: ZONAL_LOCATIONS
+  });
+
+  // Determine training date range
+  const trainStart = DateTime.fromJSDate(demandData.startDate).toISODate()!;
+  const trainEnd = DateTime.fromJSDate(demandData.endDate).toISODate()!;
+
+  // Fetch weather for training period (42 cities)
+  console.log('\n🌤️  Fetching weather data for training (42 zonal cities)...');
+  const trainWeatherFiles = await zonalWeatherService.saveWeatherFiles(
+    trainStart,
+    trainEnd,
+    join(options.cache || './weather_cache', 'zonal'),
+    (msg: string) => console.log(`  ${msg}`)
+  );
+
+  if (trainWeatherFiles.length === 0) {
+    console.error('❌ Failed to fetch weather data for zonal training');
+    process.exit(1);
+  }
+  console.log(`  ✅ ${trainWeatherFiles.length} weather files fetched`);
+
+  // Map weather files to zone/cityIndex for mergeZonalData
+  const zonalByZone = getZonalLocationsByZone();
+  const zonalWeatherSets: {
+    city: string;
+    locationId: string;
+    zoneCode: string;
+    cityIndex: number;
+    records: RawWeatherData[];
+  }[] = [];
+
+  for (const filePath of trainWeatherFiles) {
+    const filename = basename(filePath);
+    // Extract location ID from filename: Weather_hourly_{locationId}_{YYYY-MM-DD}_{YYYY-MM-DD}.csv
+    const match = filename.match(/^Weather_hourly_(.+)_\d{4}-\d{2}-\d{2}_\d{4}-\d{2}-\d{2}\.csv$/);
+    if (!match) continue;
+
+    const locationId = match[1];
+    const location = ZONAL_LOCATIONS.find(l => l.id === locationId);
+    if (!location) continue;
+
+    const zoneCode = location.demandColumn;
+    const zoneCities = zonalByZone.get(zoneCode) || [];
+    const cityIndex = zoneCities.findIndex(c => c.id === locationId);
+
+    const weatherData = parseWeatherCsv(filePath);
+    zonalWeatherSets.push({
+      city: weatherData.city,
+      locationId,
+      zoneCode,
+      cityIndex: cityIndex >= 0 ? cityIndex : 0,
+      records: weatherData.records
+    });
+  }
+
+  console.log(`  🗺️  Weather mapped: ${zonalWeatherSets.length} city datasets across ${zones.length} zones`);
+
+  // Merge demand with 3-city weather per zone
+  console.log('\n🔧 Merging demand with zonal weather...');
+  const zonalMerged = mergeZonalData(demandData.records, zonalWeatherSets);
+  console.log(`  📐 Merged records: ${zonalMerged.length}`);
+
+  // Convert ZonalMergedRecord to standard MergedRecord using city1 as representative
+  // This allows the HybridModel to work with its existing FeatureVector interface
+  const mergedRecords: MergedRecord[] = zonalMerged.map(rec => ({
+    datetime: rec.datetime,
+    region: rec.zone,
+    demand: rec.demand,
+    weather: rec.weather.city1
+  }));
+
+  // Build training samples using standard feature engineering
+  console.log('🔧 Engineering features...');
+  const samples = buildTrainingSamples(mergedRecords, false);
+  console.log(`  📐 Training samples: ${samples.length} (after lag filter)`);
+
+  if (samples.length === 0) {
+    console.error('❌ No training samples available');
+    process.exit(1);
+  }
+
+  // Train HybridModel on 14 zones
+  console.log(`\n🎯 Training hybrid model on ${zones.length} zones...`);
+  const growthRate = parseFloat(options.growth) / 100;
+  const model = new HybridModel({ growthFactor: growthRate, recentDaysCount: 7 });
+  const result = await model.train(samples);
+  console.log(`  R² = ${result.r2Score.toFixed(4)}, MAPE = ${result.mape.toFixed(2)}%`);
+
+  // Learn dynamic weekend corrections for zones
+  console.log('\n📊 Learning weekend correction factors...');
+  const predictionData = samples.map(s => ({
+    datetime: s.datetime,
+    region: s.region,
+    demand: s.demand,
+    predictedDemand: model.predictForRegion(s.features, s.region) || s.demand
+  }));
+  model.learnWeekendCorrections(predictionData);
+
+  // Fetch weather for forecast period
+  console.log('\n🌤️  Fetching weather data for forecast period...');
+  const forecastWeatherFiles = await zonalWeatherService.saveWeatherFiles(
+    options.start,
+    options.end,
+    join(options.cache || './weather_cache', 'zonal'),
+    (msg: string) => console.log(`  ${msg}`)
+  );
+
+  // Map forecast weather files same way
+  const forecastZonalWeatherSets: {
+    city: string;
+    locationId: string;
+    zoneCode: string;
+    cityIndex: number;
+    records: RawWeatherData[];
+  }[] = [];
+
+  for (const filePath of forecastWeatherFiles) {
+    const filename = basename(filePath);
+    const match = filename.match(/^Weather_hourly_(.+)_\d{4}-\d{2}-\d{2}_\d{4}-\d{2}-\d{2}\.csv$/);
+    if (!match) continue;
+
+    const locationId = match[1];
+    const location = ZONAL_LOCATIONS.find(l => l.id === locationId);
+    if (!location) continue;
+
+    const zoneCode = location.demandColumn;
+    const zoneCities = zonalByZone.get(zoneCode) || [];
+    const cityIndex = zoneCities.findIndex(c => c.id === locationId);
+    if (cityIndex !== 0) continue; // Only use city1 for forecast predictions
+
+    const weatherData = parseWeatherCsv(filePath);
+    forecastZonalWeatherSets.push({
+      city: weatherData.city,
+      locationId,
+      zoneCode,
+      cityIndex: 0,
+      records: weatherData.records
+    });
+  }
+
+  // Build demand history for lag features
+  const demandHistory = new Map<string, number>();
+  const lastKnownDemand = new Map<string, { value: number; ts: number }>();
+  const hourlyAverages = new Map<string, { sum: number; count: number }>();
+
+  for (const record of demandData.records) {
+    const dt = DateTime.fromJSDate(record.datetime);
+    const hour = dt.hour;
+    const dow = dt.weekday;
+    const dayType = dow === 7 ? 2 : dow === 6 ? 1 : 0;
+    const avgKey = `${record.region}_${hour}_${dayType}`;
+
+    if (!hourlyAverages.has(avgKey)) {
+      hourlyAverages.set(avgKey, { sum: 0, count: 0 });
+    }
+    const avg = hourlyAverages.get(avgKey)!;
+    avg.sum += record.demand;
+    avg.count++;
+
+    const lastKnown = lastKnownDemand.get(record.region);
+    if (!lastKnown || record.datetime.getTime() > lastKnown.ts) {
+      lastKnownDemand.set(record.region, { value: record.demand, ts: record.datetime.getTime() });
+    }
+
+    const key = `${record.datetime.getTime()}_${record.region}`;
+    demandHistory.set(key, record.demand);
+  }
+
+  // Temperature history from merged records
+  const tempHistory = new Map<string, number>();
+  const lastKnownTemp = new Map<string, { value: number; ts: number }>();
+
+  for (const rec of mergedRecords) {
+    const key = `${rec.datetime.getTime()}_${rec.region}`;
+    tempHistory.set(key, rec.weather.temp);
+    const lastKnown = lastKnownTemp.get(rec.region);
+    if (!lastKnown || rec.datetime.getTime() > lastKnown.ts) {
+      lastKnownTemp.set(rec.region, { value: rec.weather.temp, ts: rec.datetime.getTime() });
+    }
+  }
+
+  // Helper: get typical demand for hour/daytype
+  const getTypicalDemandForTime = (region: string, timestamp: number): number | undefined => {
+    const dt = DateTime.fromMillis(timestamp);
+    const hour = dt.hour;
+    const dow = dt.weekday;
+    const dayType = dow === 7 ? 2 : dow === 6 ? 1 : 0;
+    const avgKey = `${region}_${hour}_${dayType}`;
+    const avg = hourlyAverages.get(avgKey);
+    if (avg && avg.count > 0) return avg.sum / avg.count;
+    return lastKnownDemand.get(region)?.value;
+  };
+
+  // Parse scale factors
+  const baseScaleFactor = 1 + (parseFloat(options.scale) / 100);
+  const scaleWorkday = options.scaleWorkday !== undefined ? 1 + (parseFloat(options.scaleWorkday) / 100) : null;
+  const scaleWeekend = options.scaleWeekend !== undefined ? 1 + (parseFloat(options.scaleWeekend) / 100) : null;
+  const scaleHoliday = options.scaleHoliday !== undefined ? 1 + (parseFloat(options.scaleHoliday) / 100) : null;
+  const scalePeak = options.scalePeak !== undefined ? 1 + (parseFloat(options.scalePeak) / 100) : null;
+  const scaleOffpeak = options.scaleOffpeak !== undefined ? 1 + (parseFloat(options.scaleOffpeak) / 100) : null;
+  const isPeakHour = (hour: number): boolean => hour >= 9 && hour < 21;
+
+  const getScaleFactor = (dateTime: Date): number => {
+    const dt = DateTime.fromJSDate(dateTime);
+    const dateStr = dt.toFormat('yyyy-MM-dd');
+    const dow = dt.weekday;
+    const hour = dt.hour;
+    let dayTypeScale = baseScaleFactor;
+    if (scaleHoliday !== null && isPhilippineHoliday(dateStr)) {
+      dayTypeScale = scaleHoliday;
+    } else if (scaleWeekend !== null && (dow === 6 || dow === 7)) {
+      dayTypeScale = scaleWeekend;
+    } else if (scaleWorkday !== null && dow >= 1 && dow <= 5 && !isPhilippineHoliday(dateStr)) {
+      dayTypeScale = scaleWorkday;
+    }
+    let peakScale = 1.0;
+    if (scalePeak !== null && isPeakHour(hour)) {
+      peakScale = scalePeak;
+    } else if (scaleOffpeak !== null && !isPeakHour(hour)) {
+      peakScale = scaleOffpeak;
+    }
+    return dayTypeScale * peakScale;
+  };
+
+  // Generate forecasts
+  console.log('\n🔮 Generating zonal forecasts...');
+  const forecasts: ForecastResult[] = [];
+
+  for (const weatherSet of forecastZonalWeatherSets) {
+    const region = weatherSet.zoneCode;
+
+    for (const weather of weatherSet.records) {
+      const datetime = DateTime.fromISO(weather.datetime).plus({ hours: 1 }).toJSDate();
+      const ts = datetime.getTime();
+
+      const lastTemp = lastKnownTemp.get(region)?.value;
+
+      // Calculate lag features
+      const lag1hTs = ts - 3600000;
+      const lag24hTs = ts - 86400000;
+      const lag168hTs = ts - 604800000;
+
+      const getLagDemand = (lagTs: number): number | undefined => {
+        const actual = demandHistory.get(`${lagTs}_${region}`);
+        if (actual !== undefined) return actual;
+        return getTypicalDemandForTime(region, lagTs);
+      };
+
+      const demandLag1h = getLagDemand(lag1hTs);
+      const demandLag24h = getLagDemand(lag24hTs);
+      const demandLag168h = getLagDemand(lag168hTs);
+      const tempLag1h = tempHistory.get(`${lag1hTs}_${region}`) ?? lastTemp;
+      const tempLag24h = tempHistory.get(`${lag24hTs}_${region}`) ?? lastTemp;
+
+      // Rolling averages
+      let demandSum = 0, tempSum = 0, tempMax = -Infinity, count = 0;
+      for (let h = 1; h <= 24; h++) {
+        const lTs = ts - h * 3600000;
+        const d = getLagDemand(lTs);
+        const t = tempHistory.get(`${lTs}_${region}`) ?? lastTemp;
+        if (d !== undefined && t !== undefined) {
+          demandSum += d;
+          tempSum += t;
+          tempMax = Math.max(tempMax, t);
+          count++;
+        }
+      }
+      const demandRolling24h = count > 0 ? demandSum / count : lastKnownDemand.get(region)?.value;
+      const tempRolling24h = count > 0 ? tempSum / count : lastTemp;
+      const tempMax24h = count > 0 ? tempMax : lastTemp;
+
+      const lagData = {
+        demandLag1h, demandLag24h, demandLag168h,
+        tempLag1h, tempLag24h,
+        demandRolling24h, tempRolling24h, tempMax24h
+      };
+
+      const mockRecord = { datetime, region, demand: 0, weather };
+      const features = buildFeatureVector(mockRecord, lagData);
+
+      // Calculate days ahead for growth adjustment
+      const forecastStart = DateTime.fromISO(options.start);
+      const currentDate = DateTime.fromJSDate(datetime);
+      const daysAhead = Math.max(0, currentDate.diff(forecastStart, 'days').days);
+
+      const hybridPrediction = model.predictForRegion(features, region, daysAhead);
+      const prediction = (hybridPrediction ?? lastKnownDemand.get(region)?.value ?? 0) * getScaleFactor(datetime);
+
+      forecasts.push({
+        datetime,
+        region,
+        predictedDemand: prediction
+      });
+
+      // Update history for progressive forecasting
+      demandHistory.set(`${ts}_${region}`, prediction);
+      tempHistory.set(`${ts}_${region}`, weather.temp);
+    }
+  }
+
+  // Ensure output directory exists
+  const outputDir = dirname(options.output);
+  if (outputDir && !existsSync(outputDir)) {
+    mkdirSync(outputDir, { recursive: true });
+  }
+
+  // Write forecasts
+  writeForecastCsv(forecasts, options.output);
+  console.log(`\n✅ Zonal forecast written to: ${options.output}`);
+  console.log(`   📊 ${forecasts.length} predictions across ${[...new Set(forecasts.map(f => f.region))].length} zones`);
+  console.log(`   📅 Period: ${options.start} to ${options.end}`);
 }
 
 const program = new Command();
@@ -215,8 +578,15 @@ program
   .option('--cache <dir>', 'Weather cache directory', './weather_cache')
   .option('--use-db', 'Use demand data from database instead of file')
   .option('--train-days <days>', 'Number of days of historical data to use for training (default: 90)', '90')
+  .option('--zonal', 'Use 14-zone sub-region mode (requires zonal demand data)')
   .action(async (options) => {
     try {
+      // Check for zonal mode
+      if (options.zonal) {
+        await runZonalForecast(options);
+        return;
+      }
+
       const apiKey = getApiKey();
       const weatherService = createWeatherService(apiKey, options.cache);
 
@@ -1173,11 +1543,12 @@ dbCommand
   .requiredOption('-f, --file <path>', 'File or folder path to import')
   .option('-l, --location <name>', 'Location name for weather data (e.g., Manila, Cebu, Davao)')
   .option('--forecast', 'Mark weather data as forecast (not historical)')
+  .option('--zonal', 'Use zonal database (14-zone system)')
   .action((options) => {
     console.log('\n🔄 Importing data...\n');
 
     try {
-      const db = getDatabase();
+      const db = options.zonal ? getZonalDatabase() : getDatabase();
 
       if (options.type === 'demand') {
         const demandData = parseDemandCsv(options.file);
@@ -1214,7 +1585,11 @@ dbCommand
         process.exit(1);
       }
 
-      closeDatabase();
+      if (options.zonal) {
+        closeZonalDatabase();
+      } else {
+        closeDatabase();
+      }
       console.log('\n✅ Import complete!');
     } catch (error: any) {
       console.error(`\n❌ Error: ${error.message}`);

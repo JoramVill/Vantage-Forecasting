@@ -1,4 +1,7 @@
 import Holidays from 'date-holidays';
+import { readFileSync } from 'fs';
+import { join } from 'path';
+import { ZonalConfig, ZoneConfig } from '../types/index.js';
 
 // Region mappings (weather city -> demand column)
 export const REGION_MAPPINGS: Record<string, { demandColumn: string; city: string }> = {
@@ -180,3 +183,77 @@ export const DEMAND_DATE_FORMAT = 'M/d/yyyy HH:mm';
 
 // Date format for parsing weather CSV
 export const WEATHER_DATE_FORMAT = "yyyy-MM-dd'T'HH:mm:ss";
+
+// Zonal configuration loader
+let _zonalConfig: ZonalConfig | null = null;
+
+export function loadZonalConfig(): ZonalConfig {
+  if (_zonalConfig) return _zonalConfig;
+
+  // Try multiple paths to find zones.json
+  const possiblePaths = [
+    join(process.cwd(), 'src', 'data', 'zones.json'),
+    join(process.cwd(), 'dist', 'data', 'zones.json'),
+  ];
+
+  for (const p of possiblePaths) {
+    try {
+      const raw = readFileSync(p, 'utf-8');
+      _zonalConfig = JSON.parse(raw) as ZonalConfig;
+      return _zonalConfig;
+    } catch {
+      continue;
+    }
+  }
+
+  throw new Error('Could not find zones.json configuration file');
+}
+
+// Build ZONAL_REGION_MAPPINGS from zones.json
+// Maps weather city ID -> { demandColumn (zone code), city name }
+export function getZonalRegionMappings(): Record<string, { demandColumn: string; city: string }> {
+  const config = loadZonalConfig();
+  const mappings: Record<string, { demandColumn: string; city: string }> = {};
+
+  for (const zone of config.zones) {
+    for (const city of zone.cities) {
+      mappings[city.id] = { demandColumn: zone.code, city: city.name };
+    }
+  }
+
+  return mappings;
+}
+
+// Get all zone codes
+export function getZoneCodes(): string[] {
+  const config = loadZonalConfig();
+  return config.zones.map(z => z.code);
+}
+
+// Get zone config by code
+export function getZoneByCode(code: string): ZoneConfig | undefined {
+  const config = loadZonalConfig();
+  return config.zones.find(z => z.code === code);
+}
+
+// Zonal feature names - extends base FEATURE_NAMES with 3-city weather
+export const ZONAL_WEATHER_FEATURES = [
+  // City 1 weather
+  'temp_c1', 'dew_c1', 'precip_c1', 'windgust_c1', 'windspeed_c1',
+  'cloudcover_c1', 'solarradiation_c1', 'uvindex_c1',
+  // City 1 derived
+  'relativeHumidity_c1', 'heatIndex_c1', 'CDH_c1',
+  // City 2 weather
+  'temp_c2', 'dew_c2', 'precip_c2', 'windgust_c2', 'windspeed_c2',
+  'cloudcover_c2', 'solarradiation_c2', 'uvindex_c2',
+  // City 2 derived
+  'relativeHumidity_c2', 'heatIndex_c2', 'CDH_c2',
+  // City 3 weather
+  'temp_c3', 'dew_c3', 'precip_c3', 'windgust_c3', 'windspeed_c3',
+  'cloudcover_c3', 'solarradiation_c3', 'uvindex_c3',
+  // City 3 derived
+  'relativeHumidity_c3', 'heatIndex_c3', 'CDH_c3',
+  // Cross-city features
+  'temp_spread', 'temp_avg', 'windspeed_avg', 'cloudcover_avg',
+  'precip_max', 'solarradiation_avg'
+];

@@ -213,3 +213,43 @@ export interface ForecastConfig {
   trainTestSplit: number;  // e.g., 0.8 for 80% train
   holidays: string[];  // ISO date strings
 }
+
+// Zonal demand forecasting types
+export interface ZonalCity {
+  id: string;
+  name: string;
+  latitude: number;
+  longitude: number;
+}
+
+export interface ZoneConfig {
+  code: string;
+  name: string;
+  parentRegion: string;
+  cities: ZonalCity[];
+}
+
+export interface ZonalConfig {
+  zones: ZoneConfig[];
+}
+
+export interface ZonalWeatherLocation {
+  id: string;           // e.g., '01nluz_sanfernando'
+  name: string;         // City name for Visual Crossing API
+  zoneCode: string;     // e.g., '01NLUZ'
+  cityIndex: number;    // 0, 1, or 2 (which of the 3 cities)
+  latitude: number;
+  longitude: number;
+}
+
+// Zonal merged record - demand + weather from 3 cities
+export interface ZonalMergedRecord {
+  datetime: Date;
+  zone: string;
+  demand: number;
+  weather: {
+    city1: RawWeatherData;
+    city2: RawWeatherData;
+    city3: RawWeatherData;
+  };
+}

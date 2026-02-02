@@ -1,8 +1,8 @@
 import { DateTime } from 'luxon';
 import { DemandRecord, ParsedDemandData } from '../parsers/demandParser.js';
 import { ParsedWeatherData } from '../parsers/weatherParser.js';
-import { RawWeatherData } from '../types/index.js';
-import { REGION_MAPPINGS } from '../constants/index.js';
+import { RawWeatherData, ZonalMergedRecord } from '../types/index.js';
+import { REGION_MAPPINGS, getZonalRegionMappings } from '../constants/index.js';
 
 export interface MergedRecord {
   datetime: Date;
@@ -105,4 +105,99 @@ export function mergeData(
     unmatchedDemand: demandMap.size - matchedDemandKeys.size,
     unmatchedWeather: weatherMap.size - matchedWeatherKeys.size
   };
+}
+
+/**
+ * Merge zonal demand data with weather from 3 cities per zone.
+ *
+ * @param demandRecords - Parsed demand records (zone codes as region)
+ * @param weatherDataSets - Array of { city: string, locationId: string, zoneCode: string, cityIndex: number, records: RawWeatherData[] }
+ * @returns ZonalMergedRecord[] - Merged records with 3-city weather per zone
+ */
+export function mergeZonalData(
+  demandRecords: { datetime: Date; region: string; demand: number }[],
+  weatherDataSets: {
+    city: string;
+    locationId: string;
+    zoneCode: string;
+    cityIndex: number; // 0, 1, or 2
+    records: RawWeatherData[];
+  }[]
+): ZonalMergedRecord[] {
+  const results: ZonalMergedRecord[] = [];
+
+  // Build demand lookup: zone_datetime -> demand
+  const demandMap = new Map<string, number>();
+  for (const rec of demandRecords) {
+    const dt = rec.datetime instanceof Date ? rec.datetime : new Date(rec.datetime);
+    const key = `${rec.region}_${dt.getTime()}`;
+    demandMap.set(key, rec.demand);
+  }
+
+  // Build weather lookup: zone_cityIndex_datetime -> RawWeatherData
+  const weatherMap = new Map<string, RawWeatherData>();
+  for (const dataset of weatherDataSets) {
+    for (const rec of dataset.records) {
+      const dt = new Date(rec.datetime);
+      // Add 1 hour to weather timestamp to align with hour-ending demand
+      const alignedDt = new Date(dt.getTime() + 60 * 60 * 1000);
+      const key = `${dataset.zoneCode}_${dataset.cityIndex}_${alignedDt.getTime()}`;
+      weatherMap.set(key, rec);
+    }
+  }
+
+  // Get unique zone codes from demand data
+  const zoneCodes = [...new Set(demandRecords.map(r => r.region))];
+
+  // Get unique timestamps from demand data
+  const timestamps = [...new Set(demandRecords.map(r => {
+    const dt = r.datetime instanceof Date ? r.datetime : new Date(r.datetime);
+    return dt.getTime();
+  }))].sort();
+
+  // Create empty weather record for missing data
+  const emptyWeather: RawWeatherData = {
+    datetime: '',
+    name: '',
+    latitude: 0,
+    longitude: 0,
+    temp: 0,
+    dew: 0,
+    precip: 0,
+    windgust: 0,
+    windspeed: 0,
+    cloudcover: 0,
+    solarradiation: 0,
+    solarenergy: 0,
+    uvindex: 0
+  };
+
+  // Merge: for each zone + timestamp, find demand + 3 city weathers
+  for (const zone of zoneCodes) {
+    for (const ts of timestamps) {
+      const demandKey = `${zone}_${ts}`;
+      const demand = demandMap.get(demandKey);
+
+      if (demand === undefined) continue;
+
+      const city1 = weatherMap.get(`${zone}_0_${ts}`) || { ...emptyWeather };
+      const city2 = weatherMap.get(`${zone}_1_${ts}`) || { ...emptyWeather };
+      const city3 = weatherMap.get(`${zone}_2_${ts}`) || { ...emptyWeather };
+
+      results.push({
+        datetime: new Date(ts),
+        zone,
+        demand,
+        weather: { city1, city2, city3 }
+      });
+    }
+  }
+
+  // Sort by zone then datetime
+  results.sort((a, b) => {
+    if (a.zone !== b.zone) return a.zone.localeCompare(b.zone);
+    return a.datetime.getTime() - b.datetime.getTime();
+  });
+
+  return results;
 }

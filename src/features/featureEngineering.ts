@@ -1,6 +1,6 @@
 import { DateTime } from 'luxon';
 import { MergedRecord } from '../utils/dataMerger.js';
-import { FeatureVector, TrainingSample } from '../types/index.js';
+import { FeatureVector, TrainingSample, ZonalMergedRecord } from '../types/index.js';
 import { BASE_TEMP_CELSIUS, isPhilippineHoliday, FEATURE_NAMES } from '../constants/index.js';
 
 // Calculate relative humidity from temperature and dew point
@@ -372,4 +372,113 @@ export function featureVectorToArray(fv: FeatureVector): number[] {
 // Get feature names (for model interpretation)
 export function getFeatureNames(): string[] {
   return [...FEATURE_NAMES];
+}
+
+/**
+ * Extract features from a zonal merged record (demand + 3-city weather).
+ * Generates temporal features (same as base) + 3x weather features + cross-city features.
+ */
+export function extractZonalFeatures(record: ZonalMergedRecord): Record<string, number> {
+  const features: Record<string, number> = {};
+  const dt = record.datetime instanceof Date ? record.datetime : new Date(record.datetime);
+
+  // === Temporal features (same as base) ===
+  const hour = dt.getHours();
+  const dayOfWeek = dt.getDay();
+  const month = dt.getMonth() + 1;
+  const dayOfMonth = dt.getDate();
+
+  features['hour'] = hour;
+  features['dayOfWeek'] = dayOfWeek;
+  features['isWeekend'] = (dayOfWeek === 0 || dayOfWeek === 6) ? 1 : 0;
+  features['isHoliday'] = 0; // Will be set externally if needed
+  features['dayOfMonth'] = dayOfMonth;
+  features['month'] = month;
+
+  // Cyclical encoding
+  features['hourSin'] = Math.sin(2 * Math.PI * hour / 24);
+  features['hourCos'] = Math.cos(2 * Math.PI * hour / 24);
+  features['daySin'] = Math.sin(2 * Math.PI * dayOfWeek / 7);
+  features['dayCos'] = Math.cos(2 * Math.PI * dayOfWeek / 7);
+  features['monthSin'] = Math.sin(2 * Math.PI * month / 12);
+  features['monthCos'] = Math.cos(2 * Math.PI * month / 12);
+
+  // Day type
+  features['isWorkday'] = (dayOfWeek >= 1 && dayOfWeek <= 5) ? 1 : 0;
+  features['isSaturday'] = dayOfWeek === 6 ? 1 : 0;
+  features['isSunday'] = dayOfWeek === 0 ? 1 : 0;
+
+  // Hour one-hot
+  for (let h = 0; h < 24; h++) {
+    features[`hour_${h}`] = hour === h ? 1 : 0;
+  }
+
+  // Hour interactions
+  features['hourWorkday'] = hour * features['isWorkday'];
+  features['hourSaturday'] = hour * features['isSaturday'];
+  features['hourSunday'] = hour * features['isSunday'];
+
+  // === Per-city weather features (3 sets) ===
+  const cities = [record.weather.city1, record.weather.city2, record.weather.city3];
+  const suffixes = ['_c1', '_c2', '_c3'];
+
+  for (let i = 0; i < 3; i++) {
+    const w = cities[i];
+    const s = suffixes[i];
+
+    const temp = w.temp || 0;
+    const dew = w.dew || 0;
+    const precip = w.precip || 0;
+    const windgust = w.windgust || 0;
+    const windspeed = w.windspeed || 0;
+    const cloudcover = w.cloudcover || 0;
+    const solarradiation = w.solarradiation || 0;
+    const uvindex = w.uvindex || 0;
+
+    // Raw weather
+    features[`temp${s}`] = temp;
+    features[`dew${s}`] = dew;
+    features[`precip${s}`] = precip;
+    features[`windgust${s}`] = windgust;
+    features[`windspeed${s}`] = windspeed;
+    features[`cloudcover${s}`] = cloudcover;
+    features[`solarradiation${s}`] = solarradiation;
+    features[`uvindex${s}`] = uvindex;
+
+    // Derived: Relative Humidity (Magnus formula)
+    const RH_NUM = Math.exp((17.27 * dew) / (237.3 + dew));
+    const RH_DEN = Math.exp((17.27 * temp) / (237.3 + temp));
+    features[`relativeHumidity${s}`] = RH_DEN > 0 ? 100 * (RH_NUM / RH_DEN) : 50;
+
+    // Derived: Heat Index (Rothfusz simplified)
+    const rh = features[`relativeHumidity${s}`];
+    if (temp >= 27) {
+      const HI = -8.78469476 + 1.61139411 * temp + 2.33854884 * rh
+        - 0.14611605 * temp * rh - 0.012308094 * temp * temp
+        - 0.0164248278 * rh * rh + 0.002211732 * temp * temp * rh
+        + 0.00072546 * temp * rh * rh - 0.000003582 * temp * temp * rh * rh;
+      features[`heatIndex${s}`] = HI;
+    } else {
+      features[`heatIndex${s}`] = temp;
+    }
+
+    // Derived: Cooling Degree Hours (base 24C for tropical Philippines)
+    features[`CDH${s}`] = Math.max(0, temp - 24);
+  }
+
+  // === Cross-city features ===
+  const temps = [features['temp_c1'], features['temp_c2'], features['temp_c3']];
+  const winds = [features['windspeed_c1'], features['windspeed_c2'], features['windspeed_c3']];
+  const clouds = [features['cloudcover_c1'], features['cloudcover_c2'], features['cloudcover_c3']];
+  const precips = [features['precip_c1'], features['precip_c2'], features['precip_c3']];
+  const solars = [features['solarradiation_c1'], features['solarradiation_c2'], features['solarradiation_c3']];
+
+  features['temp_spread'] = Math.max(...temps) - Math.min(...temps);
+  features['temp_avg'] = temps.reduce((a, b) => a + b, 0) / 3;
+  features['windspeed_avg'] = winds.reduce((a, b) => a + b, 0) / 3;
+  features['cloudcover_avg'] = clouds.reduce((a, b) => a + b, 0) / 3;
+  features['precip_max'] = Math.max(...precips);
+  features['solarradiation_avg'] = solars.reduce((a, b) => a + b, 0) / 3;
+
+  return features;
 }

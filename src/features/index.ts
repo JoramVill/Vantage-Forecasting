@@ -5,5 +5,6 @@ export {
   buildFeatureVector,
   buildTrainingSamples,
   featureVectorToArray,
-  getFeatureNames
+  getFeatureNames,
+  extractZonalFeatures
 } from './featureEngineering.js';
