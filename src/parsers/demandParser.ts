@@ -29,7 +29,8 @@ function parseSingleCsv(filePath: string): {
   const rows = parse(content, {
     columns: true,
     skip_empty_lines: true,
-    trim: true
+    trim: true,
+    relax_column_count: true
   });
 
   const demandRecords: DemandRecord[] = [];

@@ -22,6 +22,24 @@
           "name": "Tuguegarao",
           "latitude": 17.61,
           "longitude": 121.73
+        },
+        {
+          "id": "01nluz_laoag",
+          "name": "Laoag",
+          "latitude": 18.198,
+          "longitude": 120.593
+        },
+        {
+          "id": "01nluz_dagupan",
+          "name": "Dagupan",
+          "latitude": 16.043,
+          "longitude": 120.334
+        },
+        {
+          "id": "01nluz_angeles",
+          "name": "Angeles City",
+          "latitude": 15.145,
+          "longitude": 120.589
         }
       ]
     },

@@ -34,12 +34,16 @@ export const DEFAULT_LOCATIONS: WeatherLocation[] = [
   { id: 'davao', name: 'Davao City', region: 'mindanao', demandColumn: 'CMIN' }
 ];
 
-// Zonal weather locations - 42 cities (3 per zone) for 14-zone demand forecasting
+// Zonal weather locations - 45 cities for 14-zone demand forecasting
+// NLUZ has 6 cities (larger coverage area), other zones have 3 cities each
 export const ZONAL_LOCATIONS: WeatherLocation[] = [
-  // 01NLUZ - Northern Luzon (Region I, II, III, CAR)
+  // 01NLUZ - Northern Luzon (Region I, II, III, CAR) - 6 cities for larger coverage
   { id: '01nluz_sanfernando', name: 'San Fernando, Pampanga', region: 'luzon', demandColumn: '01NLUZ' },
   { id: '01nluz_baguio', name: 'Baguio', region: 'luzon', demandColumn: '01NLUZ' },
   { id: '01nluz_tuguegarao', name: 'Tuguegarao', region: 'luzon', demandColumn: '01NLUZ' },
+  { id: '01nluz_laoag', name: 'Laoag', region: 'luzon', demandColumn: '01NLUZ' },
+  { id: '01nluz_dagupan', name: 'Dagupan', region: 'luzon', demandColumn: '01NLUZ' },
+  { id: '01nluz_angeles', name: 'Angeles City', region: 'luzon', demandColumn: '01NLUZ' },
   // 02METRO - Metro Manila (NCR)
   { id: '02metro_manila', name: 'Manila', region: 'luzon', demandColumn: '02METRO' },
   { id: '02metro_quezoncity', name: 'Quezon City', region: 'luzon', demandColumn: '02METRO' },
@@ -770,10 +774,12 @@ export class WeatherService {
     }
 
     // Convert database records to CSV format
+    // Quote the name field to handle commas in city names (e.g. "San Fernando, Pampanga")
     header = 'name,latitude,longitude,datetime,temp,dew,precip,windgust,windspeed,cloudcover,solarradiation,solarenergy,uvindex';
     for (const record of weatherData.records) {
+      const quotedName = record.name.includes(',') ? `"${record.name}"` : record.name;
       allRows.push([
-        record.name,
+        quotedName,
         record.latitude,
         record.longitude,
         record.datetime,

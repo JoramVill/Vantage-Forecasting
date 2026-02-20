@@ -83,7 +83,7 @@ export class DatabaseService {
     const insertStmt = this.db.prepare(`
       INSERT INTO demand_records (datetime, region, demand, source_file)
       VALUES (?, ?, ?, ?)
-      ON CONFLICT(datetime, region) DO UPDATE SET
+      ON CONFLICT(datetime, location) DO UPDATE SET
         demand = excluded.demand,
         source_file = excluded.source_file,
         imported_at = CURRENT_TIMESTAMP
@@ -166,7 +166,7 @@ export class DatabaseService {
     const insertStmt = this.db.prepare(`
       INSERT INTO weather_records (datetime, location, region, temp, dew, precip, windgust, windspeed, cloudcover, solarradiation, solarenergy, uvindex, is_forecast, source)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(datetime, region) DO UPDATE SET
+      ON CONFLICT(datetime, location) DO UPDATE SET
         temp = excluded.temp,
         dew = excluded.dew,
         precip = excluded.precip,
@@ -249,16 +249,15 @@ export class DatabaseService {
   /**
    * Get list of dates that have weather data for a specific location
    * Returns dates in YYYY-MM-DD format
+   * NOTE: Uses LOWER(location) match for zonal mode where multiple cities map to same region
    */
   getWeatherAvailableDates(location: string, startDate?: string, endDate?: string): Set<string> {
-    const region = REGION_MAPPING[location.toLowerCase()] || location;
-
     let sql = `
       SELECT DISTINCT DATE(datetime) as date
       FROM weather_records
-      WHERE region = ?
+      WHERE LOWER(location) = LOWER(?)
     `;
-    const params: any[] = [region];
+    const params: any[] = [location];
 
     if (startDate) {
       sql += ' AND datetime >= ?';
@@ -304,21 +303,21 @@ export class DatabaseService {
    * @returns Array of dates that have stale forecast data
    */
   getStaleForecastDates(location: string, startDate: string, endDate: string, maxAgeHours: number = 24): string[] {
-    const region = REGION_MAPPING[location.toLowerCase()] || location;
     const cutoffTime = DateTime.now().minus({ hours: maxAgeHours }).toISO();
 
     // Find dates where:
     // 1. Data is marked as forecast (is_forecast = 1)
     // 2. imported_at is older than cutoff time
+    // NOTE: Uses LOWER(location) match for zonal mode
     const rows = this.db.prepare(`
       SELECT DISTINCT DATE(datetime) as date
       FROM weather_records
-      WHERE region = ?
+      WHERE LOWER(location) = LOWER(?)
         AND datetime >= ?
         AND datetime <= ?
         AND is_forecast = 1
         AND imported_at < ?
-    `).all(region, startDate + 'T00:00:00', endDate + 'T23:59:59', cutoffTime) as any[];
+    `).all(location, startDate + 'T00:00:00', endDate + 'T23:59:59', cutoffTime) as any[];
 
     return rows.map(row => row.date);
   }
@@ -334,19 +333,19 @@ export class DatabaseService {
    * @returns Array of past dates that have forecast data instead of historical
    */
   getDatesNeedingHistoricalData(location: string, startDate: string, endDate: string): string[] {
-    const region = REGION_MAPPING[location.toLowerCase()] || location;
     const today = DateTime.now().startOf('day').toISODate();
 
     // Find past dates where data is still marked as forecast
+    // NOTE: Uses LOWER(location) match for zonal mode
     const rows = this.db.prepare(`
       SELECT DISTINCT DATE(datetime) as date
       FROM weather_records
-      WHERE region = ?
+      WHERE LOWER(location) = LOWER(?)
         AND datetime >= ?
         AND datetime <= ?
         AND DATE(datetime) < ?
         AND is_forecast = 1
-    `).all(region, startDate + 'T00:00:00', endDate + 'T23:59:59', today) as any[];
+    `).all(location, startDate + 'T00:00:00', endDate + 'T23:59:59', today) as any[];
 
     return rows.map(row => row.date);
   }
@@ -366,9 +365,7 @@ export class DatabaseService {
    * @param maxForecastAgeHours - Max age for forecast data before refresh (default: 24)
    */
   getMissingWeatherDates(location: string, startDate: string, endDate: string, maxForecastAgeHours: number = 24): string[] {
-    const region = REGION_MAPPING[location.toLowerCase()] || location;
-    const today = DateTime.now().startOf('day');
-
+    // NOTE: Uses location directly (not region mapping) to support zonal mode
     // Get all dates that have ANY weather data
     const existingDates = this.getWeatherAvailableDates(location, startDate, endDate);
 
@@ -456,10 +453,11 @@ export class DatabaseService {
 
     // Statement for inserting new records or updating forecast records
     // Key logic: Only update if new data is historical OR existing data is forecast
+    // NOTE: Uses (datetime, location) for conflict to support zonal mode with multiple cities per region
     const insertStmt = this.db.prepare(`
       INSERT INTO weather_records (datetime, location, region, temp, dew, precip, windgust, windspeed, cloudcover, solarradiation, solarenergy, uvindex, is_forecast, source)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(datetime, region) DO UPDATE SET
+      ON CONFLICT(datetime, location) DO UPDATE SET
         temp = excluded.temp,
         dew = excluded.dew,
         precip = excluded.precip,
@@ -519,6 +517,7 @@ export class DatabaseService {
   /**
    * Get weather data for a location and date range, formatted for the weather parser
    * Returns data grouped by location with records array
+   * NOTE: Uses LOWER(location) match to support zonal mode where we need city-specific data
    */
   getWeatherDataForParser(location: string, startDate: string, endDate: string): {
     city: string;
@@ -526,15 +525,15 @@ export class DatabaseService {
     startDate: Date;
     endDate: Date;
   } | null {
-    const region = REGION_MAPPING[location.toLowerCase()] || location;
-
+    // Query by exact location name (case-insensitive) to support zonal mode
+    // where multiple cities map to the same region code
     const rows = this.db.prepare(`
       SELECT * FROM weather_records
-      WHERE region = ?
+      WHERE LOWER(location) = LOWER(?)
         AND datetime >= ?
         AND datetime <= ?
       ORDER BY datetime
-    `).all(region, startDate + 'T00:00:00', endDate + 'T23:59:59') as any[];
+    `).all(location, startDate + 'T00:00:00', endDate + 'T23:59:59') as any[];
 
     if (rows.length === 0) return null;
 

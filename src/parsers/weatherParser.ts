@@ -15,7 +15,8 @@ export function parseWeatherCsv(filePath: string): ParsedWeatherData {
   const records = parse(content, {
     columns: true,
     skip_empty_lines: true,
-    trim: true
+    trim: true,
+    relax_column_count: true
   });
 
   const weatherRecords: RawWeatherData[] = [];

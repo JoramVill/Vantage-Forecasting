@@ -1,6 +1,6 @@
 // Database schema definitions
 
-export const SCHEMA_VERSION = 6;  // Updated for cluster weather tables (historical/forecast separation)
+export const SCHEMA_VERSION = 7;  // Fixed weather_records UNIQUE constraint for zonal mode (datetime, location)
 
 export const CREATE_TABLES_SQL = `
 -- Schema version tracking
@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS demand_records (
   UNIQUE(datetime, region)
 );
 
--- Weather records (historical and forecast) - for DEMAND forecasting (3 regions)
+-- Weather records (historical and forecast) - for DEMAND forecasting
+-- NOTE: UNIQUE on (datetime, location) to support zonal mode where multiple cities map to same region
 CREATE TABLE IF NOT EXISTS weather_records (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   datetime TEXT NOT NULL,
@@ -38,7 +39,7 @@ CREATE TABLE IF NOT EXISTS weather_records (
   is_forecast INTEGER DEFAULT 0,
   source TEXT,
   imported_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(datetime, region)
+  UNIQUE(datetime, location)
 );
 
 -- ============================================
@@ -513,12 +514,16 @@ export const REGION_MAPPING: Record<string, string> = {
   'cebu city': 'CVIS',
   'davao': 'CMIN',
   'davao city': 'CMIN',
-  // Zonal mappings (42 cities -> 14 zones)
-  // Northern Luzon
+  // Zonal mappings (45 cities -> 14 zones) - NLUZ has 6 cities, others have 3
+  // Northern Luzon (6 cities for larger coverage area)
   'san fernando': '01NLUZ',
   'san fernando, pampanga': '01NLUZ',
   'baguio': '01NLUZ',
   'tuguegarao': '01NLUZ',
+  'laoag': '01NLUZ',
+  'dagupan': '01NLUZ',
+  'angeles city': '01NLUZ',
+  'angeles': '01NLUZ',
   // Metro Manila
   'quezon city': '02METRO',
   'makati': '02METRO',

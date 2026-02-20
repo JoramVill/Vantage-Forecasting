@@ -108,11 +108,14 @@ export function mergeData(
 }
 
 /**
- * Merge zonal demand data with weather from 3 cities per zone.
+ * Merge zonal demand data with weather from cities per zone.
+ * Uses the first 3 cities (cityIndex 0, 1, 2) for each zone as city1/2/3.
+ * Zones with more than 3 cities will have additional cities' weather stored
+ * in the database but only the first 3 are used in the merged record.
  *
  * @param demandRecords - Parsed demand records (zone codes as region)
  * @param weatherDataSets - Array of { city: string, locationId: string, zoneCode: string, cityIndex: number, records: RawWeatherData[] }
- * @returns ZonalMergedRecord[] - Merged records with 3-city weather per zone
+ * @returns ZonalMergedRecord[] - Merged records with first 3 cities' weather per zone
  */
 export function mergeZonalData(
   demandRecords: { datetime: Date; region: string; demand: number }[],
@@ -120,7 +123,7 @@ export function mergeZonalData(
     city: string;
     locationId: string;
     zoneCode: string;
-    cityIndex: number; // 0, 1, or 2
+    cityIndex: number; // Index of city within zone (0, 1, 2 used for city1/2/3)
     records: RawWeatherData[];
   }[]
 ): ZonalMergedRecord[] {

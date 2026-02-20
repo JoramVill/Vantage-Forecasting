@@ -24,6 +24,7 @@ npm-debug.log*
 # OS
 .DS_Store
 Thumbs.db
+nul
 
 # TypeScript
 *.tsbuildinfo
@@ -39,13 +40,24 @@ output/
 # Config with API keys
 config.json
 
-# Context tracking
+# Context and planning files
 context.md
-/Data Samples
-/gui/release
-data/iload.db
-forecast.db
-data/iload.db
-/data
-data/iload.db
+plan.md
+
+# Debug and test scripts
+debug_*.cjs
+test_*.cjs
+
+# Data files
 *.db
+/data/
+
+# Data samples (large files)
+/Data Samples/
+
+# GUI build artifacts
+/gui/release/
+/gui/dist/
+
+# Forecast database
+forecast.db
