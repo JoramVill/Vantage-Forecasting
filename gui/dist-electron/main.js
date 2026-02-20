@@ -46,16 +46,21 @@ const ZONAL_CODES = ['01NLUZ', '02METRO', '03SLUZ', '04LEYTE', '05CEBU', '06NEGR
 const REGIONAL_CODES = ['CLUZ', 'CVIS', 'CMIN'];
 // Settings store with encryption
 const store = new electron_store_1.default({
-    name: 'iload-settings',
-    encryptionKey: 'iload-forecasting-2024',
+    name: 'vantage-forecaster-settings',
+    encryptionKey: 'vantage-forecaster-2024',
 });
 let mainWindow = null;
 function createWindow() {
+    // Get icon path - go up from dist-electron to gui, then to assets
+    const guiDir = path.dirname(__dirname);
+    const iconPath = path.join(guiDir, 'assets', 'VANTAGE_LOGO-removebg-preview.ico');
     mainWindow = new electron_1.BrowserWindow({
         width: 1000,
         height: 800,
         minWidth: 800,
         minHeight: 600,
+        title: 'Vantage Forecaster',
+        icon: iconPath,
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,

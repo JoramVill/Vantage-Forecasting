@@ -1,6 +1,6 @@
-# GUI User Guide
+# Vantage Forecaster - GUI User Guide
 
-The iLoad Forecasting Utility includes an Electron-based desktop GUI that provides a streamlined interface for running demand and capacity factor forecasts.
+Vantage Forecaster includes an Electron-based desktop GUI that provides a streamlined interface for running demand and capacity factor forecasts.
 
 ## Quick Start
 
@@ -226,9 +226,9 @@ All settings are automatically saved to disk using `electron-store` with encrypt
 - Scaling percentage
 
 **Storage Location:**
-- Windows: `%APPDATA%/iload-gui/iload-settings.json`
-- macOS: `~/Library/Application Support/iload-gui/iload-settings.json`
-- Linux: `~/.config/iload-gui/iload-settings.json`
+- Windows: `%APPDATA%/vantage-forecaster/vantage-forecaster-settings.json`
+- macOS: `~/Library/Application Support/vantage-forecaster/vantage-forecaster-settings.json`
+- Linux: `~/.config/vantage-forecaster/vantage-forecaster-settings.json`
 
 ---
 

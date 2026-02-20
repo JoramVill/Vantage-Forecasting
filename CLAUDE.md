@@ -1,6 +1,6 @@
-# CLAUDE.md
+# CLAUDE.md - Vantage Forecaster
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with the Vantage Forecaster codebase.
 
 ## Documentation
 

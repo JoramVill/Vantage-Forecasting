@@ -543,8 +543,13 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 <template>
   <div class="app">
     <header class="header">
-      <h1>iLoad Forecasting</h1>
-      <p class="subtitle">Demand & Capacity Factor Forecasting</p>
+      <div class="header-content">
+        <img src="../assets/VANTAGE_LOGO-removebg-preview.png" alt="Vantage Logo" class="header-logo" />
+        <div class="header-text">
+          <h1>Vantage Forecaster</h1>
+          <p class="subtitle">Demand & Capacity Factor Forecasting</p>
+        </div>
+      </div>
     </header>
 
     <main class="main">
@@ -934,6 +939,22 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
   background: linear-gradient(135deg, #1e293b 0%, #334155 100%);
   color: white;
   padding: 24px 32px;
+}
+
+.header-content {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.header-logo {
+  height: 48px;
+  width: auto;
+}
+
+.header-text {
+  display: flex;
+  flex-direction: column;
 }
 
 .header h1 {

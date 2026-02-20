@@ -1,11 +1,11 @@
 {
-  "name": "iload-forecasting",
+  "name": "vantage-forecaster",
   "version": "1.0.0",
-  "description": "Load Forecasting Utility with XGBoost and Multi-Variable Weather Data",
+  "description": "Vantage Forecaster - Electricity Demand and Capacity Factor Forecasting",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "iload": "./dist/index.js"
+    "vantage": "./dist/index.js"
   },
   "scripts": {
     "build": "tsc",

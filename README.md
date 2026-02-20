@@ -1,6 +1,6 @@
-# iLoad Forecasting Utility
+# Vantage Forecaster
 
-A Node.js-based electricity load forecasting utility that uses XGBoost and Multiple Linear Regression with multi-variable weather data to predict electricity demand for the Philippines power grid.
+A Node.js-based electricity load and capacity factor forecasting utility that uses XGBoost and Multiple Linear Regression with multi-variable weather data to predict electricity demand and renewable generation for the Philippines power grid.
 
 ## Overview
 

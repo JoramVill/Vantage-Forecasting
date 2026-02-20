@@ -1,6 +1,6 @@
-# iLoad Forecasting Utility - Documentation Index
+# Vantage Forecaster - Documentation Index
 
-This index provides an overview of all documentation for the iLoad Forecasting Utility.
+This index provides an overview of all documentation for Vantage Forecaster.
 
 ---
 

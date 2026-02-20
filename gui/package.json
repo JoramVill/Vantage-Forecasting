@@ -1,7 +1,7 @@
 {
-  "name": "iload-gui",
+  "name": "vantage-forecaster",
   "version": "2.0.0",
-  "description": "iLoad Forecasting Utility - Simplified GUI Prototype",
+  "description": "Vantage Forecaster - Electricity Demand and Capacity Factor Forecasting",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev:vue": "vite",
@@ -32,8 +32,8 @@
     "wait-on": "^7.2.0"
   },
   "build": {
-    "appId": "com.iload.forecasting",
-    "productName": "iLoad Forecasting",
+    "appId": "com.vantage.forecaster",
+    "productName": "Vantage Forecaster",
     "directories": {
       "output": "release"
     },
@@ -42,7 +42,14 @@
       "dist-electron/**/*"
     ],
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "assets/VANTAGE_LOGO-removebg-preview.ico"
+    },
+    "mac": {
+      "icon": "assets/VANTAGE_LOGO-removebg-preview.png"
+    },
+    "linux": {
+      "icon": "assets/VANTAGE_LOGO-removebg-preview.png"
     }
   }
 }
