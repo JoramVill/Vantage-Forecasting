@@ -1,672 +1,482 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron'
-import { spawn } from 'child_process'
-import * as path from 'path'
-import * as https from 'https'
-import * as fs from 'fs'
+import { app, BrowserWindow, ipcMain, dialog } from 'electron';
+import { spawn } from 'child_process';
+import * as path from 'path';
+import * as fs from 'fs';
+import Store from 'electron-store';
 
-// Use dynamic import for electron-store (ES Module)
-let Store: any
-async function initStore() {
-  const module = await import('electron-store')
-  Store = module.default
-}
+// Zone codes for detection
+const ZONAL_CODES = ['01NLUZ', '02METRO', '03SLUZ', '04LEYTE', '05CEBU', '06NEGROS', '07BOHOL', '08PANAY', '09NWMIN', '10LANAO', '11NCMIN', '12NEMIN', '13SEMIN', '14SWMIN'];
+const REGIONAL_CODES = ['CLUZ', 'CVIS', 'CMIN'];
 
-let store: any
+// Settings store with encryption
+const store = new Store({
+  name: 'iload-settings',
+  encryptionKey: 'iload-forecasting-2024',
+});
 
-let mainWindow: BrowserWindow | null = null
+let mainWindow: BrowserWindow | null = null;
 
-// Tool definitions for the LLM
-const TOOLS = [
-  {
-    name: 'run_forecast',
-    description: 'Run a demand or capacity factor forecast for a date range. Output is saved to the configured output directory.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        forecast_type: {
-          type: 'string',
-          enum: ['demand', 'cfac'],
-          description: 'Type of forecast: "demand" for load demand, "cfac" for capacity factor'
-        },
-        start_date: {
-          type: 'string',
-          description: 'Start date in YYYY-MM-DD format'
-        },
-        end_date: {
-          type: 'string',
-          description: 'End date in YYYY-MM-DD format'
-        }
-      },
-      required: ['forecast_type', 'start_date', 'end_date']
-    }
-  },
-  {
-    name: 'check_capacity_coverage',
-    description: 'Check if all renewable stations in CFAC data are in the stations database. Returns coverage report.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        station_type: {
-          type: 'string',
-          description: 'Types to check (comma-separated): solar,wind,hydro. Defaults to all renewable types.'
-        }
-      }
-    }
-  },
-  {
-    name: 'run_cli_command',
-    description: 'Run any iLoad CLI command. Use this for commands not covered by other tools.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        command: {
-          type: 'string',
-          description: 'The CLI command and arguments (e.g., "train -d data.csv -w weather.csv")'
-        }
-      },
-      required: ['command']
-    }
-  },
-  {
-    name: 'list_available_commands',
-    description: 'List all available iLoad CLI commands and their descriptions.',
-    input_schema: {
-      type: 'object',
-      properties: {}
-    }
-  }
-]
-
-// System prompt for the LLM
-const SYSTEM_PROMPT = `You are an AI assistant for the iLoad Forecasting Utility, a tool for electricity demand and capacity factor forecasting for the Philippines power grid.
-
-## Your Capabilities
-You can help users with:
-1. **Demand Forecasting**: Predict electricity demand using historical data and weather
-2. **Capacity Factor Forecasting**: Predict output of renewable energy stations (solar, wind, hydro)
-3. **Model Training**: Train XGBoost and regression models on historical data
-4. **Evaluation**: Compare forecasts against actual values
-5. **Scheduling**: Set up automated forecast generation
-6. **Capacity Management**: Check for new stations, manage the station database
-
-## Available Tools
-You have access to tools that can run forecasting commands. Use them when the user wants to:
-- Generate a forecast
-- Train a model
-- Evaluate forecast accuracy
-- Check station coverage
-- Run any CLI command
-
-## Key Concepts
-- **CFAC**: Capacity Factor - the ratio of actual output to maximum capacity (0 to 1)
-- **MAPE**: Mean Absolute Percentage Error - lower is better
-- **Regions**: CLUZ (Luzon), CVIS (Visayas), CMIN (Mindanao)
-- **Station Types**: Solar (_S suffix), Wind (no suffix or specific names like BURGOS), Hydro (_H suffix)
-
-## Best Practices
-- The cfac forecast2 command uses optimal model selection per station type
-- Solar forecasts benefit from --use-xgboost --asymmetric-loss flags
-- Wind uses 4-tier MREC model by default
-- Always specify date ranges in YYYY-MM-DD format
-
-Be helpful, concise, and proactive in suggesting commands. When users describe what they want, offer to run the appropriate command.`
-
-async function createWindow() {
-  await initStore()
-  store = new Store({
-    encryptionKey: 'iload-forecasting-key-2024'
-  })
-
+function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1200,
+    width: 1000,
     height: 800,
-    minWidth: 900,
+    minWidth: 800,
     minHeight: 600,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
     },
-    icon: path.join(__dirname, '../public/icon.png')
-  })
+  });
 
-  // In development, load from Vite dev server
+  // Load Vite dev server in development, built files in production
   if (process.env.NODE_ENV === 'development') {
-    const devPort = process.env.VITE_PORT || '5173'
-    mainWindow.loadURL(`http://localhost:${devPort}`)
-    mainWindow.webContents.openDevTools()
+    mainWindow.loadURL('http://localhost:5173');
+    mainWindow.webContents.openDevTools();
   } else {
-    // In production, load the built files
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
+    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
   }
 
   mainWindow.on('closed', () => {
-    mainWindow = null
-  })
+    mainWindow = null;
+  });
 }
 
-app.whenReady().then(createWindow)
+app.whenReady().then(createWindow);
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
-    app.quit()
+    app.quit();
   }
-})
+});
 
 app.on('activate', () => {
-  if (mainWindow === null) {
-    createWindow()
+  if (BrowserWindow.getAllWindows().length === 0) {
+    createWindow();
   }
-})
+});
 
-// IPC Handlers
+// Get the CLI path - go up from gui/dist-electron to project root
+function getCliPath(): string {
+  const guiDir = path.dirname(__dirname);
+  const projectRoot = path.dirname(guiDir);
+  return path.join(projectRoot, 'dist', 'index.js');
+}
 
-// Run CLI command
-ipcMain.handle('run-command', async (_event, command: string, args: string[]) => {
+function getProjectRoot(): string {
+  const guiDir = path.dirname(__dirname);
+  return path.dirname(guiDir);
+}
+
+// IPC Handler: Run CLI command with real-time output
+ipcMain.handle('run-command', async (_event, args: string[]) => {
   return new Promise((resolve) => {
-    // Get the path to the CLI
-    const cliPath = path.join(app.getAppPath(), '..', 'dist', 'index.js')
-    const nodeArgs = [cliPath, ...args]
+    const cliPath = getCliPath();
+    const projectRoot = getProjectRoot();
 
-    const child = spawn('node', nodeArgs, {
-      cwd: path.join(app.getAppPath(), '..'),
+    console.log('Running command:', 'node', cliPath, ...args);
+    console.log('Working directory:', projectRoot);
+
+    const child = spawn('node', [cliPath, ...args], {
+      cwd: projectRoot,
       shell: false,
-      windowsHide: true
-    })
+      env: { ...process.env },
+    });
 
-    let stdout = ''
-    let stderr = ''
+    let stdout = '';
+    let stderr = '';
 
-    child.stdout.on('data', (data) => {
-      stdout += data.toString()
-    })
+    child.stdout.on('data', (data: Buffer) => {
+      const text = data.toString();
+      stdout += text;
+      // Send real-time output to renderer
+      if (mainWindow) {
+        mainWindow.webContents.send('command-output', { type: 'stdout', data: text });
+      }
+    });
 
-    child.stderr.on('data', (data) => {
-      stderr += data.toString()
-    })
+    child.stderr.on('data', (data: Buffer) => {
+      const text = data.toString();
+      stderr += text;
+      // Send real-time output to renderer
+      if (mainWindow) {
+        mainWindow.webContents.send('command-output', { type: 'stderr', data: text });
+      }
+    });
 
     child.on('close', (code) => {
-      resolve({ stdout, stderr, code: code ?? 0 })
-    })
+      resolve({ stdout, stderr, code });
+    });
 
-    child.on('error', (error) => {
-      resolve({ stdout, stderr: error.message, code: 1 })
-    })
-  })
-})
+    child.on('error', (err) => {
+      resolve({ stdout, stderr, code: -1, error: err.message });
+    });
+  });
+});
 
-// Select file
-ipcMain.handle('select-file', async (_event, options?: { filters?: { name: string; extensions: string[] }[] }) => {
-  const result = await dialog.showOpenDialog(mainWindow!, {
-    properties: ['openFile'],
-    filters: options?.filters || [{ name: 'All Files', extensions: ['*'] }]
-  })
-  return result.canceled ? null : result.filePaths[0]
-})
-
-// Select directory
+// IPC Handler: Select directory
 ipcMain.handle('select-directory', async () => {
-  const result = await dialog.showOpenDialog(mainWindow!, {
-    properties: ['openDirectory']
-  })
-  return result.canceled ? null : result.filePaths[0]
-})
+  if (!mainWindow) return null;
 
-// Save file dialog
-ipcMain.handle('save-file', async (_event, options?: { defaultPath?: string; filters?: { name: string; extensions: string[] }[] }) => {
-  const result = await dialog.showSaveDialog(mainWindow!, {
-    defaultPath: options?.defaultPath,
-    filters: options?.filters || [{ name: 'All Files', extensions: ['*'] }]
-  })
-  return result.canceled ? null : result.filePath
-})
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory'],
+  });
 
-// Get app path
+  return result.canceled ? null : result.filePaths[0];
+});
+
+// IPC Handler: Select file
+ipcMain.handle('select-file', async (_event, filters?: { name: string; extensions: string[] }[]) => {
+  if (!mainWindow) return null;
+
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile'],
+    filters: filters || [{ name: 'All Files', extensions: ['*'] }],
+  });
+
+  return result.canceled ? null : result.filePaths[0];
+});
+
+// IPC Handler: Save file dialog
+ipcMain.handle('save-file', async (_event, defaultName?: string) => {
+  if (!mainWindow) return null;
+
+  const result = await dialog.showSaveDialog(mainWindow, {
+    defaultPath: defaultName || 'forecast.csv',
+    filters: [
+      { name: 'CSV Files', extensions: ['csv'] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+  });
+
+  return result.canceled ? null : result.filePath;
+});
+
+// IPC Handler: Get app path
 ipcMain.handle('get-app-path', () => {
-  return app.getAppPath()
-})
+  return getProjectRoot();
+});
 
-// Settings management
+// IPC Handler: Load settings
 ipcMain.handle('load-settings', () => {
   return {
-    // LLM settings
-    provider: store.get('provider', 'claude'),
-    claudeApiKey: store.get('claudeApiKey', ''),
-    geminiApiKey: store.get('geminiApiKey', ''),
-    claudeModel: store.get('claudeModel', 'claude-sonnet-4-20250514'),
-    geminiModel: store.get('geminiModel', 'gemini-2.0-flash'),
-    // Directory settings
+    dataSource: store.get('dataSource', 'csv'),
+    databasePath: store.get('databasePath', ''),
     demandDataDir: store.get('demandDataDir', ''),
     cfacDataDir: store.get('cfacDataDir', ''),
-    outputDir: store.get('outputDir', ''),
-    weatherCacheDir: store.get('weatherCacheDir', ''),
-    databasePath: store.get('databasePath', '')
+    weatherDataDir: store.get('weatherDataDir', './weather_cache'),
+    demandOutputDir: store.get('demandOutputDir', 'output/Demand'),
+    cfacOutputDir: store.get('cfacOutputDir', 'output/CFAC'),
+    enableDemand: store.get('enableDemand', true),
+    enableCfac: store.get('enableCfac', true),
+    enableZonal: store.get('enableZonal', false),
+    scalingPercent: store.get('scalingPercent', 100),
+    // Output naming settings
+    demandPrefix: store.get('demandPrefix', 'FC_DEM_'),
+    demandZonalPrefix: store.get('demandZonalPrefix', 'FC_ZDEM_'),
+    cfacPrefix: store.get('cfacPrefix', 'FC_CF_'),
+    outputSuffix: store.get('outputSuffix', ''),
+    useCustomName: store.get('useCustomName', false),
+    customDemandName: store.get('customDemandName', ''),
+    customCfacName: store.get('customCfacName', ''),
+  };
+});
+
+// IPC Handler: Save settings
+ipcMain.handle('save-settings', (_event, settings: Record<string, any>) => {
+  for (const [key, value] of Object.entries(settings)) {
+    store.set(key, value);
   }
-})
+  return true;
+});
 
-ipcMain.handle('save-settings', (_event, settings: any) => {
-  // LLM settings
-  store.set('provider', settings.provider)
-  store.set('claudeApiKey', settings.claudeApiKey)
-  store.set('geminiApiKey', settings.geminiApiKey)
-  store.set('claudeModel', settings.claudeModel)
-  store.set('geminiModel', settings.geminiModel)
-  // Directory settings
-  store.set('demandDataDir', settings.demandDataDir)
-  store.set('cfacDataDir', settings.cfacDataDir)
-  store.set('outputDir', settings.outputDir)
-  store.set('weatherCacheDir', settings.weatherCacheDir)
-  store.set('databasePath', settings.databasePath)
-  return true
-})
+// IPC Handler: Check data format (zonal vs regional)
+ipcMain.handle('check-data-format', async (_event, dirPath: string, dataType: 'demand' | 'database') => {
+  try {
+    if (dataType === 'database') {
+      // For database, we need to check the schema
+      // This would require running a CLI command or reading the db
+      // For now, return unknown and let the user decide
+      return { format: 'unknown', message: 'Database format detection not implemented' };
+    }
 
-// Helper to get configured paths with fallbacks
-function getConfiguredPaths() {
-  return {
-    demandDataDir: store.get('demandDataDir', '') || 'Data Samples/Demand',
-    cfacDataDir: store.get('cfacDataDir', '') || 'Data Samples/Capacity Factor',
-    outputDir: store.get('outputDir', '') || 'output',
-    weatherCacheDir: store.get('weatherCacheDir', '') || './weather_cache',
-    databasePath: store.get('databasePath', '') || './forecasting.db'
+    // Check CSV directory for demand data
+    const stats = fs.statSync(dirPath);
+    if (!stats.isDirectory()) {
+      return { format: 'unknown', message: 'Path is not a directory' };
+    }
+
+    // Find CSV files in the directory
+    const files = fs.readdirSync(dirPath).filter(f => f.toLowerCase().endsWith('.csv'));
+    if (files.length === 0) {
+      return { format: 'unknown', message: 'No CSV files found in directory' };
+    }
+
+    // Read the first CSV file to check headers
+    const firstFile = path.join(dirPath, files[0]);
+    const content = fs.readFileSync(firstFile, 'utf-8');
+    const lines = content.split('\n');
+    if (lines.length === 0) {
+      return { format: 'unknown', message: 'CSV file is empty' };
+    }
+
+    const header = lines[0].toUpperCase();
+
+    // Check for zonal codes
+    const hasZonal = ZONAL_CODES.some(code => header.includes(code));
+    const hasRegional = REGIONAL_CODES.some(code => header.includes(code));
+
+    if (hasZonal && !hasRegional) {
+      return {
+        format: 'zonal',
+        message: 'Detected 14-zone format (zonal demand data)',
+        columns: ZONAL_CODES.filter(code => header.includes(code))
+      };
+    } else if (hasRegional && !hasZonal) {
+      return {
+        format: 'regional',
+        message: 'Detected 3-region format (CLUZ, CVIS, CMIN)',
+        columns: REGIONAL_CODES.filter(code => header.includes(code))
+      };
+    } else if (hasZonal && hasRegional) {
+      return {
+        format: 'mixed',
+        message: 'Data contains both zonal and regional columns'
+      };
+    } else {
+      return {
+        format: 'unknown',
+        message: 'Could not detect data format from CSV headers'
+      };
+    }
+  } catch (error: any) {
+    return { format: 'error', message: error.message };
   }
-}
+});
 
-// Execute a tool
-async function executeTool(toolName: string, toolInput: any): Promise<string> {
-  const cliPath = path.join(app.getAppPath(), '..', 'dist', 'index.js')
-  const cwd = path.join(app.getAppPath(), '..')
-  const paths = getConfiguredPaths()
+// IPC Handler: Check weather directory structure
+ipcMain.handle('check-weather-directory', async (_event, dirPath: string) => {
+  try {
+    // Handle relative paths
+    let fullPath = dirPath;
+    if (!path.isAbsolute(dirPath)) {
+      fullPath = path.join(getProjectRoot(), dirPath);
+    }
 
-  // Check if directories are configured
-  const checkPaths = () => {
-    const missing: string[] = []
-    if (!paths.demandDataDir || paths.demandDataDir === 'Data Samples/Demand') {
-      // Check if default path exists
-      if (!fs.existsSync(path.join(cwd, 'Data Samples/Demand'))) {
-        missing.push('Demand Data Directory')
+    if (!fs.existsSync(fullPath)) {
+      return { valid: false, message: `Directory does not exist: ${dirPath}` };
+    }
+
+    const stats = fs.statSync(fullPath);
+    if (!stats.isDirectory()) {
+      return { valid: false, message: 'Path is not a directory' };
+    }
+
+    const contents = fs.readdirSync(fullPath);
+
+    // Check for expected weather folder structure
+    // Weather cache has: combined, WIND_*, SOLAR_*, station_*, zonal folders, city folders
+    const windFolders = contents.filter(f => f.startsWith('WIND_') || f.includes('_WIND'));
+    const solarFolders = contents.filter(f => f.startsWith('SOLAR_'));
+    const stationFolders = contents.filter(f => f.startsWith('station_'));
+    const zonalFolders = contents.filter(f => /^\d{2}[a-z]+/.test(f)); // e.g., 01nluz, 02metro
+    const hasCombined = contents.includes('combined');
+    const hasZonal = contents.includes('zonal');
+
+    // Check subfolders for date-based CSV files
+    let dateRange = { start: '', end: '' };
+    const checkFolder = hasCombined ? path.join(fullPath, 'combined') : fullPath;
+
+    if (fs.existsSync(checkFolder) && fs.statSync(checkFolder).isDirectory()) {
+      const subContents = fs.readdirSync(checkFolder);
+      // Look for year-month folders (e.g., 2025-01, 2026-02)
+      const monthFolders = subContents.filter(f => /^\d{4}-\d{2}$/.test(f)).sort();
+      if (monthFolders.length > 0) {
+        dateRange.start = monthFolders[0];
+        dateRange.end = monthFolders[monthFolders.length - 1];
       }
     }
-    if (!paths.cfacDataDir || paths.cfacDataDir === 'Data Samples/Capacity Factor') {
-      if (!fs.existsSync(path.join(cwd, 'Data Samples/Capacity Factor'))) {
-        missing.push('Capacity Factor Data Directory')
-      }
-    }
-    return missing
-  }
 
+    const totalFolders = contents.filter(f => {
+      const fPath = path.join(fullPath, f);
+      return fs.existsSync(fPath) && fs.statSync(fPath).isDirectory();
+    }).length;
+
+    const info = {
+      hasCombined,
+      hasZonal,
+      windStations: windFolders.length,
+      solarStations: solarFolders.length,
+      stationFolders: stationFolders.length,
+      zonalFolders: zonalFolders.length,
+      totalFolders,
+      dateRange,
+    };
+
+    // Check if it looks like a weather cache
+    const isWeatherCache = hasCombined || hasZonal || windFolders.length > 0 || solarFolders.length > 0 || zonalFolders.length > 0;
+
+    if (!isWeatherCache) {
+      return {
+        valid: false,
+        message: 'Directory does not appear to contain weather data.',
+        ...info
+      };
+    }
+
+    // Build summary message
+    const parts = [];
+    if (hasCombined) parts.push('combined');
+    if (hasZonal) parts.push('zonal');
+    if (zonalFolders.length > 0) parts.push(`${zonalFolders.length} zone folders`);
+    if (windFolders.length > 0) parts.push(`${windFolders.length} wind`);
+    if (solarFolders.length > 0) parts.push(`${solarFolders.length} solar`);
+
+    let message = `Weather cache: ${parts.join(', ')}`;
+    if (dateRange.start && dateRange.end) {
+      message += ` (${dateRange.start} to ${dateRange.end})`;
+    }
+
+    return { valid: true, message, ...info };
+  } catch (error: any) {
+    return { valid: false, message: error.message };
+  }
+});
+
+// IPC Handler: Get database info (date ranges, record counts)
+ipcMain.handle('get-database-info', async (_event, dbPath: string) => {
   return new Promise((resolve) => {
-    let args: string[] = []
+    const projectRoot = getProjectRoot();
+    const scriptPath = path.join(projectRoot, 'scripts', 'db-info.cjs');
 
-    switch (toolName) {
-      case 'run_forecast':
-        // Check if required directories exist
-        const missingPaths = checkPaths()
-        if (missingPaths.length > 0) {
-          resolve(`Error: Please configure the following in Settings:\n- ${missingPaths.join('\n- ')}\n\nGo to Settings to set up your data directories.`)
-          return
-        }
-
-        if (toolInput.forecast_type === 'demand') {
-          // Always use configured output dir to avoid path issues
-          // Normalize path to handle any encoding/slash issues
-          const outputDir = path.normalize(paths.outputDir)
-          const outputPath = path.join(outputDir, `demand_${toolInput.start_date}_${toolInput.end_date}.csv`)
-          args = [
-            'forecast',
-            '-d', paths.demandDataDir,
-            '-s', toolInput.start_date,
-            '-e', toolInput.end_date,
-            '-o', outputPath,
-            '--model', 'hybrid'
-          ]
-          if (paths.weatherCacheDir) {
-            args.push('--cache', paths.weatherCacheDir)
-          }
-        } else {
-          // Always use configured output dir to avoid path issues
-          // Normalize path to handle any encoding/slash issues
-          const outputDir = path.normalize(paths.outputDir)
-          const outputPath = path.join(outputDir, `cfac_${toolInput.start_date}_${toolInput.end_date}.csv`)
-          args = [
-            'cfac', 'forecast2',
-            '-t', paths.cfacDataDir,
-            '-s', toolInput.start_date,
-            '-e', toolInput.end_date,
-            '-o', outputPath,
-            '--use-xgboost',
-            '--asymmetric-loss'
-          ]
-          if (paths.weatherCacheDir) {
-            args.push('--cache', paths.weatherCacheDir)
-          }
-        }
-        break
-
-      case 'check_capacity_coverage':
-        args = [
-          'capacity', 'cfac-check',
-          '-t', paths.cfacDataDir
-        ]
-        if (toolInput.station_type) {
-          args.push('--type', toolInput.station_type)
-        }
-        break
-
-      case 'run_cli_command':
-        args = toolInput.command.split(/\s+/)
-        break
-
-      case 'list_available_commands':
-        args = ['--help']
-        break
-
-      default:
-        resolve(`Unknown tool: ${toolName}`)
-        return
+    // Resolve the database path
+    let fullPath = dbPath;
+    if (!path.isAbsolute(dbPath)) {
+      fullPath = path.join(projectRoot, dbPath);
     }
 
-    // Don't use shell: true as it causes paths with spaces to be split incorrectly
-    // Instead, pass arguments as an array which Node.js handles correctly
-    const child = spawn('node', [cliPath, ...args], {
-      cwd,
-      shell: false,
-      windowsHide: true
-    })
-    let output = ''
+    if (!fs.existsSync(fullPath)) {
+      resolve({
+        success: false,
+        message: `Database file not found: ${dbPath}`,
+        demand: null,
+        cfac: null,
+        weather: null
+      });
+      return;
+    }
 
-    child.stdout.on('data', (data) => { output += data.toString() })
-    child.stderr.on('data', (data) => { output += data.toString() })
+    // Run the db-info script from the project root (where better-sqlite3 is installed)
+    const child = spawn('node', [scriptPath, fullPath], {
+      cwd: projectRoot,
+      shell: false,
+      env: { ...process.env },
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', (data: Buffer) => {
+      stdout += data.toString();
+    });
+
+    child.stderr.on('data', (data: Buffer) => {
+      stderr += data.toString();
+    });
 
     child.on('close', (code) => {
-      resolve(output || `Command completed with code ${code}`)
-    })
-
-    child.on('error', (error) => {
-      resolve(`Error: ${error.message}`)
-    })
-  })
-}
-
-// Make HTTPS request helper
-function httpsRequest(options: https.RequestOptions, body?: string): Promise<{ statusCode: number; body: string }> {
-  return new Promise((resolve, reject) => {
-    const req = https.request(options, (res) => {
-      let data = ''
-      res.on('data', chunk => data += chunk)
-      res.on('end', () => resolve({ statusCode: res.statusCode || 0, body: data }))
-    })
-    req.on('error', reject)
-    if (body) req.write(body)
-    req.end()
-  })
-}
-
-// Send message to Claude API
-async function sendToClaude(
-  apiKey: string,
-  model: string,
-  userMessage: string,
-  history: Array<{ role: string; content: string }>
-): Promise<{ content: string; toolCalls?: any[]; error?: string }> {
-  try {
-    const messages = [
-      ...history.map(m => ({ role: m.role, content: m.content })),
-      { role: 'user', content: userMessage }
-    ]
-
-    const requestBody = JSON.stringify({
-      model: model,
-      max_tokens: 4096,
-      system: SYSTEM_PROMPT,
-      tools: TOOLS,
-      messages: messages
-    })
-
-    const response = await httpsRequest({
-      hostname: 'api.anthropic.com',
-      path: '/v1/messages',
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01'
-      }
-    }, requestBody)
-
-    if (response.statusCode !== 200) {
-      const errorData = JSON.parse(response.body)
-      return { content: '', error: errorData.error?.message || `API error: ${response.statusCode}` }
-    }
-
-    const data = JSON.parse(response.body)
-    let textContent = ''
-    const toolCalls: any[] = []
-
-    // Process response content blocks
-    for (const block of data.content || []) {
-      if (block.type === 'text') {
-        textContent += block.text
-      } else if (block.type === 'tool_use') {
-        toolCalls.push({
-          name: block.name,
-          input: block.input,
-          status: 'pending'
-        })
-      }
-    }
-
-    // Execute tool calls if any
-    if (toolCalls.length > 0) {
-      let toolResults = ''
-      for (const tool of toolCalls) {
-        tool.status = 'running'
-        const result = await executeTool(tool.name, tool.input)
-        tool.output = result
-        tool.status = 'completed'
-        toolResults += `\n\n**Tool: ${tool.name}**\n\`\`\`\n${result}\n\`\`\``
-      }
-
-      // Get follow-up response from Claude with tool results
-      const toolResultMessages = [
-        ...messages,
-        { role: 'assistant', content: data.content },
-        {
-          role: 'user',
-          content: toolCalls.map(t => ({
-            type: 'tool_result',
-            tool_use_id: data.content.find((c: any) => c.type === 'tool_use' && c.name === t.name)?.id,
-            content: t.output
-          }))
+      try {
+        // Try to parse stderr first (script outputs JSON to stderr on error)
+        if (stderr && stderr.trim().startsWith('{')) {
+          resolve(JSON.parse(stderr.trim()));
+          return;
         }
-      ]
-
-      const followUpBody = JSON.stringify({
-        model: model,
-        max_tokens: 4096,
-        system: SYSTEM_PROMPT,
-        messages: toolResultMessages
-      })
-
-      const followUpResponse = await httpsRequest({
-        hostname: 'api.anthropic.com',
-        path: '/v1/messages',
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01'
+        // Parse stdout
+        if (stdout && stdout.trim().startsWith('{')) {
+          resolve(JSON.parse(stdout.trim()));
+          return;
         }
-      }, followUpBody)
-
-      if (followUpResponse.statusCode === 200) {
-        const followUpData = JSON.parse(followUpResponse.body)
-        for (const block of followUpData.content || []) {
-          if (block.type === 'text') {
-            textContent = block.text
-          }
-        }
+        resolve({
+          success: false,
+          message: stderr || 'Failed to get database info',
+          demand: null,
+          cfac: null,
+          weather: null
+        });
+      } catch (parseError: any) {
+        resolve({
+          success: false,
+          message: `Parse error: ${parseError.message}`,
+          demand: null,
+          cfac: null,
+          weather: null
+        });
       }
-    }
+    });
 
-    return { content: textContent, toolCalls: toolCalls.length > 0 ? toolCalls : undefined }
+    child.on('error', (err) => {
+      resolve({
+        success: false,
+        message: err.message,
+        demand: null,
+        cfac: null,
+        weather: null
+      });
+    });
+  });
+});
 
-  } catch (error: any) {
-    return { content: '', error: error.message }
-  }
-}
+// IPC Handler: Import data to database
+ipcMain.handle('import-to-database', async (_event, options: {
+  dbPath: string;
+  dataType: 'demand' | 'cfac' | 'weather';
+  sourcePath: string;
+}) => {
+  return new Promise((resolve) => {
+    const cliPath = getCliPath();
+    const projectRoot = getProjectRoot();
 
-// Send message to Gemini API
-async function sendToGemini(
-  apiKey: string,
-  model: string,
-  userMessage: string,
-  history: Array<{ role: string; content: string }>
-): Promise<{ content: string; toolCalls?: any[]; error?: string }> {
-  try {
-    // Convert history to Gemini format
-    const contents = history.map(m => ({
-      role: m.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: m.content }]
-    }))
+    // Build the import command
+    const args = ['db', 'import', '-t', options.dataType, '-f', options.sourcePath, '--db', options.dbPath];
 
-    // Add current message
-    contents.push({
-      role: 'user',
-      parts: [{ text: userMessage }]
-    })
+    console.log('Running import:', 'node', cliPath, ...args);
 
-    // Convert tools to Gemini format
-    const geminiTools = [{
-      function_declarations: TOOLS.map(t => ({
-        name: t.name,
-        description: t.description,
-        parameters: t.input_schema
-      }))
-    }]
+    const child = spawn('node', [cliPath, ...args], {
+      cwd: projectRoot,
+      shell: false,
+      env: { ...process.env },
+    });
 
-    const requestBody = JSON.stringify({
-      contents: contents,
-      systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-      tools: geminiTools,
-      generationConfig: {
-        maxOutputTokens: 4096,
-        temperature: 0.7
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', (data: Buffer) => {
+      const text = data.toString();
+      stdout += text;
+      if (mainWindow) {
+        mainWindow.webContents.send('command-output', { type: 'stdout', data: text });
       }
-    })
+    });
 
-    const response = await httpsRequest({
-      hostname: 'generativelanguage.googleapis.com',
-      path: `/v1beta/models/${model}:generateContent?key=${apiKey}`,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
+    child.stderr.on('data', (data: Buffer) => {
+      const text = data.toString();
+      stderr += text;
+      if (mainWindow) {
+        mainWindow.webContents.send('command-output', { type: 'stderr', data: text });
       }
-    }, requestBody)
+    });
 
-    if (response.statusCode !== 200) {
-      const errorData = JSON.parse(response.body)
-      return { content: '', error: errorData.error?.message || `API error: ${response.statusCode}` }
-    }
+    child.on('close', (code) => {
+      resolve({
+        success: code === 0,
+        message: code === 0 ? 'Import completed successfully' : (stderr || 'Import failed'),
+        stdout,
+        stderr
+      });
+    });
 
-    const data = JSON.parse(response.body)
-    const candidate = data.candidates?.[0]
-    if (!candidate) {
-      return { content: '', error: 'No response from Gemini' }
-    }
-
-    let textContent = ''
-    const toolCalls: any[] = []
-
-    for (const part of candidate.content?.parts || []) {
-      if (part.text) {
-        textContent += part.text
-      } else if (part.functionCall) {
-        toolCalls.push({
-          name: part.functionCall.name,
-          input: part.functionCall.args,
-          status: 'pending'
-        })
-      }
-    }
-
-    // Execute tool calls if any
-    if (toolCalls.length > 0) {
-      const functionResponses = []
-      for (const tool of toolCalls) {
-        tool.status = 'running'
-        const result = await executeTool(tool.name, tool.input)
-        tool.output = result
-        tool.status = 'completed'
-        functionResponses.push({
-          name: tool.name,
-          response: { result: result }
-        })
-      }
-
-      // Get follow-up response with function results
-      const followUpContents = [
-        ...contents,
-        candidate.content,
-        {
-          role: 'user',
-          parts: functionResponses.map(fr => ({
-            functionResponse: fr
-          }))
-        }
-      ]
-
-      const followUpBody = JSON.stringify({
-        contents: followUpContents,
-        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-        generationConfig: {
-          maxOutputTokens: 4096,
-          temperature: 0.7
-        }
-      })
-
-      const followUpResponse = await httpsRequest({
-        hostname: 'generativelanguage.googleapis.com',
-        path: `/v1beta/models/${model}:generateContent?key=${apiKey}`,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        }
-      }, followUpBody)
-
-      if (followUpResponse.statusCode === 200) {
-        const followUpData = JSON.parse(followUpResponse.body)
-        const followUpCandidate = followUpData.candidates?.[0]
-        if (followUpCandidate) {
-          textContent = ''
-          for (const part of followUpCandidate.content?.parts || []) {
-            if (part.text) {
-              textContent += part.text
-            }
-          }
-        }
-      }
-    }
-
-    return { content: textContent, toolCalls: toolCalls.length > 0 ? toolCalls : undefined }
-
-  } catch (error: any) {
-    return { content: '', error: error.message }
-  }
-}
-
-// Chat message handler
-ipcMain.handle('send-chat-message', async (_event, message: string, history: Array<{ role: string; content: string }>) => {
-  const provider = store.get('provider', 'claude')
-  const apiKey = provider === 'claude' ? store.get('claudeApiKey', '') : store.get('geminiApiKey', '')
-  const model = provider === 'claude' ? store.get('claudeModel', 'claude-sonnet-4-20250514') : store.get('geminiModel', 'gemini-2.0-flash')
-
-  if (!apiKey) {
-    return { content: '', error: 'No API key configured. Please go to Settings to add your API key.' }
-  }
-
-  if (provider === 'claude') {
-    return await sendToClaude(apiKey, model, message, history)
-  } else {
-    return await sendToGemini(apiKey, model, message, history)
-  }
-})
+    child.on('error', (err) => {
+      resolve({ success: false, message: err.message });
+    });
+  });
+});
