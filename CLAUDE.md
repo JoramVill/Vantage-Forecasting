@@ -7,10 +7,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Read documentation first:** All docs in `Documents/` folder. Start with `DOCUMENTATION_INDEX.md`.
 
 Key guides:
-- `CAPACITY_FACTOR_GUIDE.md` - Capacity factor forecasting (primary use case)
-- `METHODOLOGY_REPORT.md` - Comprehensive forecasting methodology for clients
-- `CLI_REFERENCE.md` - Complete command reference
+- `GUI_GUIDE.md` - Desktop GUI user manual with CLI command mappings
+- `CLI_GUIDE.md` - Complete CLI command reference
 - `USER_GUIDE.md` - Workflows and examples
+- `MODEL_OVERVIEW.md` - Forecasting model descriptions and performance
 - `interconnector_analysis/INTERCONNECTOR_FINAL_SUMMARY.md` - Interconnector analysis
 
 ---
