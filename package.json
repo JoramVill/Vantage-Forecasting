@@ -31,7 +31,8 @@
     "csv-stringify": "^6.4.6",
     "date-holidays": "^3.26.5",
     "luxon": "^3.4.4",
-    "ml-regression-multivariate-linear": "^2.0.3"
+    "ml-regression-multivariate-linear": "^2.0.3",
+    "synaptic": "^1.1.4"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

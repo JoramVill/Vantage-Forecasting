@@ -91,3 +91,13 @@ export type { XGBoostRegressorOptions } from './CFacXGBoostRegressor.js';
 
 // Model router
 export { ModelRouter, modelRouter } from './ModelRouter.js';
+
+// LSTM Neural Network Models
+export { WindLSTMModel } from './WindLSTMModel.js';
+export type { LSTMTrainingOptions, LSTMModelMetrics } from './WindLSTMModel.js';
+export { SolarLSTMModel } from './SolarLSTMModel.js';
+export type { SolarLSTMTrainingOptions, SolarLSTMModelMetrics } from './SolarLSTMModel.js';
+
+// LSTM Forecaster Orchestrator
+export { LSTMForecaster } from './LSTMForecaster.js';
+export type { LSTMForecastOptions, LSTMForecastResult } from './LSTMForecaster.js';

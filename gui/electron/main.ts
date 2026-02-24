@@ -120,6 +120,52 @@ ipcMain.handle('run-command', async (_event, args: string[]) => {
   });
 });
 
+// IPC Handler: Run a node script (not CLI command)
+ipcMain.handle('run-script', async (_event, scriptPath: string, args: string[]) => {
+  return new Promise((resolve) => {
+    const projectRoot = getProjectRoot();
+    const fullScriptPath = path.join(projectRoot, scriptPath);
+
+    console.log('Running script:', 'node', fullScriptPath, ...args);
+    console.log('Working directory:', projectRoot);
+
+    const child = spawn('node', [fullScriptPath, ...args], {
+      cwd: projectRoot,
+      shell: false,
+      env: { ...process.env },
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', (data: Buffer) => {
+      const text = data.toString();
+      stdout += text;
+      // Send real-time output to renderer
+      if (mainWindow) {
+        mainWindow.webContents.send('command-output', { type: 'stdout', data: text });
+      }
+    });
+
+    child.stderr.on('data', (data: Buffer) => {
+      const text = data.toString();
+      stderr += text;
+      // Send real-time output to renderer
+      if (mainWindow) {
+        mainWindow.webContents.send('command-output', { type: 'stderr', data: text });
+      }
+    });
+
+    child.on('close', (code) => {
+      resolve({ stdout, stderr, code });
+    });
+
+    child.on('error', (err) => {
+      resolve({ stdout, stderr, code: -1, error: err.message });
+    });
+  });
+});
+
 // IPC Handler: Select directory
 ipcMain.handle('select-directory', async () => {
   if (!mainWindow) return null;
@@ -177,6 +223,7 @@ ipcMain.handle('load-settings', () => {
     enableCfac: store.get('enableCfac', true),
     enableZonal: store.get('enableZonal', false),
     scalingPercent: store.get('scalingPercent', 100),
+    cfacModel: store.get('cfacModel', 'lstm'), // LSTM is the new default
     // Output naming settings
     demandPrefix: store.get('demandPrefix', 'FC_DEM_'),
     demandZonalPrefix: store.get('demandZonalPrefix', 'FC_ZDEM_'),

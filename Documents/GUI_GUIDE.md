@@ -99,8 +99,20 @@ Click "Update Database" to import new data:
 |--------|-------------|---------|
 | **Enable Demand Forecast** | Generate demand predictions | Enabled |
 | **Enable CFAC Forecast** | Generate capacity factor predictions | Enabled |
+| **CFAC Model** | Select forecasting model (Hybrid or Legacy XGBoost) | Hybrid |
 | **Enable Zonal Mode** | Use 14-zone instead of 3-region format | Disabled (auto-detected) |
 | **Scaling Percentage** | Scale output values (for growth scenarios) | 100% |
+
+### CFAC Model Selection
+
+When CFAC forecast is enabled, you can choose between two models:
+
+| Model | Description | Performance |
+|-------|-------------|-------------|
+| **Hybrid (Default)** | Physics-based models + ML correction with auto-calibration | Wind: ~73% MAPE, Solar: ~16% MAPE |
+| **Legacy XGBoost** | XGBoost with physics features, asymmetric loss, bias correction | Wind: ~78% MAPE, Solar: ~55% MAPE |
+
+**Hybrid is recommended** as it combines physics-based predictions with machine learning correction for best accuracy.
 
 ### Date Range
 
@@ -184,10 +196,19 @@ node dist/index.js forecast \
 - Data Source: CSV (`Data Samples/Capacity Factor`)
 - Forecast Start: `2025-12-01`
 - Forecast End: `2025-12-31`
-- Training End: `2025-11-30`
+- Model: Hybrid (default)
 - Output Directory: `output/CFAC`
 
-**Generated CLI Command:**
+**Generated CLI Command (Hybrid - Default):**
+```bash
+node dist/index.js cfac forecast2 \
+  -t "Data Samples/Capacity Factor" \
+  -s 2025-12-01 \
+  -e 2025-12-31 \
+  -o output/CFAC/FC_CF_2025-12-01_2025-12-31.csv
+```
+
+**Generated CLI Command (Legacy XGBoost):**
 ```bash
 node dist/index.js cfac forecast2 \
   -t "Data Samples/Capacity Factor" \
@@ -361,6 +382,7 @@ npm run electron:build  # Package Electron app
 | Handler | Purpose |
 |---------|---------|
 | `run-command` | Execute CLI with args, stream output |
+| `run-script` | Execute node script directly (deprecated - use run-command with --model flag) |
 | `select-directory` | Open folder picker dialog |
 | `select-file` | Open file picker dialog |
 | `save-file` | Open save dialog |

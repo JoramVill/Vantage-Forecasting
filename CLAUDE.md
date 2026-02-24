@@ -36,10 +36,14 @@ npm run electron:build                   # Package for distribution
 ### Capacity Factor Forecasting (Primary)
 | Command | Description |
 |---------|-------------|
-| `cfac forecast2` | **Recommended** - Optimal model selection per station type |
+| `cfac forecast2` | **RECOMMENDED** - Hybrid model (physics + ML correction) with auto-calibration |
 | `cfac forecast3` | Enhanced Hybrid with EMA wind smoothing (`--smooth 0.5`) |
 | `cfac evaluate` | Evaluate forecast accuracy vs actual |
 | `cfac mrec compare3` | Compare wind model variants |
+
+**Recommended Model:** Hybrid (physics + ML correction) with auto-calibration
+- Wind: ~73% MAPE (4-Tier Hybrid on test data)
+- Solar: ~16% MAPE (Physics+ML with per-station calibration)
 
 ### Demand Forecasting
 | Command | Description |
@@ -127,11 +131,13 @@ Default: Last 14 days of training data. Override with `--no-auto-calibrate` to d
 | Type | Model | Measured MAPE | Notes |
 |------|-------|---------------|-------|
 | Demand | Region-Aware Hybrid | 2-4% | XGBoost + temperature sensitivity + weekend correction |
-| Wind | 4-Tier Hybrid | ~73% | Best on test data. Training metrics (130%) are misleading |
-| Solar | Physics+ML Hybrid | ~16% | Irradiance physics + ML correction |
+| **Wind** | **4-Tier Hybrid** | **~73%** | **BEST** - physics + ML with auto-calibration |
+| **Solar** | **Physics+ML Hybrid** | **~16%** | **BEST** - irradiance physics + ML + per-station calibration |
 | Hydro/Geothermal/Biomass/Battery | Profile-based | varies | Historical pattern matching |
 
-**NOTE:** Wind model training MAPE (130%+) is misleading. Test MAPE on held-out data is 73%. Always validate with `cfac mrec compare-physics`.
+**Hybrid is the recommended model for all station types.** Use `cfac forecast2` (default command).
+
+**Note on LSTM:** LSTM models are experimental and currently underperform hybrid models. The LSTM code remains in the codebase (`src/models/capacityFactor/WindLSTMModel.ts`, `SolarLSTMModel.ts`) for future development as a weather-to-CFAC correction layer.
 
 ### Weekend Correction Factors
 The demand hybrid model applies learned correction factors to fix systematic weekend over-forecasting:
@@ -147,19 +153,26 @@ These factors reduced weekend MAE from 500 MW to ~250 MW.
 **Demand:**
 - `src/models/hybridModel.ts` - Region-aware hybrid with statistical profiles + weekend correction
 
-**Capacity Factor:**
-- `src/models/capacityFactor/WindEnhancedHybridModel.ts` - Wind Enhanced Hybrid (MREC + ML)
-- `src/models/capacityFactor/SolarHybridModel.ts` - Solar Physics+ML Hybrid (primary)
+**Capacity Factor (Production - RECOMMENDED):**
+- `src/models/capacityFactor/WindEnhancedHybridModel.ts` - **BEST** Wind 4-Tier Hybrid (MREC + ML) ~73% MAPE
+- `src/models/capacityFactor/SolarHybridModel.ts` - **BEST** Solar Physics+ML Hybrid ~16% MAPE
 - `src/models/capacityFactor/WindMRECModel.ts` - iPool MREC three-tier algorithm
 - `src/models/capacityFactor/SolarIrradianceModel.ts` - Solar physics base model
-- `src/models/capacityFactor/CFacXGBoostRegressor.ts` - XGBoost for ML layer
+- `src/models/capacityFactor/CFacXGBoostRegressor.ts` - XGBoost for ML layer (legacy option)
 - `src/models/capacityFactor/BiasCorrector.ts` - Station-specific bias correction
+
+**Capacity Factor (Experimental - NOT RECOMMENDED):**
+- `src/models/capacityFactor/WindLSTMModel.ts` - Wind LSTM (experimental, underperforms hybrid)
+- `src/models/capacityFactor/SolarLSTMModel.ts` - Solar LSTM (experimental, underperforms hybrid)
+- `scripts/cfac_forecast_lstm.cjs` - LSTM forecasting script (experimental)
 
 ---
 
 ## Complete Forecast Commands
 
-### 1. Capacity Factor Forecast (cfac forecast2)
+### 1. Capacity Factor Forecast (cfac forecast2) - RECOMMENDED
+
+**Hybrid model (physics + ML correction) provides the best accuracy for Wind and Solar forecasting.**
 
 **Basic command:**
 ```bash
@@ -195,6 +208,12 @@ node dist/index.js cfac forecast2 \
 | `--bias-correction` | Apply station-specific bias correction |
 | `--no-auto-calibrate` | Skip auto-calibration period |
 | `--training-end <date>` | Limit training data to before this date |
+
+**Model Performance:**
+| Station Type | Hybrid MAPE | Notes |
+|--------------|-------------|-------|
+| Wind | ~73% | 4-Tier Hybrid with auto-calibration |
+| Solar | ~16% | Physics+ML with per-station calibration |
 
 ### 2. Demand Forecast
 

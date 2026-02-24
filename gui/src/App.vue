@@ -34,6 +34,7 @@ const enableDemand = ref(true);
 const enableCfac = ref(true);
 const enableZonal = ref(false);
 const scalingPercent = ref(100);
+const cfacModel = ref<'hybrid' | 'legacy'>('hybrid'); // Hybrid (physics + ML) is the best performer
 
 // Output naming settings
 const demandPrefix = ref('FC_DEM_');
@@ -74,6 +75,7 @@ function saveSettings() {
     enableCfac: enableCfac.value,
     enableZonal: enableZonal.value,
     scalingPercent: scalingPercent.value,
+    cfacModel: cfacModel.value,
     // Output naming
     demandPrefix: demandPrefix.value,
     demandZonalPrefix: demandZonalPrefix.value,
@@ -86,7 +88,7 @@ function saveSettings() {
 }
 
 // Watch for settings changes and persist them
-watch([dataSource, databasePath, demandDataDir, cfacDataDir, weatherDataDir, demandOutputDir, cfacOutputDir, enableDemand, enableCfac, enableZonal, scalingPercent, demandPrefix, demandZonalPrefix, cfacPrefix, outputSuffix, useCustomName, customDemandName, customCfacName], () => {
+watch([dataSource, databasePath, demandDataDir, cfacDataDir, weatherDataDir, demandOutputDir, cfacOutputDir, enableDemand, enableCfac, enableZonal, scalingPercent, cfacModel, demandPrefix, demandZonalPrefix, cfacPrefix, outputSuffix, useCustomName, customDemandName, customCfacName], () => {
   saveSettings();
 });
 
@@ -119,6 +121,9 @@ onMounted(async () => {
     if (typeof settings.enableCfac === 'boolean') enableCfac.value = settings.enableCfac;
     if (typeof settings.enableZonal === 'boolean') enableZonal.value = settings.enableZonal;
     if (typeof settings.scalingPercent === 'number') scalingPercent.value = settings.scalingPercent;
+    if (settings.cfacModel === 'hybrid' || settings.cfacModel === 'legacy') cfacModel.value = settings.cfacModel;
+    // Migration: convert old 'lstm' setting to 'hybrid'
+    if (settings.cfacModel === 'lstm') cfacModel.value = 'hybrid';
     // Output naming
     if (settings.demandPrefix) demandPrefix.value = settings.demandPrefix;
     if (settings.demandZonalPrefix) demandZonalPrefix.value = settings.demandZonalPrefix;
@@ -448,31 +453,54 @@ async function runForecast() {
 
     // Run CFAC forecast
     if (enableCfac.value) {
-      addStatus('Starting Capacity Factor Forecast...');
+      const modelName = cfacModel.value === 'hybrid' ? 'Hybrid (Physics + ML)' : 'Legacy XGBoost';
+      addStatus(`Starting Capacity Factor Forecast (${modelName})...`);
       if (!enableDemand.value) progress.value = 5;
 
       const cfacFilename = generateOutputFilename('cfac');
-      const cfacArgs = [
-        'cfac', 'forecast2',
-        '-t', dataSource.value === 'database' ? databasePath.value : cfacDataDir.value,
-        '-s', forecastStart.value,
-        '-e', forecastEnd.value,
-        '-o', `${cfacOutputDir.value}/${cfacFilename}`,
-        '--use-xgboost',
-        '--asymmetric-loss',
-        '--bias-correction',
-      ];
+      let cfacArgs: string[];
 
-      if (dataSource.value === 'csv' && trainingEnd.value) {
-        cfacArgs.push('--training-end', trainingEnd.value);
+      let cfacResult;
+
+      if (cfacModel.value === 'hybrid') {
+        // Hybrid model (default) - physics + ML correction, best accuracy
+        cfacArgs = [
+          'cfac', 'forecast2',
+          '-t', dataSource.value === 'database' ? databasePath.value : cfacDataDir.value,
+          '-s', forecastStart.value,
+          '-e', forecastEnd.value,
+          '-o', `${cfacOutputDir.value}/${cfacFilename}`,
+        ];
+
+        if (dataSource.value === 'csv' && trainingEnd.value) {
+          cfacArgs.push('--training-end', trainingEnd.value);
+        }
+
+        cfacResult = await window.electronAPI.runCommand(cfacArgs);
+      } else {
+        // Legacy model - use cfac forecast2 with XGBoost
+        cfacArgs = [
+          'cfac', 'forecast2',
+          '-t', dataSource.value === 'database' ? databasePath.value : cfacDataDir.value,
+          '-s', forecastStart.value,
+          '-e', forecastEnd.value,
+          '-o', `${cfacOutputDir.value}/${cfacFilename}`,
+          '--use-xgboost',
+          '--asymmetric-loss',
+          '--bias-correction',
+        ];
+
+        if (dataSource.value === 'csv' && trainingEnd.value) {
+          cfacArgs.push('--training-end', trainingEnd.value);
+        }
+
+        cfacResult = await window.electronAPI.runCommand(cfacArgs);
       }
-
-      const cfacResult = await window.electronAPI.runCommand(cfacArgs);
       completedSteps++;
       progress.value = (completedSteps / totalSteps) * 90;
 
       if (cfacResult.code === 0) {
-        addStatus('Capacity Factor forecast completed successfully', 'success');
+        addStatus(`Capacity Factor forecast (${modelName}) completed successfully`, 'success');
       } else {
         // Extract meaningful error from stderr
         const errorLines = cfacResult.stderr?.split('\n').filter((l: string) => l.trim()).slice(-3) || [];
@@ -839,6 +867,13 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
               <span class="toggle-label">Capacity Factor</span>
             </label>
             <p class="hint">Solar, wind, hydro output</p>
+            <div v-if="enableCfac" class="model-select">
+              <label class="model-label">Model:</label>
+              <select v-model="cfacModel" :disabled="isRunning" class="model-dropdown">
+                <option value="hybrid">Hybrid (Default)</option>
+                <option value="legacy">Legacy XGBoost</option>
+              </select>
+            </div>
           </div>
           <div class="toggle-group" :class="{ 'disabled': !enableDemand }">
             <label class="toggle">
@@ -1333,6 +1368,40 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 
 .toggle-group.disabled {
   opacity: 0.5;
+}
+
+.model-select {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.model-label {
+  font-size: 0.75rem;
+  color: #64748b;
+  font-weight: 500;
+}
+
+.model-dropdown {
+  padding: 4px 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  background: white;
+  color: #334155;
+  cursor: pointer;
+}
+
+.model-dropdown:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1);
+}
+
+.model-dropdown:disabled {
+  background: #f1f5f9;
+  cursor: not-allowed;
 }
 
 .toggle {

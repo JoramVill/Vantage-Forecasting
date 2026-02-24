@@ -5,6 +5,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   runCommand: (args: string[]) =>
     ipcRenderer.invoke('run-command', args),
 
+  // Run a node script (not CLI command)
+  runScript: (scriptPath: string, args: string[]) =>
+    ipcRenderer.invoke('run-script', scriptPath, args),
+
   // Select directory
   selectDirectory: () =>
     ipcRenderer.invoke('select-directory'),
@@ -61,6 +65,7 @@ declare global {
   interface Window {
     electronAPI: {
       runCommand: (args: string[]) => Promise<{ stdout: string; stderr: string; code: number; error?: string }>;
+      runScript: (scriptPath: string, args: string[]) => Promise<{ stdout: string; stderr: string; code: number; error?: string }>;
       selectDirectory: () => Promise<string | null>;
       selectFile: (filters?: { name: string; extensions: string[] }[]) => Promise<string | null>;
       saveFile: (defaultName?: string) => Promise<string | null>;

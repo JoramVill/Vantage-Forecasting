@@ -2117,11 +2117,15 @@ cfacCommand
   .option('--solar-seasonal-adaptive', 'Seasonal adaptive: trains separate dry/wet models, reduces ML weight in dry season (Nov-Apr)')
   .option('--no-wind-4tier', 'Disable 4-tier MREC wind model (use legacy enhanced-hybrid instead)')
   .option('--wind-4tier', 'Use 4-tier MREC for wind - DEFAULT (LOW/RAMP/RATED/HIGH regions, ~50% MAPE)')
+  // NOTE: LSTM model option removed from production - experimental only via direct code modification
   .action(async (options) => {
     try {
       const apiKey = getApiKey();
       const weatherService = createWeatherService(apiKey, options.cache);
 
+      // ═══════════════════════════════════════════════════════════════════════════
+      // HYBRID MODEL PATH (default - physics + ML correction)
+      // ═══════════════════════════════════════════════════════════════════════════
       const asymmetricLoss = options.asymmetricLoss || false;
       const useXGBoost = options.useXgboost || false;
       const solarPhysicsOnly = options.solarPhysicsOnly || false;
