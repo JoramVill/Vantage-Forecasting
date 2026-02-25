@@ -51,16 +51,32 @@ node dist/index.js train \
 
 ### 2. forecast - Generate Demand Forecast
 
-Generate demand forecasts with automatic weather fetching.
+Generate demand forecasts with automatic weather fetching. Supports both regional (3 regions) and zonal (14 sub-regions) modes.
 
 **Usage:**
 ```bash
-# Basic forecast
+# Basic regional forecast (3 regions: CLUZ, CVIS, CMIN)
 node dist/index.js forecast \
   -s 2025-12-01 \
   -e 2025-12-31 \
   -o output/demand_forecast.csv \
   --model hybrid
+
+# Zonal forecast (14 sub-regions with 42 weather cities)
+node dist/index.js forecast \
+  -d "Data Samples/Demand" \
+  -s 2025-12-01 \
+  -e 2025-12-31 \
+  -o output/zonal_demand_forecast.csv \
+  --zonal
+
+# With LSTM correction (improves morning ramp dynamics)
+node dist/index.js forecast \
+  -s 2025-12-01 \
+  -e 2025-12-31 \
+  -o output/demand_forecast.csv \
+  --model hybrid \
+  --lstm-correction
 
 # With scaling adjustments
 node dist/index.js forecast \
@@ -81,6 +97,8 @@ node dist/index.js forecast \
 | `-o, --output <file>` | Output CSV file path | Yes |
 | `-d, --demand <file>` | Historical demand CSV file | No |
 | `--model <type>` | Model: `regression`, `xgboost`, `hybrid` | No (default: `regression`) |
+| `--zonal` | Use 14-zone mode (01NLUZ, 02METRO, etc.) | No |
+| `--lstm-correction` | Enable LSTM correction layer (requires trained models) | No |
 | `--use-saved` | Use saved model from database | No |
 | `--scale <percent>` | Scale all forecasts (e.g., `5` for +5%) | No |
 | `--scale-workday <percent>` | Scale workdays only | No |
@@ -99,6 +117,14 @@ node dist/index.js forecast \
 3. Peak/Off-peak scaling
 4. Global scaling
 5. Growth adjustment (applied daily)
+
+**Regional vs Zonal Mode:**
+| Aspect | Regional (default) | Zonal (--zonal flag) |
+|--------|-------------------|----------------------|
+| **Output regions** | 3 (CLUZ, CVIS, CMIN) | 14 (01NLUZ, 02METRO, 03SLUZ, ...) |
+| **Weather cities** | 3 (Manila, Cebu, Davao) | 42 (3 per zone) |
+| **Database** | `iload.db` | `iload_zonal.db` |
+| **LSTM support** | Yes | Yes (requires zone-specific models) |
 
 ---
 
@@ -811,11 +837,213 @@ node dist/index.js scheduler service \
 
 ---
 
-### 11. capacity - Station Capacity Management
+### 11. LSTM Training (Python) - Demand Correction Models
+
+Train enhanced LSTM models for zonal demand correction. Improves morning ramp dynamics, peak timing, and day-type transitions.
+
+#### Prerequisites
+
+**Install Python dependencies:**
+```bash
+pip install tensorflow pandas holidays
+```
+
+**Required:**
+- Python 3.8+
+- TensorFlow 2.x
+- Pandas
+- holidays library (for Philippines holiday detection)
+
+#### 11.1 Train Single Zone
+
+Train LSTM for a specific zone.
+
+```bash
+python scripts/train_demand_lstm.py \
+  --zone 01NLUZ \
+  --output models/lstm
+```
+
+**Flags:**
+| Flag | Description | Required |
+|------|-------------|----------|
+| `--zone <code>` | Zone code (e.g., 01NLUZ, 02METRO, 03SLUZ) | Yes |
+| `--output <dir>` | Output directory for model files | No (default: from config) |
+| `--config <path>` | Configuration file path | No (default: `config/lstm_config.json`) |
+| `--epochs <n>` | Training epochs | No (default: 100 from config) |
+
+**Output:**
+- Model weights: `models/lstm/lstm_01NLUZ_v2.json`
+- Training metrics in console
+
+#### 11.2 Train All Zones
+
+Train LSTM models for all 14 zones sequentially.
+
+```bash
+python scripts/train_demand_lstm.py \
+  --all \
+  --output models/lstm \
+  --epochs 100
+```
+
+**Flags:**
+| Flag | Description | Required |
+|------|-------------|----------|
+| `--all` | Train all 14 zones | Yes |
+| `--output <dir>` | Output directory | No |
+| `--config <path>` | Configuration file | No |
+| `--epochs <n>` | Training epochs | No |
+
+**Output:**
+- 14 model files: `models/lstm/lstm_<ZONE>_v2.json`
+- Training summary: `models/lstm/training_summary_v2.json`
+
+#### 11.3 Configuration Files
+
+**config/lstm_config.json** - LSTM training configuration
+```json
+{
+  "version": "2.0",
+  "training": {
+    "sequence_length": 48,
+    "batch_size": 64,
+    "epochs": 100,
+    "learning_rate": 0.0005
+  },
+  "model": {
+    "lstm_layers": [64, 32],
+    "dense_layers": [32, 16],
+    "correction_range": [0.85, 1.15]
+  },
+  "paths": {
+    "demand_data": "Data Samples/Demand",
+    "weather_cache": "weather_cache",
+    "output_models": "models/lstm"
+  }
+}
+```
+
+**src/data/zones.json** - Zone and city configuration
+```json
+{
+  "zones": [
+    {
+      "code": "01NLUZ",
+      "name": "Northern Luzon",
+      "cities": [
+        {"id": "01nluz_sanfernando", "name": "San Fernando", ...},
+        {"id": "01nluz_baguio", "name": "Baguio", ...},
+        ...
+      ],
+      "lstm_config": {
+        "enabled": true,
+        "notes": "Large geographic spread requires all 6 cities"
+      }
+    }
+  ]
+}
+```
+
+#### 11.4 Feature Engineering
+
+The LSTM trainer extracts 74-98 features per timestep:
+
+| Feature Group | Count | Description |
+|---------------|-------|-------------|
+| **Per-city weather** | 48 (6×8) | Temperature, humidity, cloudcover, solar radiation (×6 cities, zero-padded) |
+| **Aggregated weather** | 8 | Mean/max/spread temperature across cities, city coverage |
+| **Demand features** | 10 | Current demand, lags (1h/24h/168h), rolling averages, ramp rate |
+| **Temporal features** | 18 | Hour/day/month cyclical encoding, weekend/holiday/workday flags |
+| **Calendar features** | 8 | Philippines holidays, days until/since holiday, special periods |
+| **Seasonal features** | 6 | Wet/dry season (Jun-Nov/Mar-May/Dec-Feb), El Niño/La Niña |
+
+**Total features:**
+- 6-city zones (e.g., 01NLUZ): 98 features
+- 3-city zones (e.g., 02METRO): 74 features (with zero-padding to 6)
+
+#### 11.5 Model Architecture
+
+```
+LSTM(64, return_sequences=True)
+  ↓
+LSTM(32)
+  ↓
+Dense(32, relu) + Dropout(0.2)
+  ↓
+Dense(16, relu) + Dropout(0.1)
+  ↓
+Dense(1, sigmoid) → correction factor [0.85, 1.15]
+```
+
+**Training splits:**
+- Training: 70%
+- Validation: 20%
+- Test: 10%
+
+**Output:** Correction factor (0.85-1.15) to multiply against hybrid model base forecast.
+
+#### 11.6 Using Trained LSTM Models
+
+After training, use LSTM correction in demand forecasts:
+
+```bash
+# Regional forecast with LSTM
+node dist/index.js forecast \
+  -s 2025-12-01 \
+  -e 2025-12-31 \
+  -o output/demand_forecast.csv \
+  --model hybrid \
+  --lstm-correction
+
+# Zonal forecast with LSTM
+node dist/index.js forecast \
+  -s 2025-12-01 \
+  -e 2025-12-31 \
+  -o output/zonal_forecast.csv \
+  --zonal \
+  --lstm-correction
+```
+
+**LSTM correction requires:**
+- Trained model files in `models/lstm/lstm_<ZONE>_v2.json`
+- Multi-city weather data for the forecast period
+- Enabled via `--lstm-correction` flag
+
+#### 11.7 Zone Codes Reference
+
+| Region | Zone Code | Name | Cities |
+|--------|-----------|------|--------|
+| **Luzon** | 01NLUZ | Northern Luzon | 6 cities (San Fernando, Baguio, Tuguegarao, Laoag, Dagupan, Angeles) |
+| | 02METRO | Metro Manila | 3 cities (Manila, Quezon City, Makati) |
+| | 03SLUZ | Southern Luzon | 3 cities (Batangas, Lucena, Legazpi) |
+| **Visayas** | 04LEYTE | Leyte/Eastern Visayas | 3 cities (Tacloban, Ormoc, Catbalogan) |
+| | 05CEBU | Cebu | 3 cities (Cebu City, Mandaue, Lapu-Lapu) |
+| | 06NEGROS | Negros | 3 cities (Bacolod, Dumaguete, Kabankalan) |
+| | 07BOHOL | Bohol | 3 cities (Tagbilaran, Ubay, Talibon) |
+| | 08PANAY | Panay/Western Visayas | 3 cities (Iloilo, Roxas, Kalibo) |
+| **Mindanao** | 09NWMIN | Northwest Mindanao | 3 cities (Zamboanga, Pagadian, Dipolog) |
+| | 10LANAO | Lanao | 3 cities (Iligan, Marawi, Ozamiz) |
+| | 11NCMIN | North Central Mindanao | 3 cities (Cagayan de Oro, Malaybalay, Valencia) |
+| | 12NEMIN | Northeast Mindanao | 3 cities (Butuan, Surigao, Bislig) |
+| | 13SEMIN | Southeast Mindanao | 3 cities (Davao, Tagum, Panabo) |
+| | 14SWMIN | Southwest Mindanao | 3 cities (General Santos, Koronadal, Cotabato) |
+
+#### 11.8 Performance Metrics
+
+The LSTM correction layer improves:
+- **Morning ramp (6-9 AM)**: Correlation improvement from negative to positive
+- **Peak timing**: Reduced error from 3-5 hours to <1 hour
+- **Day transitions**: Better Friday→Saturday, weekend→workday patterns
+- **Overall MAPE**: Reduction depends on zone (typically 0.5-2% improvement)
+
+---
+
+### 12. capacity - Station Capacity Management
 
 Manage station metadata and synchronize with IEMOP data.
 
-#### 11.1 capacity check
+#### 12.1 capacity check
 
 Check IEMOP for station capacity changes.
 
@@ -835,7 +1063,7 @@ node dist/index.js capacity check \
 | `-o, --output <file>` | Output report file | No |
 | `-v, --verbose` | Detailed output | No |
 
-#### 11.2 capacity compare
+#### 12.2 capacity compare
 
 Compare IEMOP genlist against stations.json.
 
@@ -853,7 +1081,7 @@ node dist/index.js capacity compare \
 | `--stations <path>` | Stations JSON path | No |
 | `-v, --verbose` | Detailed output | No |
 
-#### 11.3 capacity research
+#### 12.3 capacity research
 
 Generate research prompt for new station.
 
@@ -870,7 +1098,7 @@ node dist/index.js capacity research \
 | `-g, --genlist <file>` | Genlist CSV file | No |
 | `--cache <dir>` | Cache directory | No |
 
-#### 11.4 capacity add
+#### 12.4 capacity add
 
 Add new station to stations.json.
 
@@ -893,7 +1121,7 @@ node dist/index.js capacity add \
 | `-d, --data <file>` | JSON file with station data | No |
 | `-n, --name <name>` | Station name | No |
 
-#### 11.5 capacity download
+#### 12.5 capacity download
 
 Download IEMOP MNM (Must Not Miss) data.
 
@@ -913,7 +1141,7 @@ node dist/index.js capacity download \
 | `--region <region>` | Region: `ALL`, `LUZON`, `VISAYAS`, `MINDANAO` | No (default: `ALL`) |
 | `--cache <dir>` | Cache directory | No |
 
-#### 11.6 capacity cfac-check
+#### 12.6 capacity cfac-check
 
 Verify CFAC CSV columns match stations.json.
 
@@ -963,6 +1191,32 @@ node dist/index.js evaluate \
 node dist/index.js cfac evaluate \
   -f output/cfac_forecast.csv \
   -a "Data Samples/Capacity Factor/actual.csv"
+```
+
+### Zonal Forecast with LSTM Pipeline
+```bash
+# 1. Train LSTM models for all zones (one-time setup)
+pip install tensorflow pandas holidays
+python scripts/train_demand_lstm.py --all --epochs 100
+
+# 2. Import zonal demand data to database
+node dist/index.js db import \
+  -t demand \
+  -f "Data Samples/Demand" \
+  --db iload_zonal.db
+
+# 3. Generate zonal forecast with LSTM correction
+node dist/index.js forecast \
+  -s 2025-12-01 -e 2025-12-31 \
+  -o output/zonal_lstm_forecast.csv \
+  --zonal \
+  --lstm-correction \
+  --use-db
+
+# 4. Evaluate against actuals
+node dist/index.js evaluate \
+  -f output/zonal_lstm_forecast.csv \
+  -a "Data Samples/Demand/zonal_actual.csv"
 ```
 
 ### Automated Daily Forecasting

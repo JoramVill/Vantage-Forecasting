@@ -49,8 +49,13 @@ npm run electron:build                   # Package for distribution
 | Command | Description |
 |---------|-------------|
 | `train` | Train XGBoost/Regression on demand + weather |
-| `forecast` | Generate demand forecasts |
+| `forecast` | Generate demand forecasts (regional or zonal) |
 | `evaluate` | Compare forecast vs actual |
+
+**LSTM Trainer (Python):**
+| Command | Description |
+|---------|-------------|
+| `python scripts/train_demand_lstm.py` | Train enhanced LSTM correction models for zonal demand |
 
 ### Scheduler (Background Service)
 | Command | Description |
@@ -264,11 +269,11 @@ node dist/index.js forecast \
 | `-o, --output <file>` | Output CSV file (required) |
 | `--model <type>` | Model type: `xgboost`, `regression`, `hybrid` (default: hybrid) |
 | `--lstm-correction` | Enable LSTM correction layer for hybrid model (improves morning ramp) |
+| `--zonal` | Use 14-zone sub-region mode instead of 3 regions (Luzon: 01NLUZ, 02METRO, 03SLUZ; Visayas: 04LEYTE, 05CEBU, 06NEGROS, 07BOHOL, 08PANAY; Mindanao: 09NWMIN, 10LANAO, 11NCMIN, 12NEMIN, 13SEMIN, 14SWMIN) |
 | `--weather-hist <files...>` | Historical weather CSV files |
 | `--weather-forecast <files...>` | Forecast weather CSV files |
 | `--use-db` | Use database-stored model |
 | `--growth <rate>` | Daily growth rate adjustment (e.g., 0.001 for 0.1%) |
-| `--zonal` | Use 14-zone sub-region mode instead of 3 regions |
 
 ### 3. Train Demand Model
 
@@ -375,6 +380,165 @@ output/forecasts/
 
 ---
 
+## LSTM Demand Correction Training (Python)
+
+### Overview
+The LSTM V2 trainer learns temporal patterns and multi-city weather correlations to improve demand forecasts, particularly for morning ramp dynamics (6-9 AM) and peak timing accuracy.
+
+### Prerequisites
+```bash
+pip install tensorflow pandas holidays
+```
+
+### Training Command
+```bash
+# Train LSTM for a specific zone
+python scripts/train_demand_lstm.py \
+  --zone 01NLUZ \
+  --output models/lstm
+
+# Train all 14 zones
+python scripts/train_demand_lstm.py \
+  --all \
+  --output models/lstm \
+  --epochs 100
+```
+
+### Command Flags
+| Flag | Description | Required |
+|------|-------------|----------|
+| `--zone <code>` | Zone code to train (e.g., 01NLUZ, 02METRO) | Yes (unless --all) |
+| `--all` | Train all 14 zones sequentially | No |
+| `--config <path>` | Configuration file path | No (default: `config/lstm_config.json`) |
+| `--output <dir>` | Output directory for models | No (default: from config) |
+| `--epochs <n>` | Training epochs | No (default: from config, typically 100) |
+
+### Configuration Files
+
+**`config/lstm_config.json`** - LSTM training configuration
+- **Training parameters**: sequence_length (48 hours), batch_size (64), learning_rate (0.0005)
+- **Model architecture**: LSTM(64) → LSTM(32) → Dense(32) → Dense(16) → Output
+- **Feature groups**: 98 features (6-city zones) or 74 features (3-city zones)
+- **Normalization**: Weather (temp, humidity, solar), demand (10000 MW scale)
+- **Correction range**: 0.85-1.15 (±15% adjustment to hybrid model base forecast)
+
+**`src/data/zones.json`** - Zone and city configuration
+- **14 zones**: Each with 3-6 cities for weather learning
+- **Per-zone LSTM config**: Enabled/disabled flag, priority cities, performance notes
+- **City metadata**: Coordinates, location IDs for weather fetching
+
+### Feature Engineering
+The LSTM trainer extracts 74-98 features per timestep:
+
+| Feature Group | Count | Description |
+|---------------|-------|-------------|
+| **Per-city weather** | 48 (6×8) | Temperature, humidity, cloudcover, solar radiation (×6 cities, padded) |
+| **Aggregated weather** | 8 | Mean/max/spread temperature, city coverage metrics |
+| **Demand features** | 10 | Current demand, lags (1h/24h/168h), rolling averages, ramp rate |
+| **Temporal features** | 18 | Hour/day/month cyclical encoding, weekend/holiday flags, time periods |
+| **Calendar features** | 8 | Holiday detection, days until/since holiday, special periods |
+| **Seasonal features** | 6 | Wet/dry season (Philippines), El Niño/La Niña flags |
+
+### Output
+The trainer exports:
+- **Model weights** (JSON): `models/lstm/lstm_<ZONE>_v2.json`
+- **Training summary**: Validation/test metrics, epochs trained, sample counts
+- **Summary report**: `models/lstm/training_summary_v2.json` with all zone results
+
+### Using LSTM Correction in Forecasting
+```bash
+# Enable LSTM correction for demand forecast
+node dist/index.js forecast \
+  -d "Data Samples/Demand" \
+  -s 2025-12-01 \
+  -e 2025-12-31 \
+  -o output/demand_forecast.csv \
+  --model hybrid \
+  --lstm-correction
+```
+
+**Impact:**
+- **Morning ramp (6-9 AM)**: Improved correlation from negative to positive
+- **Peak timing**: Reduced error from 3-5 hours to <1 hour
+- **Day transitions**: Better Friday→Saturday, weekend→workday patterns
+
+### Zone Codes Reference
+| Region | Zones |
+|--------|-------|
+| **Luzon** | 01NLUZ (Northern), 02METRO (Manila), 03SLUZ (Southern) |
+| **Visayas** | 04LEYTE, 05CEBU, 06NEGROS, 07BOHOL, 08PANAY |
+| **Mindanao** | 09NWMIN (Northwest), 10LANAO, 11NCMIN (North Central), 12NEMIN (Northeast), 13SEMIN (Southeast), 14SWMIN (Southwest) |
+
+---
+
+## Zonal Mode (14 Sub-Regions)
+
+### Overview
+Zonal mode provides demand forecasts for 14 sub-regions instead of 3 main regions, enabling granular grid analysis. Uses 42 weather cities (3 per zone) for improved local accuracy.
+
+### Zonal vs Regional Mode
+| Aspect | Regional (3) | Zonal (14) |
+|--------|--------------|------------|
+| **Regions** | CLUZ, CVIS, CMIN | 01NLUZ, 02METRO, 03SLUZ, 04LEYTE, 05CEBU, 06NEGROS, 07BOHOL, 08PANAY, 09NWMIN, 10LANAO, 11NCMIN, 12NEMIN, 13SEMIN, 14SWMIN |
+| **Weather cities** | 3 (Manila, Cebu, Davao) | 42 (3 per zone) |
+| **Database** | `iload.db` | `iload_zonal.db` |
+| **Use case** | System-wide forecasting | Sub-regional dispatch planning |
+
+### Zonal Forecast Command
+```bash
+# Basic zonal forecast
+node dist/index.js forecast \
+  -d "Data Samples/Demand" \
+  -s 2025-12-01 \
+  -e 2025-12-31 \
+  -o output/zonal_demand_forecast.csv \
+  --zonal
+
+# With LSTM correction
+node dist/index.js forecast \
+  -d "Data Samples/Demand" \
+  -s 2025-12-01 \
+  -e 2025-12-31 \
+  -o output/zonal_demand_forecast.csv \
+  --zonal \
+  --lstm-correction
+```
+
+### Database Import for Zonal Mode
+```bash
+# Import zonal demand data
+node dist/index.js db import \
+  -t demand \
+  -f "Data Samples/Demand" \
+  --db iload_zonal.db
+
+# Use zonal database in forecast
+node dist/index.js forecast \
+  -s 2025-12-01 \
+  -e 2025-12-31 \
+  -o output/zonal_forecast.csv \
+  --zonal \
+  --use-db
+```
+
+### Weather Fetching (Zonal Mode)
+Zonal mode automatically fetches weather for 42 cities defined in `ZONAL_LOCATIONS` (src/services/weatherService.ts). Weather is cached in `weather_cache/zonal/` directory.
+
+**Zone-to-Cities Mapping** (from `src/data/zones.json`):
+- **01NLUZ**: San Fernando, Baguio, Tuguegarao, Laoag, Dagupan, Angeles
+- **02METRO**: Manila, Quezon City, Makati
+- **03SLUZ**: Batangas, Lucena, Legazpi
+- (See zones.json for complete list)
+
+### Zonal Output Format
+CSV file with columns:
+```
+datetime,01NLUZ,02METRO,03SLUZ,04LEYTE,05CEBU,06NEGROS,07BOHOL,08PANAY,09NWMIN,10LANAO,11NCMIN,12NEMIN,13SEMIN,14SWMIN
+2025-12-01 00:00,1250.5,3200.8,1800.3,...
+```
+
+---
+
 ## Architecture
 
 ### Data Flow
@@ -387,11 +551,15 @@ CSV Parsers → Data Merger (timestamp alignment) → Feature Engineering → ML
 |-----------|---------|
 | `src/parsers/` | CSV parsing (demand: hour-ending M/D/YYYY, weather: ISO 8601 hour-starting) |
 | `src/features/` | Feature engineering (50+ features) |
-| `src/models/` | Demand models (Regression, XGBoost, Hybrid) |
+| `src/models/` | Demand models (Regression, XGBoost, Hybrid, LSTM inference) |
 | `src/models/capacityFactor/` | Wind/Solar/Profile capacity factor models |
 | `src/services/` | Weather API (Visual Crossing), capacityFactorService |
-| `src/database/` | SQLite persistence via better-sqlite3 |
+| `src/database/` | SQLite persistence via better-sqlite3 (iload.db, iload_zonal.db) |
 | `src/data/stations.json` | Station metadata, coordinates, weather clusters |
+| `src/data/zones.json` | Zonal configuration (14 zones, 42 cities) |
+| `config/lstm_config.json` | LSTM training configuration |
+| `scripts/train_demand_lstm.py` | Python LSTM trainer (requires TensorFlow) |
+| `models/lstm/` | Trained LSTM weights (exported as JSON) |
 
 ### Weather Timestamp Alignment
 Weather uses hour-starting, demand uses hour-ending. The merger adds 1 hour to weather timestamps.

@@ -10,7 +10,7 @@ import { buildTrainingSamples, buildFeatureVector } from './features/index.js';
 import { RegressionModel } from './models/regressionModel.js';
 import { XGBoostModel } from './models/xgboostModel.js';
 import { HybridModel } from './models/hybridModel.js';
-import { DemandLSTMManager } from './models/DemandLSTMInference.js';
+import { DemandCalibrator } from './models/DemandCalibrator.js';
 import { writeForecastCsv, writeModelReport, writeMetricsSummary } from './writers/index.js';
 import { REGION_MAPPINGS, isPhilippineHoliday } from './constants/index.js';
 import { ForecastResult, TrainingSample, RawWeatherData } from './types/index.js';
@@ -198,20 +198,15 @@ async function runZonalForecast(options: any): Promise<void> {
   }));
   model.learnWeekendCorrections(predictionData);
 
-  // Load pre-trained LSTM models if requested
-  let lstmManager: DemandLSTMManager | null = null;
-  if (options.lstmCorrection) {
-    console.log('\n🧠 Loading pre-trained LSTM correction models...');
-    lstmManager = new DemandLSTMManager('models/lstm');
-    const loadedCount = lstmManager.loadAllZones();
-    if (loadedCount === 0) {
-      console.log('  ⚠️ No LSTM models found. Train with: python scripts/train_demand_lstm.py --all');
-      console.log('  Continuing without LSTM correction...');
-      lstmManager = null;
-    } else {
-      console.log(`  Loaded ${loadedCount} zone models`);
-    }
-  }
+  // Train XGBoost calibrator for hybrid model corrections
+  console.log('\n🔧 Training XGBoost calibrator...');
+  const calibrator = new DemandCalibrator();
+  const calibratorMetrics = await calibrator.train(
+    samples,
+    (sample: TrainingSample) => model.predictForRegion(sample.features, sample.region) || sample.demand
+  );
+  model.setCalibrator(calibrator);
+  console.log(`  ✅ Calibrator trained: Val MAPE=${calibratorMetrics.validationMAPE.toFixed(2)}%`);
 
   // Fetch weather for forecast period
   console.log('\n🌤️  Fetching weather data for forecast period...');
@@ -401,7 +396,20 @@ async function runZonalForecast(options: any): Promise<void> {
       const daysAhead = Math.max(0, currentDate.diff(forecastStart, 'days').days);
 
       const hybridPrediction = model.predictForRegion(features, region, daysAhead);
-      const prediction = (hybridPrediction ?? lastKnownDemand.get(region)?.value ?? 0) * getScaleFactor(datetime);
+
+      // Apply calibration if available
+      let calibratedPrediction = hybridPrediction ?? lastKnownDemand.get(region)?.value ?? 0;
+      if (model.hasCalibrator() && hybridPrediction !== undefined) {
+        // Create sample for calibration
+        const calibrationSample: TrainingSample = {
+          datetime,
+          region,
+          demand: 0, // Not used for calibration prediction
+          features
+        };
+        calibratedPrediction = model.applyCalibration(hybridPrediction, calibrationSample);
+      }
+      const prediction = calibratedPrediction * getScaleFactor(datetime);
 
       forecasts.push({
         datetime,
@@ -591,7 +599,6 @@ program
   .option('--scale-peak <percent>', 'Scale peak hour (09:00-21:00) forecasts by percentage')
   .option('--scale-offpeak <percent>', 'Scale off-peak hour (21:00-09:00) forecasts by percentage')
   .option('--growth <percent>', 'Daily demand growth rate for hybrid model (e.g., 0.01 for 0.01%/day)', '0')
-  .option('--lstm-correction', 'Enable LSTM correction layer for hybrid model (improves morning ramp dynamics)')
   .option('--cache <dir>', 'Weather cache directory', './weather_cache')
   .option('--use-db', 'Use demand data from database instead of file')
   .option('--train-days <days>', 'Number of days of historical data to use for training (default: 90)', '90')
@@ -716,27 +723,6 @@ program
           console.log(`  R² = ${result.r2Score.toFixed(4)}, MAPE = ${result.mape.toFixed(2)}%`);
           if (growthRate > 0) {
             console.log(`  📈 Growth factor: ${(growthRate * 100).toFixed(4)}% per day`);
-          }
-
-          // Train LSTM correction if requested
-          if (options.lstmCorrection) {
-            console.log('\n🧠 Training LSTM correction layers...');
-            const regions = [...new Set(samples.map(s => s.region))];
-            for (const region of regions) {
-              try {
-                (model as HybridModel).trainLSTMCorrection(samples, region, {
-                  sequenceLength: 48,
-                  hiddenUnits: [48, 24],
-                  learningRate: 0.005,
-                  epochs: 100,
-                  validationSplit: 0.2,
-                  earlyStoppingPatience: 15,
-                  log: false
-                });
-              } catch (error: any) {
-                console.error(`  ❌ Failed to train LSTM for ${region}: ${error.message}`);
-              }
-            }
           }
         } else {
           model = new XGBoostModel();

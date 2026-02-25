@@ -4,6 +4,8 @@ const electron_1 = require("electron");
 electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     // Run CLI command
     runCommand: (args) => electron_1.ipcRenderer.invoke('run-command', args),
+    // Run a node script (not CLI command)
+    runScript: (scriptPath, args) => electron_1.ipcRenderer.invoke('run-script', scriptPath, args),
     // Select directory
     selectDirectory: () => electron_1.ipcRenderer.invoke('select-directory'),
     // Select file

@@ -2,7 +2,7 @@ import { DateTime } from 'luxon';
 import { FeatureVector, TrainingSample } from '../types/index.js';
 import { FEATURE_NAMES } from '../constants/index.js';
 import MultivariateLinearRegression from 'ml-regression-multivariate-linear';
-import { DemandCorrectionLSTM } from './DemandCorrectionLSTM.js';
+import { DemandCalibrator } from './DemandCalibrator.js';
 
 /**
  * Time period definitions for different demand drivers
@@ -75,9 +75,6 @@ export class HybridModel {
   private regionCharacteristics: Map<string, RegionCharacteristics> = new Map();
   private growthFactor: number = 0; // Daily growth rate (e.g., 0.0001 = 0.01% per day)
   private recentDaysCount: number = 7;
-  private lstmCorrectors: Map<string, DemandCorrectionLSTM> = new Map(); // One LSTM per region
-  private historicalSamples: Map<string, TrainingSample[]> = new Map(); // Track history for LSTM
-
   // Weekend correction factors learned from validation data
   // These correct for systematic over-forecasting on weekends (especially CLUZ)
   // Key: region, Value: { saturday: factor, sunday: factor }
@@ -86,6 +83,8 @@ export class HybridModel {
     ['CVIS', { saturday: 1.009, sunday: 0.980 }],  // CVIS close to accurate
     ['CMIN', { saturday: 0.999, sunday: 1.018 }],  // CMIN close to accurate
   ]);
+  // XGBoost calibrator for post-hybrid correction
+  private calibrator: DemandCalibrator | null = null;
 
   constructor(options?: { growthFactor?: number; recentDaysCount?: number }) {
     if (options?.growthFactor !== undefined) {
@@ -522,24 +521,6 @@ export class HybridModel {
       }
     }
 
-    // Apply LSTM correction if available and trained for this region
-    const lstmCorrector = this.lstmCorrectors.get(region);
-    if (prediction !== undefined && lstmCorrector && lstmCorrector.isTrained()) {
-      const history = this.historicalSamples.get(region) || [];
-
-      // Create a dummy sample for the current prediction
-      // (We need this to extract features for LSTM)
-      const currentSample: TrainingSample = {
-        datetime: new Date(), // This should be set by the caller in real usage
-        region,
-        demand: 0, // Not used for prediction
-        features
-      };
-
-      const lstmCorrection = lstmCorrector.predict(history, currentSample, prediction);
-      prediction *= lstmCorrection;
-    }
-
     return prediction;
   }
 
@@ -699,78 +680,38 @@ export class HybridModel {
   }
 
   /**
-   * Set LSTM corrector for a specific region
+   * Set the XGBoost calibrator for post-hybrid correction
    */
-  setLSTMCorrector(region: string, corrector: DemandCorrectionLSTM): void {
-    this.lstmCorrectors.set(region, corrector);
+  setCalibrator(calibrator: DemandCalibrator): void {
+    this.calibrator = calibrator;
   }
 
   /**
-   * Get LSTM corrector for a specific region (if set)
+   * Get the XGBoost calibrator
    */
-  getLSTMCorrector(region: string): DemandCorrectionLSTM | null {
-    return this.lstmCorrectors.get(region) || null;
+  getCalibrator(): DemandCalibrator | null {
+    return this.calibrator;
   }
 
   /**
-   * Get all LSTM correctors
+   * Check if calibrator is available
    */
-  getAllLSTMCorrectors(): Map<string, DemandCorrectionLSTM> {
-    return this.lstmCorrectors;
+  hasCalibrator(): boolean {
+    return this.calibrator !== null && this.calibrator.isReady();
   }
 
   /**
-   * Train LSTM correction layer for a specific region
-   * This should be called AFTER the hybrid model is trained
+   * Apply calibration to a hybrid prediction
+   * Returns the calibrated prediction, or the original if calibrator is not ready
    */
-  trainLSTMCorrection(samples: TrainingSample[], region: string, options?: any): void {
-    console.log(`  Training LSTM correction for ${region}...`);
-
-    // Create LSTM corrector
-    const lstmCorrector = new DemandCorrectionLSTM(region, options);
-
-    // Create hybrid predictor function
-    const hybridPredictor = (sample: TrainingSample): number => {
-      return this.predictForRegion(sample.features, sample.region) || 0;
-    };
-
-    // Train the LSTM
-    try {
-      const metrics = lstmCorrector.train(samples, hybridPredictor, options);
-      this.lstmCorrectors.set(region, lstmCorrector);
-      console.log(`    ✅ ${region}: MAPE=${metrics.validationMAPE.toFixed(2)}%, improvement=${metrics.improvementOverHybrid >= 0 ? '+' : ''}${metrics.improvementOverHybrid.toFixed(2)}%`);
-    } catch (error: any) {
-      console.error(`    ❌ ${region}: ${error.message}`);
+  applyCalibration(
+    hybridPrediction: number,
+    sample: TrainingSample
+  ): number {
+    if (!this.calibrator || !this.calibrator.isReady()) {
+      return hybridPrediction;
     }
+    return this.calibrator.calibrate(hybridPrediction, sample);
   }
 
-  /**
-   * Update historical samples for LSTM prediction
-   * Call this before predict() to maintain sequence history
-   */
-  updateHistoricalSamples(sample: TrainingSample): void {
-    const region = sample.region;
-    if (!this.historicalSamples.has(region)) {
-      this.historicalSamples.set(region, []);
-    }
-
-    const history = this.historicalSamples.get(region)!;
-    history.push(sample);
-
-    // Keep only last 48 hours for LSTM sequence
-    if (history.length > 48) {
-      history.shift();
-    }
-  }
-
-  /**
-   * Clear historical samples (useful when starting a new forecast)
-   */
-  clearHistoricalSamples(region?: string): void {
-    if (region) {
-      this.historicalSamples.delete(region);
-    } else {
-      this.historicalSamples.clear();
-    }
-  }
 }

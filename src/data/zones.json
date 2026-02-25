@@ -41,7 +41,12 @@
           "latitude": 15.145,
           "longitude": 120.589
         }
-      ]
+      ],
+      "lstm_config": {
+        "enabled": true,
+        "priority_cities": ["01nluz_sanfernando", "01nluz_angeles"],
+        "notes": "Large geographic spread requires all 6 cities. Consistently over-forecasts by 200-300 MW due to global XGBoost not weighting city-specific features properly."
+      }
     },
     {
       "code": "02METRO",
@@ -66,7 +71,11 @@
           "latitude": 14.55,
           "longitude": 121.03
         }
-      ]
+      ],
+      "lstm_config": {
+        "enabled": true,
+        "notes": "Urban heat island effects and high demand density require learning optimal city weighting."
+      }
     },
     {
       "code": "03SLUZ",
@@ -91,7 +100,11 @@
           "latitude": 13.14,
           "longitude": 123.73
         }
-      ]
+      ],
+      "lstm_config": {
+        "enabled": true,
+        "notes": "Morning ramp correlation is negative (-0.170), requires learning which city weather affects morning demand."
+      }
     },
     {
       "code": "04LEYTE",
@@ -116,7 +129,11 @@
           "latitude": 11.78,
           "longitude": 124.89
         }
-      ]
+      ],
+      "lstm_config": {
+        "enabled": true,
+        "notes": "Typhoon-prone region requires learning weather-demand patterns for all cities."
+      }
     },
     {
       "code": "05CEBU",
@@ -141,7 +158,11 @@
           "latitude": 10.31,
           "longitude": 123.95
         }
-      ]
+      ],
+      "lstm_config": {
+        "enabled": true,
+        "notes": "Close proximity cities, LSTM can learn which is most predictive of demand."
+      }
     },
     {
       "code": "06NEGROS",
@@ -166,7 +187,11 @@
           "latitude": 9.59,
           "longitude": 122.82
         }
-      ]
+      ],
+      "lstm_config": {
+        "enabled": true,
+        "notes": "Island zone with north-south split, requires learning which city weather correlates with demand."
+      }
     },
     {
       "code": "07BOHOL",
@@ -191,7 +216,11 @@
           "latitude": 10.11,
           "longitude": 124.28
         }
-      ]
+      ],
+      "lstm_config": {
+        "enabled": true,
+        "notes": "Island zone with distributed demand centers."
+      }
     },
     {
       "code": "08PANAY",
@@ -216,7 +245,11 @@
           "latitude": 11.71,
           "longitude": 122.37
         }
-      ]
+      ],
+      "lstm_config": {
+        "enabled": true,
+        "notes": "Large island with varying weather patterns across cities."
+      }
     },
     {
       "code": "09NWMIN",
@@ -241,7 +274,11 @@
           "latitude": 8.59,
           "longitude": 123.34
         }
-      ]
+      ],
+      "lstm_config": {
+        "enabled": true,
+        "notes": "Western Mindanao coastal region with dispersed cities."
+      }
     },
     {
       "code": "10LANAO",
@@ -266,7 +303,11 @@
           "latitude": 8.15,
           "longitude": 123.85
         }
-      ]
+      ],
+      "lstm_config": {
+        "enabled": true,
+        "notes": "Overall correlation is low (0.717), 3.5hr peak timing error."
+      }
     },
     {
       "code": "11NCMIN",
@@ -291,7 +332,11 @@
           "latitude": 7.90,
           "longitude": 125.09
         }
-      ]
+      ],
+      "lstm_config": {
+        "enabled": true,
+        "notes": "Morning ramp correlation is negative (-0.046), 5.2hr peak timing error. Requires learning which city affects morning dynamics."
+      }
     },
     {
       "code": "12NEMIN",
@@ -316,7 +361,11 @@
           "latitude": 8.22,
           "longitude": 126.36
         }
-      ]
+      ],
+      "lstm_config": {
+        "enabled": true,
+        "notes": "Eastern coastal region with varying weather patterns."
+      }
     },
     {
       "code": "13SEMIN",
@@ -341,7 +390,11 @@
           "latitude": 7.31,
           "longitude": 125.68
         }
-      ]
+      ],
+      "lstm_config": {
+        "enabled": true,
+        "notes": "Morning ramp correlation is low (0.128). Major demand center (Davao City)."
+      }
     },
     {
       "code": "14SWMIN",
@@ -366,7 +419,11 @@
           "latitude": 7.22,
           "longitude": 124.25
         }
-      ]
+      ],
+      "lstm_config": {
+        "enabled": true,
+        "notes": "Southernmost region with unique weather patterns."
+      }
     }
   ]
 }

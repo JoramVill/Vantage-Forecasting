@@ -137,12 +137,116 @@ Each zone gets its own trained LSTM that learns:
 
 ---
 
+---
+
+## Configuration-Driven Architecture
+
+Rather than hardcoding zones/cities, use JSON configuration files that can be swapped for different regions or use cases.
+
+### Config File: `config/lstm_config.json`
+
+```json
+{
+  "version": "2.0",
+  "description": "LSTM Demand Trainer Configuration",
+
+  "zones_file": "src/data/zones.json",
+
+  "feature_config": {
+    "weather_features_per_city": 8,
+    "demand_features": 10,
+    "temporal_features": 18,
+    "calendar_features": 8,
+    "seasonal_features": 6
+  },
+
+  "training": {
+    "sequence_length": 48,
+    "batch_size": 64,
+    "epochs": 100,
+    "early_stopping_patience": 10,
+    "learning_rate": 0.0005,
+    "validation_split": 0.2
+  },
+
+  "model": {
+    "lstm_layers": [64, 32],
+    "dense_layers": [32, 16],
+    "dropout": 0.2,
+    "correction_range": [0.85, 1.15]
+  },
+
+  "paths": {
+    "demand_data": "Data Samples/Demand",
+    "weather_cache": "weather_cache",
+    "output_models": "models/lstm",
+    "zones_config": "src/data/zones.json"
+  },
+
+  "holidays": {
+    "country": "PH",
+    "include_optional": true
+  }
+}
+```
+
+### Extended Zones Config: `src/data/zones.json` (already exists, extend it)
+
+Add LSTM-specific settings per zone:
+
+```json
+{
+  "zones": [
+    {
+      "code": "01NLUZ",
+      "name": "Northern Luzon",
+      "parentRegion": "luzon",
+      "cities": [...],
+      "lstm_config": {
+        "enabled": true,
+        "priority_cities": ["01nluz_sanfernando", "01nluz_angeles"],
+        "notes": "Large geographic spread, needs all 6 cities"
+      }
+    },
+    {
+      "code": "02METRO",
+      "name": "Metro Manila",
+      "parentRegion": "luzon",
+      "cities": [...],
+      "lstm_config": {
+        "enabled": true,
+        "notes": "Urban heat island effects"
+      }
+    }
+  ]
+}
+```
+
+### Benefits of Config-Driven Approach
+
+1. **Portability**: Same code works for Philippines, other countries, or custom regions
+2. **Experimentation**: Easy to test different hyperparameters without code changes
+3. **Versioning**: Config files can be versioned and tracked
+4. **Documentation**: Config serves as self-documenting specification
+5. **Deployment**: Different configs for dev/staging/production
+
+---
+
 ## Implementation Phases
 
-### Phase 1: Data Loading Enhancement
+### Phase 1: Configuration System
+**New File:** `config/lstm_config.json`
+**Modified:** `src/data/zones.json` (add lstm_config per zone)
+
+1. Create configuration schema
+2. Add config loader to Python trainer
+3. Add config loader to JavaScript inference
+4. Validate config on startup
+
+### Phase 2: Data Loading Enhancement
 **File:** `scripts/train_demand_lstm.py`
 
-1. Load `zones.json` to get city configurations
+1. Load zones from config-specified `zones.json`
 2. Load weather data for ALL cities per zone (not just first file)
 3. Merge weather by city index (city1, city2, etc.)
 4. Handle missing city data gracefully (fill with zone mean)
@@ -358,18 +462,26 @@ lr_scheduler = keras.callbacks.ReduceLROnPlateau(
 
 ## File Changes Summary
 
+### New Config Files
+| File | Purpose |
+|------|---------|
+| `config/lstm_config.json` | Training hyperparameters, paths, feature counts |
+| `config/lstm_config.schema.json` | JSON schema for validation (optional) |
+
 ### Modified Files
 | File | Changes |
 |------|---------|
-| `scripts/train_demand_lstm.py` | Rewrite with multi-city weather per zone |
-| `src/models/DemandLSTMInference.ts` | Update feature handling for V2 models |
+| `src/data/zones.json` | Add `lstm_config` section per zone |
+| `scripts/train_demand_lstm.py` | Rewrite with config-driven multi-city support |
+| `src/models/DemandLSTMInference.ts` | Config-driven feature handling |
 | `context.md` | Document implementation progress |
 
-### New Files
+### New Output Files
 | File | Purpose |
 |------|---------|
 | `models/lstm/lstm_*_v2.json` | Enhanced model weights for all 14 zones |
 | `models/lstm/city_weights.json` | Learned city importance per zone (for analysis) |
+| `models/lstm/training_config.json` | Copy of config used for training (reproducibility) |
 
 ---
 

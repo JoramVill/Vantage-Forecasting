@@ -1,0 +1,74 @@
+{
+  "version": "2.0",
+  "description": "Enhanced LSTM Demand Trainer Configuration - Multi-City Weather Learning",
+
+  "zones_file": "src/data/zones.json",
+
+  "feature_config": {
+    "weather_features_per_city": 8,
+    "aggregated_weather_features": 8,
+    "demand_features": 10,
+    "temporal_features": 18,
+    "calendar_features": 8,
+    "seasonal_features": 6,
+    "max_cities": 6,
+    "comment": "Total features: 6*8 + 8 + 10 + 18 + 8 + 6 = 98 for 6-city zones, 74 for 3-city zones"
+  },
+
+  "training": {
+    "sequence_length": 48,
+    "batch_size": 64,
+    "epochs": 100,
+    "early_stopping_patience": 10,
+    "learning_rate": 0.0005,
+    "validation_split": 0.2,
+    "test_split": 0.1,
+    "comment": "Train on 70%, validate on 20%, test on 10%"
+  },
+
+  "model": {
+    "lstm_layers": [64, 32],
+    "dense_layers": [32, 16],
+    "dropout": 0.2,
+    "recurrent_dropout": 0.1,
+    "correction_range": [0.85, 1.15],
+    "comment": "LSTM(64) -> LSTM(32) -> Dense(32) -> Dense(16) -> Output(1)"
+  },
+
+  "paths": {
+    "demand_data": "Data Samples/Demand",
+    "weather_cache": "weather_cache",
+    "output_models": "models/lstm",
+    "zones_config": "src/data/zones.json"
+  },
+
+  "holidays": {
+    "country": "PH",
+    "include_optional": true,
+    "comment": "Uses Python 'holidays' library for Philippines public and optional holidays"
+  },
+
+  "weather": {
+    "normalization": {
+      "temp_base": 20,
+      "temp_scale": 20,
+      "humidity_scale": 100,
+      "cloudcover_scale": 100,
+      "windspeed_scale": 50,
+      "solarradiation_scale": 1000
+    },
+    "comment": "temp_norm = (temp - 20) / 20, humidity_norm = humidity / 100"
+  },
+
+  "demand": {
+    "normalization_scale": 10000,
+    "comment": "demand_norm = demand / 10000"
+  },
+
+  "seasons": {
+    "wet_season": [6, 7, 8, 9, 10, 11],
+    "dry_hot_season": [3, 4, 5],
+    "dry_cool_season": [12, 1, 2],
+    "comment": "Philippine seasons - wet (Jun-Nov), dry hot (Mar-May), dry cool (Dec-Feb)"
+  }
+}
