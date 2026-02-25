@@ -34,7 +34,7 @@ const enableDemand = ref(true);
 const enableCfac = ref(true);
 const enableZonal = ref(false);
 const scalingPercent = ref(100);
-const cfacModel = ref<'hybrid' | 'legacy'>('hybrid'); // Hybrid (physics + ML) is the best performer
+const cfacModel = ref<'hybrid' | 'hybrid-lstm' | 'legacy'>('hybrid'); // Hybrid (physics + ML) is the best performer
 
 // Output naming settings
 const demandPrefix = ref('FC_DEM_');
@@ -121,7 +121,7 @@ onMounted(async () => {
     if (typeof settings.enableCfac === 'boolean') enableCfac.value = settings.enableCfac;
     if (typeof settings.enableZonal === 'boolean') enableZonal.value = settings.enableZonal;
     if (typeof settings.scalingPercent === 'number') scalingPercent.value = settings.scalingPercent;
-    if (settings.cfacModel === 'hybrid' || settings.cfacModel === 'legacy') cfacModel.value = settings.cfacModel;
+    if (settings.cfacModel === 'hybrid' || settings.cfacModel === 'hybrid-lstm' || settings.cfacModel === 'legacy') cfacModel.value = settings.cfacModel;
     // Migration: convert old 'lstm' setting to 'hybrid'
     if (settings.cfacModel === 'lstm') cfacModel.value = 'hybrid';
     // Output naming
@@ -453,7 +453,11 @@ async function runForecast() {
 
     // Run CFAC forecast
     if (enableCfac.value) {
-      const modelName = cfacModel.value === 'hybrid' ? 'Hybrid (Physics + ML)' : 'Legacy XGBoost';
+      const modelName = cfacModel.value === 'hybrid'
+        ? 'Hybrid (Physics + ML)'
+        : cfacModel.value === 'hybrid-lstm'
+        ? 'Hybrid + LSTM Correction'
+        : 'Legacy XGBoost';
       addStatus(`Starting Capacity Factor Forecast (${modelName})...`);
       if (!enableDemand.value) progress.value = 5;
 
@@ -462,8 +466,8 @@ async function runForecast() {
 
       let cfacResult;
 
-      if (cfacModel.value === 'hybrid') {
-        // Hybrid model (default) - physics + ML correction, best accuracy
+      if (cfacModel.value === 'hybrid' || cfacModel.value === 'hybrid-lstm') {
+        // Hybrid model - physics + ML correction, best accuracy
         cfacArgs = [
           'cfac', 'forecast2',
           '-t', dataSource.value === 'database' ? databasePath.value : cfacDataDir.value,
@@ -471,6 +475,11 @@ async function runForecast() {
           '-e', forecastEnd.value,
           '-o', `${cfacOutputDir.value}/${cfacFilename}`,
         ];
+
+        // Add LSTM correction flag if selected
+        if (cfacModel.value === 'hybrid-lstm') {
+          cfacArgs.push('--lstm-correction');
+        }
 
         if (dataSource.value === 'csv' && trainingEnd.value) {
           cfacArgs.push('--training-end', trainingEnd.value);
@@ -871,6 +880,7 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
               <label class="model-label">Model:</label>
               <select v-model="cfacModel" :disabled="isRunning" class="model-dropdown">
                 <option value="hybrid">Hybrid (Default)</option>
+                <option value="hybrid-lstm">Hybrid + LSTM Correction</option>
                 <option value="legacy">Legacy XGBoost</option>
               </select>
             </div>

@@ -31,6 +31,7 @@ import {
 import { Wind4TierMRECModel, MREC4TierFactors } from './Wind4TierMRECModel.js';
 import { CFacXGBoostRegressor } from './CFacXGBoostRegressor.js';
 import { getOptimalWindSpeed } from './WindWeatherHybridModel.js';
+import { WeatherCorrectionLSTM } from './WeatherCorrectionLSTM.js';
 
 export interface Wind4TierHybridMetrics {
   stationCode: string;
@@ -53,6 +54,7 @@ export class Wind4TierHybridModel {
   private residualModel: MultivariateLinearRegression | null = null;
   private xgboostModel: CFacXGBoostRegressor | null = null;
   private useXGBoost: boolean = false;
+  private lstmCorrector: WeatherCorrectionLSTM | null = null;
 
   // Feature names for debugging/logging
   private static readonly FEATURE_NAMES = [
@@ -319,7 +321,13 @@ export class Wind4TierHybridModel {
   /**
    * Predict capacity factor using 4-tier hybrid model
    */
-  predict(weather: CFacWeatherFeatures, _datetime?: Date): number {
+  predict(
+    weather: CFacWeatherFeatures,
+    _datetime?: Date,
+    weatherSequence?: CFacWeatherFeatures[],
+    hours?: number[],
+    months?: number[]
+  ): number {
     const windSpeed = this.getOptimalWindSpeedForStation(weather);
 
     // Get 4-tier MREC base prediction
@@ -342,6 +350,34 @@ export class Wind4TierHybridModel {
 
     // Combine
     let finalPred = mrecBase + residual;
+
+    // Apply LSTM correction if available and trained
+    if (this.lstmCorrector && this.lstmCorrector.isTrained() && weatherSequence && hours && months) {
+      // Build physics prediction sequence for LSTM
+      const physicsSequence = weatherSequence.map(w => {
+        const ws = this.getOptimalWindSpeedForStation(w);
+        const mrec = this.mrecModel.predict(ws);
+        const feat = this.buildRegionSpecificFeatures(mrec, w);
+        let res: number;
+        if (this.xgboostModel) {
+          res = this.xgboostModel.predict(feat);
+        } else if (this.residualModel) {
+          res = this.residualModel.predict([feat])[0][0];
+        } else {
+          res = 0;
+        }
+        return mrec + res;
+      });
+
+      const lstmCorrection = this.lstmCorrector.predict(
+        weatherSequence,
+        hours,
+        months,
+        physicsSequence
+      );
+
+      finalPred *= lstmCorrection;
+    }
 
     // High wind cutout
     if (finalPred > 1.1) {
@@ -392,6 +428,20 @@ export class Wind4TierHybridModel {
    */
   getFeatureNames(): string[] {
     return Wind4TierHybridModel.FEATURE_NAMES;
+  }
+
+  /**
+   * Set LSTM correction layer
+   */
+  setLSTMCorrector(corrector: WeatherCorrectionLSTM | null): void {
+    this.lstmCorrector = corrector;
+  }
+
+  /**
+   * Get LSTM correction layer
+   */
+  getLSTMCorrector(): WeatherCorrectionLSTM | null {
+    return this.lstmCorrector;
   }
 
   /**

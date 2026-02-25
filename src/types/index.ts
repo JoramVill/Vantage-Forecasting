@@ -242,7 +242,8 @@ export interface ZonalWeatherLocation {
   longitude: number;
 }
 
-// Zonal merged record - demand + weather from 3 cities
+// Zonal merged record - demand + weather from up to 6 cities
+// 01NLUZ has 6 cities (larger region), other zones have 3
 export interface ZonalMergedRecord {
   datetime: Date;
   zone: string;
@@ -251,5 +252,8 @@ export interface ZonalMergedRecord {
     city1: RawWeatherData;
     city2: RawWeatherData;
     city3: RawWeatherData;
+    city4?: RawWeatherData;  // Optional: only 01NLUZ has cities 4-6
+    city5?: RawWeatherData;
+    city6?: RawWeatherData;
   };
 }

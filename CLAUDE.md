@@ -152,6 +152,7 @@ These factors reduced weekend MAE from 500 MW to ~250 MW.
 ### Key Model Files
 **Demand:**
 - `src/models/hybridModel.ts` - Region-aware hybrid with statistical profiles + weekend correction
+- `src/models/DemandCorrectionLSTM.ts` - LSTM correction layer (optional, enabled with --lstm-correction flag)
 
 **Capacity Factor (Production - RECOMMENDED):**
 - `src/models/capacityFactor/WindEnhancedHybridModel.ts` - **BEST** Wind 4-Tier Hybrid (MREC + ML) ~73% MAPE
@@ -227,6 +228,23 @@ node dist/index.js forecast \
   --model hybrid
 ```
 
+**With LSTM correction layer (improved morning ramp dynamics):**
+```bash
+node dist/index.js forecast \
+  -d "Data Samples/Demand" \
+  -s 2025-12-01 \
+  -e 2025-12-31 \
+  -o output/demand_december.csv \
+  --model hybrid \
+  --lstm-correction
+```
+
+The LSTM correction layer improves temporal dynamics, particularly:
+- Morning ramp (6-9 AM) correlation
+- Evening ramp (5-7 PM) patterns
+- Peak timing accuracy
+- Day-type transitions (Friday→Saturday patterns)
+
 **With manual weather files:**
 ```bash
 node dist/index.js forecast \
@@ -245,10 +263,12 @@ node dist/index.js forecast \
 | `-e, --end <date>` | Forecast end date (required with auto-fetch) |
 | `-o, --output <file>` | Output CSV file (required) |
 | `--model <type>` | Model type: `xgboost`, `regression`, `hybrid` (default: hybrid) |
+| `--lstm-correction` | Enable LSTM correction layer for hybrid model (improves morning ramp) |
 | `--weather-hist <files...>` | Historical weather CSV files |
 | `--weather-forecast <files...>` | Forecast weather CSV files |
 | `--use-db` | Use database-stored model |
 | `--growth <rate>` | Daily growth rate adjustment (e.g., 0.001 for 0.1%) |
+| `--zonal` | Use 14-zone sub-region mode instead of 3 regions |
 
 ### 3. Train Demand Model
 

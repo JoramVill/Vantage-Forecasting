@@ -418,22 +418,35 @@ export function extractZonalFeatures(record: ZonalMergedRecord): Record<string, 
   features['hourSaturday'] = hour * features['isSaturday'];
   features['hourSunday'] = hour * features['isSunday'];
 
-  // === Per-city weather features (3 sets) ===
-  const cities = [record.weather.city1, record.weather.city2, record.weather.city3];
-  const suffixes = ['_c1', '_c2', '_c3'];
+  // === Per-city weather features (up to 6 sets for 01NLUZ, 3 for others) ===
+  // Build city array - include optional cities 4-6 if they exist
+  const cities: (typeof record.weather.city1 | undefined)[] = [
+    record.weather.city1,
+    record.weather.city2,
+    record.weather.city3,
+    record.weather.city4,  // Optional: only 01NLUZ
+    record.weather.city5,  // Optional: only 01NLUZ
+    record.weather.city6   // Optional: only 01NLUZ
+  ];
+  const suffixes = ['_c1', '_c2', '_c3', '_c4', '_c5', '_c6'];
 
-  for (let i = 0; i < 3; i++) {
+  // Track which cities exist for averaging
+  const cityCount = cities.filter(c => c !== undefined).length;
+
+  for (let i = 0; i < 6; i++) {
     const w = cities[i];
     const s = suffixes[i];
 
-    const temp = w.temp || 0;
-    const dew = w.dew || 0;
-    const precip = w.precip || 0;
-    const windgust = w.windgust || 0;
-    const windspeed = w.windspeed || 0;
-    const cloudcover = w.cloudcover || 0;
-    const solarradiation = w.solarradiation || 0;
-    const uvindex = w.uvindex || 0;
+    // For missing cities (4-6 for non-NLUZ zones), use 0 values
+    // The ML model will learn to ignore these zeros
+    const temp = w?.temp || 0;
+    const dew = w?.dew || 0;
+    const precip = w?.precip || 0;
+    const windgust = w?.windgust || 0;
+    const windspeed = w?.windspeed || 0;
+    const cloudcover = w?.cloudcover || 0;
+    const solarradiation = w?.solarradiation || 0;
+    const uvindex = w?.uvindex || 0;
 
     // Raw weather
     features[`temp${s}`] = temp;
@@ -446,39 +459,57 @@ export function extractZonalFeatures(record: ZonalMergedRecord): Record<string, 
     features[`uvindex${s}`] = uvindex;
 
     // Derived: Relative Humidity (Magnus formula)
-    const RH_NUM = Math.exp((17.27 * dew) / (237.3 + dew));
-    const RH_DEN = Math.exp((17.27 * temp) / (237.3 + temp));
-    features[`relativeHumidity${s}`] = RH_DEN > 0 ? 100 * (RH_NUM / RH_DEN) : 50;
+    if (w) {
+      const RH_NUM = Math.exp((17.27 * dew) / (237.3 + dew));
+      const RH_DEN = Math.exp((17.27 * temp) / (237.3 + temp));
+      features[`relativeHumidity${s}`] = RH_DEN > 0 ? 100 * (RH_NUM / RH_DEN) : 50;
 
-    // Derived: Heat Index (Rothfusz simplified)
-    const rh = features[`relativeHumidity${s}`];
-    if (temp >= 27) {
-      const HI = -8.78469476 + 1.61139411 * temp + 2.33854884 * rh
-        - 0.14611605 * temp * rh - 0.012308094 * temp * temp
-        - 0.0164248278 * rh * rh + 0.002211732 * temp * temp * rh
-        + 0.00072546 * temp * rh * rh - 0.000003582 * temp * temp * rh * rh;
-      features[`heatIndex${s}`] = HI;
+      // Derived: Heat Index (Rothfusz simplified)
+      const rh = features[`relativeHumidity${s}`];
+      if (temp >= 27) {
+        const HI = -8.78469476 + 1.61139411 * temp + 2.33854884 * rh
+          - 0.14611605 * temp * rh - 0.012308094 * temp * temp
+          - 0.0164248278 * rh * rh + 0.002211732 * temp * temp * rh
+          + 0.00072546 * temp * rh * rh - 0.000003582 * temp * temp * rh * rh;
+        features[`heatIndex${s}`] = HI;
+      } else {
+        features[`heatIndex${s}`] = temp;
+      }
+
+      // Derived: Cooling Degree Hours (base 24C for tropical Philippines)
+      features[`CDH${s}`] = Math.max(0, temp - 24);
     } else {
-      features[`heatIndex${s}`] = temp;
+      // Missing city: use 0 for derived features
+      features[`relativeHumidity${s}`] = 0;
+      features[`heatIndex${s}`] = 0;
+      features[`CDH${s}`] = 0;
     }
-
-    // Derived: Cooling Degree Hours (base 24C for tropical Philippines)
-    features[`CDH${s}`] = Math.max(0, temp - 24);
   }
 
-  // === Cross-city features ===
-  const temps = [features['temp_c1'], features['temp_c2'], features['temp_c3']];
-  const winds = [features['windspeed_c1'], features['windspeed_c2'], features['windspeed_c3']];
-  const clouds = [features['cloudcover_c1'], features['cloudcover_c2'], features['cloudcover_c3']];
-  const precips = [features['precip_c1'], features['precip_c2'], features['precip_c3']];
-  const solars = [features['solarradiation_c1'], features['solarradiation_c2'], features['solarradiation_c3']];
+  // Indicator for whether zone has 6 cities (helps model distinguish 01NLUZ)
+  features['has_6_cities'] = cityCount > 3 ? 1 : 0;
+
+  // === Cross-city features (using all available cities) ===
+  const temps: number[] = [];
+  const winds: number[] = [];
+  const clouds: number[] = [];
+  const precips: number[] = [];
+  const solars: number[] = [];
+
+  for (let i = 0; i < cityCount; i++) {
+    temps.push(features[`temp_c${i + 1}`]);
+    winds.push(features[`windspeed_c${i + 1}`]);
+    clouds.push(features[`cloudcover_c${i + 1}`]);
+    precips.push(features[`precip_c${i + 1}`]);
+    solars.push(features[`solarradiation_c${i + 1}`]);
+  }
 
   features['temp_spread'] = Math.max(...temps) - Math.min(...temps);
-  features['temp_avg'] = temps.reduce((a, b) => a + b, 0) / 3;
-  features['windspeed_avg'] = winds.reduce((a, b) => a + b, 0) / 3;
-  features['cloudcover_avg'] = clouds.reduce((a, b) => a + b, 0) / 3;
+  features['temp_avg'] = temps.reduce((a, b) => a + b, 0) / cityCount;
+  features['windspeed_avg'] = winds.reduce((a, b) => a + b, 0) / cityCount;
+  features['cloudcover_avg'] = clouds.reduce((a, b) => a + b, 0) / cityCount;
   features['precip_max'] = Math.max(...precips);
-  features['solarradiation_avg'] = solars.reduce((a, b) => a + b, 0) / 3;
+  features['solarradiation_avg'] = solars.reduce((a, b) => a + b, 0) / cityCount;
 
   return features;
 }

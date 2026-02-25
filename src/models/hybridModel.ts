@@ -2,6 +2,7 @@ import { DateTime } from 'luxon';
 import { FeatureVector, TrainingSample } from '../types/index.js';
 import { FEATURE_NAMES } from '../constants/index.js';
 import MultivariateLinearRegression from 'ml-regression-multivariate-linear';
+import { DemandCorrectionLSTM } from './DemandCorrectionLSTM.js';
 
 /**
  * Time period definitions for different demand drivers
@@ -74,6 +75,8 @@ export class HybridModel {
   private regionCharacteristics: Map<string, RegionCharacteristics> = new Map();
   private growthFactor: number = 0; // Daily growth rate (e.g., 0.0001 = 0.01% per day)
   private recentDaysCount: number = 7;
+  private lstmCorrectors: Map<string, DemandCorrectionLSTM> = new Map(); // One LSTM per region
+  private historicalSamples: Map<string, TrainingSample[]> = new Map(); // Track history for LSTM
 
   // Weekend correction factors learned from validation data
   // These correct for systematic over-forecasting on weekends (especially CLUZ)
@@ -519,6 +522,24 @@ export class HybridModel {
       }
     }
 
+    // Apply LSTM correction if available and trained for this region
+    const lstmCorrector = this.lstmCorrectors.get(region);
+    if (prediction !== undefined && lstmCorrector && lstmCorrector.isTrained()) {
+      const history = this.historicalSamples.get(region) || [];
+
+      // Create a dummy sample for the current prediction
+      // (We need this to extract features for LSTM)
+      const currentSample: TrainingSample = {
+        datetime: new Date(), // This should be set by the caller in real usage
+        region,
+        demand: 0, // Not used for prediction
+        features
+      };
+
+      const lstmCorrection = lstmCorrector.predict(history, currentSample, prediction);
+      prediction *= lstmCorrection;
+    }
+
     return prediction;
   }
 
@@ -675,5 +696,81 @@ export class HybridModel {
 
   setGrowthFactor(factor: number): void {
     this.growthFactor = factor;
+  }
+
+  /**
+   * Set LSTM corrector for a specific region
+   */
+  setLSTMCorrector(region: string, corrector: DemandCorrectionLSTM): void {
+    this.lstmCorrectors.set(region, corrector);
+  }
+
+  /**
+   * Get LSTM corrector for a specific region (if set)
+   */
+  getLSTMCorrector(region: string): DemandCorrectionLSTM | null {
+    return this.lstmCorrectors.get(region) || null;
+  }
+
+  /**
+   * Get all LSTM correctors
+   */
+  getAllLSTMCorrectors(): Map<string, DemandCorrectionLSTM> {
+    return this.lstmCorrectors;
+  }
+
+  /**
+   * Train LSTM correction layer for a specific region
+   * This should be called AFTER the hybrid model is trained
+   */
+  trainLSTMCorrection(samples: TrainingSample[], region: string, options?: any): void {
+    console.log(`  Training LSTM correction for ${region}...`);
+
+    // Create LSTM corrector
+    const lstmCorrector = new DemandCorrectionLSTM(region, options);
+
+    // Create hybrid predictor function
+    const hybridPredictor = (sample: TrainingSample): number => {
+      return this.predictForRegion(sample.features, sample.region) || 0;
+    };
+
+    // Train the LSTM
+    try {
+      const metrics = lstmCorrector.train(samples, hybridPredictor, options);
+      this.lstmCorrectors.set(region, lstmCorrector);
+      console.log(`    ✅ ${region}: MAPE=${metrics.validationMAPE.toFixed(2)}%, improvement=${metrics.improvementOverHybrid >= 0 ? '+' : ''}${metrics.improvementOverHybrid.toFixed(2)}%`);
+    } catch (error: any) {
+      console.error(`    ❌ ${region}: ${error.message}`);
+    }
+  }
+
+  /**
+   * Update historical samples for LSTM prediction
+   * Call this before predict() to maintain sequence history
+   */
+  updateHistoricalSamples(sample: TrainingSample): void {
+    const region = sample.region;
+    if (!this.historicalSamples.has(region)) {
+      this.historicalSamples.set(region, []);
+    }
+
+    const history = this.historicalSamples.get(region)!;
+    history.push(sample);
+
+    // Keep only last 48 hours for LSTM sequence
+    if (history.length > 48) {
+      history.shift();
+    }
+  }
+
+  /**
+   * Clear historical samples (useful when starting a new forecast)
+   */
+  clearHistoricalSamples(region?: string): void {
+    if (region) {
+      this.historicalSamples.delete(region);
+    } else {
+      this.historicalSamples.clear();
+    }
   }
 }

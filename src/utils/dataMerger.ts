@@ -109,13 +109,12 @@ export function mergeData(
 
 /**
  * Merge zonal demand data with weather from cities per zone.
- * Uses the first 3 cities (cityIndex 0, 1, 2) for each zone as city1/2/3.
- * Zones with more than 3 cities will have additional cities' weather stored
- * in the database but only the first 3 are used in the merged record.
+ * Uses up to 6 cities per zone (01NLUZ has 6, others have 3).
+ * All available cities are included to let ML/LSTM learn optimal weighting.
  *
  * @param demandRecords - Parsed demand records (zone codes as region)
  * @param weatherDataSets - Array of { city: string, locationId: string, zoneCode: string, cityIndex: number, records: RawWeatherData[] }
- * @returns ZonalMergedRecord[] - Merged records with first 3 cities' weather per zone
+ * @returns ZonalMergedRecord[] - Merged records with up to 6 cities' weather per zone
  */
 export function mergeZonalData(
   demandRecords: { datetime: Date; region: string; demand: number }[],
@@ -175,7 +174,7 @@ export function mergeZonalData(
     uvindex: 0
   };
 
-  // Merge: for each zone + timestamp, find demand + 3 city weathers
+  // Merge: for each zone + timestamp, find demand + up to 6 city weathers
   for (const zone of zoneCodes) {
     for (const ts of timestamps) {
       const demandKey = `${zone}_${ts}`;
@@ -187,12 +186,24 @@ export function mergeZonalData(
       const city2 = weatherMap.get(`${zone}_1_${ts}`) || { ...emptyWeather };
       const city3 = weatherMap.get(`${zone}_2_${ts}`) || { ...emptyWeather };
 
-      results.push({
+      // Cities 4-6 are optional (only 01NLUZ has 6 cities)
+      const city4 = weatherMap.get(`${zone}_3_${ts}`);
+      const city5 = weatherMap.get(`${zone}_4_${ts}`);
+      const city6 = weatherMap.get(`${zone}_5_${ts}`);
+
+      const record: ZonalMergedRecord = {
         datetime: new Date(ts),
         zone,
         demand,
         weather: { city1, city2, city3 }
-      });
+      };
+
+      // Add optional cities if they exist
+      if (city4) record.weather.city4 = city4;
+      if (city5) record.weather.city5 = city5;
+      if (city6) record.weather.city6 = city6;
+
+      results.push(record);
     }
   }
 

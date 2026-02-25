@@ -101,3 +101,7 @@ export type { SolarLSTMTrainingOptions, SolarLSTMModelMetrics } from './SolarLST
 // LSTM Forecaster Orchestrator
 export { LSTMForecaster } from './LSTMForecaster.js';
 export type { LSTMForecastOptions, LSTMForecastResult } from './LSTMForecaster.js';
+
+// LSTM Weather Correction Layer
+export { WeatherCorrectionLSTM } from './WeatherCorrectionLSTM.js';
+export type { CorrectionTrainingOptions, CorrectionMetrics } from './WeatherCorrectionLSTM.js';

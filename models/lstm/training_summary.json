@@ -1,0 +1,104 @@
+{
+  "zones": {
+    "01NLUZ": {
+      "val_loss": 0.11678306013345718,
+      "val_mae": 0.30044054985046387,
+      "epochs_trained": 17,
+      "training_samples": 3109,
+      "validation_samples": 778
+    },
+    "02METRO": {
+      "val_loss": 0.15480852127075195,
+      "val_mae": 0.353494793176651,
+      "epochs_trained": 15,
+      "training_samples": 3109,
+      "validation_samples": 778
+    },
+    "03SLUZ": {
+      "val_loss": 0.06487835943698883,
+      "val_mae": 0.20856021344661713,
+      "epochs_trained": 18,
+      "training_samples": 3109,
+      "validation_samples": 778
+    },
+    "04LEYTE": {
+      "val_loss": 0.17201964557170868,
+      "val_mae": 0.38199055194854736,
+      "epochs_trained": 29,
+      "training_samples": 3109,
+      "validation_samples": 778
+    },
+    "05CEBU": {
+      "val_loss": 0.13252925872802734,
+      "val_mae": 0.32434719800949097,
+      "epochs_trained": 22,
+      "training_samples": 3109,
+      "validation_samples": 778
+    },
+    "06NEGROS": {
+      "val_loss": 0.1572466343641281,
+      "val_mae": 0.362297385931015,
+      "epochs_trained": 11,
+      "training_samples": 3109,
+      "validation_samples": 778
+    },
+    "07BOHOL": {
+      "val_loss": 0.16555477678775787,
+      "val_mae": 0.3739868402481079,
+      "epochs_trained": 11,
+      "training_samples": 3109,
+      "validation_samples": 778
+    },
+    "08PANAY": {
+      "val_loss": 0.1407911628484726,
+      "val_mae": 0.336921751499176,
+      "epochs_trained": 11,
+      "training_samples": 3109,
+      "validation_samples": 778
+    },
+    "09NWMIN": {
+      "val_loss": 0.16322176158428192,
+      "val_mae": 0.37136900424957275,
+      "epochs_trained": 11,
+      "training_samples": 3109,
+      "validation_samples": 778
+    },
+    "10LANAO": {
+      "val_loss": 0.0765402540564537,
+      "val_mae": 0.23138317465782166,
+      "epochs_trained": 11,
+      "training_samples": 3109,
+      "validation_samples": 778
+    },
+    "11NCMIN": {
+      "val_loss": 0.08482998609542847,
+      "val_mae": 0.2401011884212494,
+      "epochs_trained": 18,
+      "training_samples": 3109,
+      "validation_samples": 778
+    },
+    "12NEMIN": {
+      "val_loss": 0.15724650025367737,
+      "val_mae": 0.36321425437927246,
+      "epochs_trained": 22,
+      "training_samples": 3109,
+      "validation_samples": 778
+    },
+    "13SEMIN": {
+      "val_loss": 0.1512947678565979,
+      "val_mae": 0.3538622260093689,
+      "epochs_trained": 23,
+      "training_samples": 3109,
+      "validation_samples": 778
+    },
+    "14SWMIN": {
+      "val_loss": 0.15884891152381897,
+      "val_mae": 0.36406612396240234,
+      "epochs_trained": 11,
+      "training_samples": 3109,
+      "validation_samples": 778
+    }
+  },
+  "trained_at": "2026-02-25T07:29:38.488772",
+  "total_zones": 14
+}

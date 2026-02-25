@@ -10,12 +10,13 @@ import { buildTrainingSamples, buildFeatureVector } from './features/index.js';
 import { RegressionModel } from './models/regressionModel.js';
 import { XGBoostModel } from './models/xgboostModel.js';
 import { HybridModel } from './models/hybridModel.js';
+import { DemandLSTMManager } from './models/DemandLSTMInference.js';
 import { writeForecastCsv, writeModelReport, writeMetricsSummary } from './writers/index.js';
 import { REGION_MAPPINGS, isPhilippineHoliday } from './constants/index.js';
 import { ForecastResult, TrainingSample, RawWeatherData } from './types/index.js';
 import { createWeatherService, DEFAULT_LOCATIONS, capacityFactorService, ClusterLocation } from './services/index.js';
 import { getDatabase, closeDatabase, DatabaseStats, StoredModel } from './database/index.js';
-import { ModelRouter, WindMRECModel, calibrateAllMREC, calibrateAllMRECCFBased, calibrateAllMRECMLOptimized, WindMRECHybridModel, trainAllMRECHybrid, WindWeatherHybridModel, trainAllWeatherHybrid, SolarMRECModel, calibrateAllSolarMREC, SolarHybridModel, SolarIrradianceModel, SolarMRECHybridModel, calibrateAllSolarMRECHybrid, SolarSeasonalMRECModel, calibrateAllSeasonalSolarMREC, WindShearModel, trainAllWindShear, WindCubicModel, calibrateAllCubic, WindWeibullModel, calibrateAllWeibull, WindBiasCorrectionModel, calibrateAllBiasCorrection, WindEnhancedHybridModel, trainAllEnhancedHybrid, BiasCorrector, Wind4TierHybridModel, trainAll4TierHybrid, WindPhysicsHybridModel, trainAllPhysicsHybrid } from './models/capacityFactor/index.js';
+import { ModelRouter, WindMRECModel, calibrateAllMREC, calibrateAllMRECCFBased, calibrateAllMRECMLOptimized, WindMRECHybridModel, trainAllMRECHybrid, WindWeatherHybridModel, trainAllWeatherHybrid, SolarMRECModel, calibrateAllSolarMREC, SolarHybridModel, SolarIrradianceModel, SolarMRECHybridModel, calibrateAllSolarMRECHybrid, SolarSeasonalMRECModel, calibrateAllSeasonalSolarMREC, WindShearModel, trainAllWindShear, WindCubicModel, calibrateAllCubic, WindWeibullModel, calibrateAllWeibull, WindBiasCorrectionModel, calibrateAllBiasCorrection, WindEnhancedHybridModel, trainAllEnhancedHybrid, BiasCorrector, Wind4TierHybridModel, trainAll4TierHybrid, WindPhysicsHybridModel, trainAllPhysicsHybrid, WeatherCorrectionLSTM } from './models/capacityFactor/index.js';
 import type { SolarMRECCalibrationData } from './models/capacityFactor/index.js';
 import { MRECCalibrationData, WindCFacMethodology } from './types/capacityFactor.js';
 import { CFacWeatherFeatures, StationType, getStationTypeFromCode, CFacForecastResult, CFacTrainingSample } from './types/capacityFactor.js';
@@ -196,6 +197,21 @@ async function runZonalForecast(options: any): Promise<void> {
     predictedDemand: model.predictForRegion(s.features, s.region) || s.demand
   }));
   model.learnWeekendCorrections(predictionData);
+
+  // Load pre-trained LSTM models if requested
+  let lstmManager: DemandLSTMManager | null = null;
+  if (options.lstmCorrection) {
+    console.log('\n🧠 Loading pre-trained LSTM correction models...');
+    lstmManager = new DemandLSTMManager('models/lstm');
+    const loadedCount = lstmManager.loadAllZones();
+    if (loadedCount === 0) {
+      console.log('  ⚠️ No LSTM models found. Train with: python scripts/train_demand_lstm.py --all');
+      console.log('  Continuing without LSTM correction...');
+      lstmManager = null;
+    } else {
+      console.log(`  Loaded ${loadedCount} zone models`);
+    }
+  }
 
   // Fetch weather for forecast period
   console.log('\n🌤️  Fetching weather data for forecast period...');
@@ -575,6 +591,7 @@ program
   .option('--scale-peak <percent>', 'Scale peak hour (09:00-21:00) forecasts by percentage')
   .option('--scale-offpeak <percent>', 'Scale off-peak hour (21:00-09:00) forecasts by percentage')
   .option('--growth <percent>', 'Daily demand growth rate for hybrid model (e.g., 0.01 for 0.01%/day)', '0')
+  .option('--lstm-correction', 'Enable LSTM correction layer for hybrid model (improves morning ramp dynamics)')
   .option('--cache <dir>', 'Weather cache directory', './weather_cache')
   .option('--use-db', 'Use demand data from database instead of file')
   .option('--train-days <days>', 'Number of days of historical data to use for training (default: 90)', '90')
@@ -699,6 +716,27 @@ program
           console.log(`  R² = ${result.r2Score.toFixed(4)}, MAPE = ${result.mape.toFixed(2)}%`);
           if (growthRate > 0) {
             console.log(`  📈 Growth factor: ${(growthRate * 100).toFixed(4)}% per day`);
+          }
+
+          // Train LSTM correction if requested
+          if (options.lstmCorrection) {
+            console.log('\n🧠 Training LSTM correction layers...');
+            const regions = [...new Set(samples.map(s => s.region))];
+            for (const region of regions) {
+              try {
+                (model as HybridModel).trainLSTMCorrection(samples, region, {
+                  sequenceLength: 48,
+                  hiddenUnits: [48, 24],
+                  learningRate: 0.005,
+                  epochs: 100,
+                  validationSplit: 0.2,
+                  earlyStoppingPatience: 15,
+                  log: false
+                });
+              } catch (error: any) {
+                console.error(`  ❌ Failed to train LSTM for ${region}: ${error.message}`);
+              }
+            }
           }
         } else {
           model = new XGBoostModel();
@@ -2117,6 +2155,7 @@ cfacCommand
   .option('--solar-seasonal-adaptive', 'Seasonal adaptive: trains separate dry/wet models, reduces ML weight in dry season (Nov-Apr)')
   .option('--no-wind-4tier', 'Disable 4-tier MREC wind model (use legacy enhanced-hybrid instead)')
   .option('--wind-4tier', 'Use 4-tier MREC for wind - DEFAULT (LOW/RAMP/RATED/HIGH regions, ~50% MAPE)')
+  .option('--lstm-correction', 'Enable LSTM correction layer for wind and solar (learns temporal weather patterns)')
   // NOTE: LSTM model option removed from production - experimental only via direct code modification
   .action(async (options) => {
     try {
@@ -2136,6 +2175,7 @@ cfacCommand
       const solarSeasonalAdaptive = options.solarSeasonalAdaptive || false;
       // 4-Tier wind model is now the default (50% MAPE vs 107% for enhanced-hybrid)
       const wind4Tier = options.noWind4tier !== true && options.no_wind_4tier !== true;
+      const lstmCorrection = options.lstmCorrection || false;
 
       // Parse scale factors (manual overrides)
       const scaleAll = parseFloat(options.scale) / 100;  // Convert percent to decimal
@@ -2209,6 +2249,9 @@ cfacCommand
       }
       if (asymmetricLoss) {
         console.log('   ASYMMETRIC LOSS: Under-predictions penalized 2x                               ');
+      }
+      if (lstmCorrection) {
+        console.log('   LSTM CORRECTION: Enabled (learns temporal weather patterns)                   ');
       }
       if (autoCalibrate) {
         console.log(`   AUTO-CALIBRATE: ${calibrationDays} days (${calibrationStartDate.toISODate()} to ${calibrationEndDate.toISODate()})`);
@@ -2906,6 +2949,103 @@ cfacCommand
 
         // Print detailed bias summary
         biasCorrector.printSummary((msg) => console.log(msg));
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════════
+      // TRAIN LSTM CORRECTION LAYERS (if enabled)
+      // ═══════════════════════════════════════════════════════════════════════════
+
+      if (lstmCorrection) {
+        console.log('\n🧠 Training LSTM correction layers...');
+
+        // Train LSTM correctors for wind stations
+        if (wind4Tier && wind4TierModels) {
+          console.log('   Training Wind LSTM correctors...');
+          for (const [stationCode, model] of wind4TierModels) {
+            const stationSamples = windTrainingSamples.filter(s => s.stationCode === stationCode);
+            if (stationSamples.length < 100) {
+              console.log(`      ⚠️  ${stationCode}: Insufficient samples (${stationSamples.length}), skipping LSTM`);
+              continue;
+            }
+
+            try {
+              const lstmCorrector = new WeatherCorrectionLSTM(stationCode, 'wind');
+              const metrics = lstmCorrector.train(
+                stationSamples,
+                (sample) => model.predict(sample.weather, sample.datetime),
+                { log: false, epochs: 50 }
+              );
+
+              if (metrics.improvementOverHybrid > 0) {
+                model.setLSTMCorrector(lstmCorrector);
+                console.log(`      ✅ ${stationCode}: MAPE ${metrics.validationMAPE.toFixed(1)}% (${metrics.improvementOverHybrid >= 0 ? '+' : ''}${metrics.improvementOverHybrid.toFixed(1)}% improvement)`);
+              } else {
+                console.log(`      ⚠️  ${stationCode}: LSTM degraded performance (${metrics.improvementOverHybrid.toFixed(1)}%), skipping`);
+              }
+            } catch (error: any) {
+              console.log(`      ❌ ${stationCode}: LSTM training failed - ${error.message}`);
+            }
+          }
+        } else if (windHybridModels) {
+          console.log('   Training Wind LSTM correctors...');
+          for (const [stationCode, model] of windHybridModels) {
+            const stationSamples = windTrainingSamples.filter(s => s.stationCode === stationCode);
+            if (stationSamples.length < 100) {
+              console.log(`      ⚠️  ${stationCode}: Insufficient samples (${stationSamples.length}), skipping LSTM`);
+              continue;
+            }
+
+            try {
+              const lstmCorrector = new WeatherCorrectionLSTM(stationCode, 'wind');
+              const metrics = lstmCorrector.train(
+                stationSamples,
+                (sample) => model.predict(sample.weather, sample.datetime),
+                { log: false, epochs: 50 }
+              );
+
+              if (metrics.improvementOverHybrid > 0) {
+                model.setLSTMCorrector(lstmCorrector);
+                console.log(`      ✅ ${stationCode}: MAPE ${metrics.validationMAPE.toFixed(1)}% (${metrics.improvementOverHybrid >= 0 ? '+' : ''}${metrics.improvementOverHybrid.toFixed(1)}% improvement)`);
+              } else {
+                console.log(`      ⚠️  ${stationCode}: LSTM degraded performance (${metrics.improvementOverHybrid.toFixed(1)}%), skipping`);
+              }
+            } catch (error: any) {
+              console.log(`      ❌ ${stationCode}: LSTM training failed - ${error.message}`);
+            }
+          }
+        }
+
+        // Train LSTM correctors for solar stations
+        if (solarHybridModels.size > 0) {
+          console.log('   Training Solar LSTM correctors...');
+          for (const [stationCode, model] of solarHybridModels) {
+            const stationSamples = allSolarSamples.filter(s => s.stationCode === stationCode);
+            if (stationSamples.length < 100) {
+              console.log(`      ⚠️  ${stationCode}: Insufficient samples (${stationSamples.length}), skipping LSTM`);
+              continue;
+            }
+
+            try {
+              const lstmCorrector = new WeatherCorrectionLSTM(stationCode, 'solar');
+              const metrics = lstmCorrector.train(
+                stationSamples,
+                (sample) => model.predict(sample.weather, sample.datetime),
+                { log: false, epochs: 50 }
+              );
+
+              if (metrics.improvementOverHybrid > 0) {
+                model.setLSTMCorrector(lstmCorrector);
+                console.log(`      ✅ ${stationCode}: MAPE ${metrics.validationMAPE.toFixed(1)}% (${metrics.improvementOverHybrid >= 0 ? '+' : ''}${metrics.improvementOverHybrid.toFixed(1)}% improvement)`);
+              } else {
+                console.log(`      ⚠️  ${stationCode}: LSTM degraded performance (${metrics.improvementOverHybrid.toFixed(1)}%), skipping`);
+              }
+            } catch (error: any) {
+              console.log(`      ❌ ${stationCode}: LSTM training failed - ${error.message}`);
+            }
+          }
+        }
+
+        console.log('   ✅ LSTM correction training complete');
       }
 
       // ═══════════════════════════════════════════════════════════════════════════
