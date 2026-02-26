@@ -430,6 +430,25 @@ CREATE INDEX IF NOT EXISTS idx_wind_cfac_datetime ON wind_cfac_history(datetime)
 CREATE INDEX IF NOT EXISTS idx_wind_cfac_station ON wind_cfac_history(station_code);
 CREATE INDEX IF NOT EXISTS idx_wind_cfac_datetime_station ON wind_cfac_history(datetime, station_code);
 
+-- Historical capacity factor data for ALL station types (wind, solar, hydro, etc.)
+-- Used for training CFAC models from database instead of CSV files
+CREATE TABLE IF NOT EXISTS cfac_records (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  datetime TEXT NOT NULL,
+  station_code TEXT NOT NULL,
+  station_type TEXT,                -- wind, solar, hydro, geothermal, biomass, battery
+  capacity_factor REAL NOT NULL,    -- 0.0 to 1.0
+  source_file TEXT,
+  imported_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(datetime, station_code)
+);
+
+-- Indexes for cfac_records
+CREATE INDEX IF NOT EXISTS idx_cfac_records_datetime ON cfac_records(datetime);
+CREATE INDEX IF NOT EXISTS idx_cfac_records_station ON cfac_records(station_code);
+CREATE INDEX IF NOT EXISTS idx_cfac_records_type ON cfac_records(station_type);
+CREATE INDEX IF NOT EXISTS idx_cfac_records_datetime_station ON cfac_records(datetime, station_code);
+
 -- ============================================
 -- SCHEDULED FORECAST SERVICE TABLES
 -- ============================================

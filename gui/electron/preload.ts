@@ -58,6 +58,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Import data to database
   importToDatabase: (options: { dbPath: string; dataType: 'demand' | 'cfac' | 'weather'; sourcePath: string }) =>
     ipcRenderer.invoke('import-to-database', options),
+
+  // List trained calibration models
+  listTrainedModels: () =>
+    ipcRenderer.invoke('list-trained-models'),
 });
 
 // Type declaration for window.electronAPI
@@ -103,6 +107,11 @@ declare global {
         message: string;
         stdout?: string;
         stderr?: string;
+      }>;
+      listTrainedModels: () => Promise<{
+        success: boolean;
+        message?: string;
+        models?: { name: string; date: string; mape?: number }[];
       }>;
     };
   }

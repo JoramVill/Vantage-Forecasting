@@ -15,7 +15,7 @@ const weatherDirStatus = ref<{ valid: boolean; message: string } | null>(null);
 
 // Database info
 const databaseInfo = ref<{
-  demand?: { records: number; range?: string | { start: string; end: string } | null } | null;
+  demand?: { records: number; range?: string | { start: string; end: string } | null; regions?: string[] } | null;
   cfac?: { records: number; range?: string | null } | null;
   weather?: { records: number; range?: string | null } | null;
 } | null>(null);
@@ -35,6 +35,13 @@ const enableCfac = ref(true);
 const enableZonal = ref(false);
 const scalingPercent = ref(100);
 const cfacModel = ref<'hybrid' | 'hybrid-lstm' | 'legacy'>('hybrid'); // Hybrid (physics + ML) is the best performer
+const demandModel = ref<'hybrid' | 'hybrid-calibrated'>('hybrid-calibrated'); // Hybrid + XGBoost calibration is best (4.77% MAPE)
+
+// Calibration settings (for hybrid-calibrated mode)
+const calibrationMode = ref<'auto' | 'saved'>('auto'); // auto = train on-the-fly, saved = use saved model
+const selectedCalibrator = ref<string>('');
+const availableCalibratorModels = ref<{ name: string; date: string; mape?: number }[]>([]);
+const saveCalibrator = ref(false); // Save after auto-training
 
 // Output naming settings
 const demandPrefix = ref('FC_DEM_');
@@ -76,6 +83,11 @@ function saveSettings() {
     enableZonal: enableZonal.value,
     scalingPercent: scalingPercent.value,
     cfacModel: cfacModel.value,
+    demandModel: demandModel.value,
+    // Calibration settings
+    calibrationMode: calibrationMode.value,
+    selectedCalibrator: selectedCalibrator.value,
+    saveCalibrator: saveCalibrator.value,
     // Output naming
     demandPrefix: demandPrefix.value,
     demandZonalPrefix: demandZonalPrefix.value,
@@ -88,7 +100,7 @@ function saveSettings() {
 }
 
 // Watch for settings changes and persist them
-watch([dataSource, databasePath, demandDataDir, cfacDataDir, weatherDataDir, demandOutputDir, cfacOutputDir, enableDemand, enableCfac, enableZonal, scalingPercent, cfacModel, demandPrefix, demandZonalPrefix, cfacPrefix, outputSuffix, useCustomName, customDemandName, customCfacName], () => {
+watch([dataSource, databasePath, demandDataDir, cfacDataDir, weatherDataDir, demandOutputDir, cfacOutputDir, enableDemand, enableCfac, enableZonal, scalingPercent, cfacModel, demandModel, calibrationMode, selectedCalibrator, saveCalibrator, demandPrefix, demandZonalPrefix, cfacPrefix, outputSuffix, useCustomName, customDemandName, customCfacName], () => {
   saveSettings();
 });
 
@@ -124,6 +136,11 @@ onMounted(async () => {
     if (settings.cfacModel === 'hybrid' || settings.cfacModel === 'hybrid-lstm' || settings.cfacModel === 'legacy') cfacModel.value = settings.cfacModel;
     // Migration: convert old 'lstm' setting to 'hybrid'
     if (settings.cfacModel === 'lstm') cfacModel.value = 'hybrid';
+    if (settings.demandModel === 'hybrid' || settings.demandModel === 'hybrid-calibrated') demandModel.value = settings.demandModel;
+    // Calibration settings
+    if (settings.calibrationMode) calibrationMode.value = settings.calibrationMode;
+    if (settings.selectedCalibrator) selectedCalibrator.value = settings.selectedCalibrator;
+    if (settings.saveCalibrator !== undefined) saveCalibrator.value = settings.saveCalibrator;
     // Output naming
     if (settings.demandPrefix) demandPrefix.value = settings.demandPrefix;
     if (settings.demandZonalPrefix) demandZonalPrefix.value = settings.demandZonalPrefix;
@@ -140,6 +157,9 @@ onMounted(async () => {
   } catch (e) {
     console.error('Failed to load settings:', e);
   }
+
+  // Load available calibrator models
+  loadCalibratorModels();
 
   // Set up real-time output listener
   window.electronAPI.onCommandOutput((data) => {
@@ -426,14 +446,32 @@ async function runForecast() {
         '--model', 'hybrid',
       ];
 
+      // Add database flag if using database mode
+      if (dataSource.value === 'database') {
+        demandArgs.push('--use-db');
+      }
+
       // Add zonal flag if enabled
       if (enableZonal.value) {
         demandArgs.push('--zonal');
       }
 
-      if (dataSource.value === 'csv' && trainingStart.value && trainingEnd.value) {
+      // Add training dates for auto-train mode
+      if (calibrationMode.value === 'auto' && dataSource.value === 'csv' && trainingStart.value && trainingEnd.value) {
         demandArgs.push('--training-start', trainingStart.value);
         demandArgs.push('--training-end', trainingEnd.value);
+      }
+
+      // Calibration options
+      if (demandModel.value === 'hybrid-calibrated') {
+        if (calibrationMode.value === 'saved' && selectedCalibrator.value) {
+          demandArgs.push('--load-calibrator', `models/calibrator/${selectedCalibrator.value}.json`);
+        } else if (saveCalibrator.value) {
+          const modelName = `calibrator_${new Date().toISOString().split('T')[0]}`;
+          demandArgs.push('--save-calibrator', `models/calibrator/${modelName}.json`);
+        }
+      } else {
+        demandArgs.push('--no-calibrate');
       }
 
       const demandResult = await window.electronAPI.runCommand(demandArgs);
@@ -470,18 +508,23 @@ async function runForecast() {
         // Hybrid model - physics + ML correction, best accuracy
         cfacArgs = [
           'cfac', 'forecast2',
-          '-t', dataSource.value === 'database' ? databasePath.value : cfacDataDir.value,
+          '-t', cfacDataDir.value,
           '-s', forecastStart.value,
           '-e', forecastEnd.value,
           '-o', `${cfacOutputDir.value}/${cfacFilename}`,
         ];
+
+        // Add database mode flag if using database
+        if (dataSource.value === 'database') {
+          cfacArgs.push('--use-db', '--db', databasePath.value);
+        }
 
         // Add LSTM correction flag if selected
         if (cfacModel.value === 'hybrid-lstm') {
           cfacArgs.push('--lstm-correction');
         }
 
-        if (dataSource.value === 'csv' && trainingEnd.value) {
+        if (trainingEnd.value) {
           cfacArgs.push('--training-end', trainingEnd.value);
         }
 
@@ -490,7 +533,7 @@ async function runForecast() {
         // Legacy model - use cfac forecast2 with XGBoost
         cfacArgs = [
           'cfac', 'forecast2',
-          '-t', dataSource.value === 'database' ? databasePath.value : cfacDataDir.value,
+          '-t', cfacDataDir.value,
           '-s', forecastStart.value,
           '-e', forecastEnd.value,
           '-o', `${cfacOutputDir.value}/${cfacFilename}`,
@@ -499,7 +542,12 @@ async function runForecast() {
           '--bias-correction',
         ];
 
-        if (dataSource.value === 'csv' && trainingEnd.value) {
+        // Add database mode flag if using database
+        if (dataSource.value === 'database') {
+          cfacArgs.push('--use-db', '--db', databasePath.value);
+        }
+
+        if (trainingEnd.value) {
           cfacArgs.push('--training-end', trainingEnd.value);
         }
 
@@ -541,6 +589,24 @@ function resetProgress() {
   progress.value = 0;
   currentStatus.value = '';
   statusHistory.value = [];
+}
+
+// Load available calibrator models
+async function loadCalibratorModels() {
+  try {
+    const result = await window.electronAPI.listTrainedModels();
+    if (result.success && result.models) {
+      availableCalibratorModels.value = result.models;
+      if (result.models.length > 0 && !selectedCalibrator.value) {
+        selectedCalibrator.value = result.models[0].name;
+      }
+    } else {
+      availableCalibratorModels.value = [];
+    }
+  } catch (e) {
+    console.error('Failed to load calibrator models:', e);
+    availableCalibratorModels.value = [];
+  }
 }
 
 // Generate output filename based on naming settings
@@ -822,13 +888,45 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
         </div>
       </section>
 
-      <!-- Date Ranges Section -->
+      <!-- Forecast Period Section -->
       <section class="card">
-        <h2>Date Ranges</h2>
-        <div class="date-grid">
-          <div class="date-section">
+        <h2>Forecast Period</h2>
+        <p class="hint">Dates to generate predictions for</p>
+        <div class="date-row">
+          <div class="form-group">
+            <label>Start</label>
+            <input type="date" v-model="forecastStart" :disabled="isRunning" />
+          </div>
+          <div class="form-group">
+            <label>End</label>
+            <input type="date" v-model="forecastEnd" :disabled="isRunning" />
+          </div>
+        </div>
+      </section>
+
+      <!-- Model Training Section -->
+      <section class="card">
+        <h2>Model Training</h2>
+        <p class="hint">Configure how models are calibrated for forecasting</p>
+
+        <div class="training-mode-container">
+          <div class="calibration-mode-row">
+            <label class="radio-label">
+              <input type="radio" v-model="calibrationMode" value="auto" :disabled="isRunning" />
+              <span>Auto-train</span>
+              <span class="hint-inline">(train on historical data)</span>
+            </label>
+            <label class="radio-label">
+              <input type="radio" v-model="calibrationMode" value="saved" :disabled="isRunning || availableCalibratorModels.length === 0" />
+              <span>Use saved model</span>
+              <span v-if="availableCalibratorModels.length === 0" class="hint-inline">(no models available)</span>
+            </label>
+          </div>
+
+          <!-- Training Period (when auto-train selected) -->
+          <div v-if="calibrationMode === 'auto'" class="training-period-section">
             <h3>Training Period</h3>
-            <p class="hint">Historical data used for model calibration</p>
+            <p class="hint">Historical data range used to train calibration models</p>
             <div class="date-row">
               <div class="form-group">
                 <label>Start</label>
@@ -839,20 +937,22 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
                 <input type="date" v-model="trainingEnd" :disabled="isRunning" />
               </div>
             </div>
-          </div>
-          <div class="date-section">
-            <h3>Forecast Period</h3>
-            <p class="hint">Dates to generate predictions for</p>
-            <div class="date-row">
-              <div class="form-group">
-                <label>Start</label>
-                <input type="date" v-model="forecastStart" :disabled="isRunning" />
-              </div>
-              <div class="form-group">
-                <label>End</label>
-                <input type="date" v-model="forecastEnd" :disabled="isRunning" />
-              </div>
+            <div class="save-option">
+              <label class="checkbox-label">
+                <input type="checkbox" v-model="saveCalibrator" :disabled="isRunning" />
+                <span>Save trained model for future use</span>
+              </label>
             </div>
+          </div>
+
+          <!-- Saved Model Selector (when using saved) -->
+          <div v-if="calibrationMode === 'saved'" class="saved-model-section">
+            <h3>Select Calibration Model</h3>
+            <select v-model="selectedCalibrator" :disabled="isRunning" class="calibrator-dropdown-full">
+              <option v-for="model in availableCalibratorModels" :key="model.name" :value="model.name">
+                {{ model.name }} ({{ model.date }}){{ model.mape ? ` - MAPE: ${model.mape.toFixed(2)}%` : '' }}
+              </option>
+            </select>
           </div>
         </div>
       </section>
@@ -868,6 +968,13 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
               <span class="toggle-label">Demand Forecast</span>
             </label>
             <p class="hint">Regional electricity demand</p>
+            <div v-if="enableDemand" class="model-select">
+              <label class="model-label">Model:</label>
+              <select v-model="demandModel" :disabled="isRunning" class="model-dropdown">
+                <option value="hybrid-calibrated">Hybrid + Calibration (Best)</option>
+                <option value="hybrid">Hybrid Only</option>
+              </select>
+            </div>
           </div>
           <div class="toggle-group">
             <label class="toggle">
@@ -971,6 +1078,7 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
         </button>
       </section>
     </main>
+
   </div>
 </template>
 
@@ -1333,6 +1441,88 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 
 .hint-error {
   color: #dc2626;
+}
+
+/* Model Training Section */
+.training-mode-container {
+  padding: 16px;
+  background: #f8fafc;
+  border-radius: 8px;
+}
+
+.calibration-mode-row {
+  display: flex;
+  gap: 24px;
+  margin-bottom: 16px;
+}
+
+.hint-inline {
+  font-size: 0.75rem;
+  color: #64748b;
+  margin-left: 4px;
+}
+
+.training-period-section {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.training-period-section h3 {
+  font-size: 0.9rem;
+  margin-bottom: 4px;
+}
+
+.saved-model-section {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.saved-model-section h3 {
+  font-size: 0.9rem;
+  margin-bottom: 8px;
+}
+
+.calibrator-dropdown-full {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  font-size: 0.875rem;
+  background: white;
+  color: #334155;
+  cursor: pointer;
+}
+
+.calibrator-dropdown-full:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.calibrator-dropdown-full:disabled {
+  background: #f1f5f9;
+  cursor: not-allowed;
+}
+
+.save-option {
+  margin-top: 12px;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 0.875rem;
+  color: #334155;
+}
+
+.checkbox-label input {
+  width: 16px;
+  height: 16px;
+  accent-color: #3b82f6;
 }
 
 .date-grid {
@@ -1765,5 +1955,263 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
   .output-dirs {
     grid-template-columns: 1fr;
   }
+}
+
+/* Train button */
+.btn-train {
+  padding: 4px 10px;
+  font-size: 0.7rem;
+  background: #10b981;
+  color: white;
+  border-radius: 4px;
+  margin-left: 8px;
+}
+
+.btn-train:hover:not(:disabled) {
+  background: #059669;
+}
+
+.btn-train:disabled {
+  background: #9ca3af;
+  cursor: not-allowed;
+}
+
+/* Modal styles */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal {
+  background: white;
+  border-radius: 12px;
+  width: 90%;
+  max-width: 600px;
+  max-height: 90vh;
+  overflow-y: auto;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20px 24px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.modal-header h2 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #1e293b;
+  margin: 0;
+}
+
+.modal-close {
+  background: none;
+  border: none;
+  font-size: 1.5rem;
+  color: #64748b;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+}
+
+.modal-close:hover:not(:disabled) {
+  color: #1e293b;
+}
+
+.modal-close:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.modal-body {
+  padding: 24px;
+}
+
+.modal-body h3 {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #334155;
+  margin-bottom: 4px;
+  margin-top: 16px;
+}
+
+.modal-body h3:first-child {
+  margin-top: 0;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 16px 24px;
+  border-top: 1px solid #e2e8f0;
+  background: #f8fafc;
+  border-radius: 0 0 12px 12px;
+}
+
+/* Training mode toggle */
+.training-mode-section {
+  margin-bottom: 20px;
+}
+
+.training-mode-toggle {
+  display: flex;
+  gap: 24px;
+  padding: 12px 16px;
+  background: #f8fafc;
+  border-radius: 8px;
+}
+
+/* Training options */
+.training-options-section .date-row {
+  display: flex;
+  gap: 16px;
+  margin-top: 12px;
+  margin-bottom: 16px;
+}
+
+.training-options-section .date-row .form-group {
+  flex: 1;
+  margin-bottom: 0;
+}
+
+.params-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  margin-top: 12px;
+}
+
+.params-grid .form-group {
+  margin-bottom: 0;
+}
+
+.params-grid input {
+  text-align: center;
+}
+
+/* Existing model section */
+.existing-model-section {
+  margin-top: 16px;
+}
+
+.model-list {
+  margin-top: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.model-option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  cursor: pointer;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.model-option:last-child {
+  border-bottom: none;
+}
+
+.model-option:hover {
+  background: #f8fafc;
+}
+
+.model-option input {
+  width: 18px;
+  height: 18px;
+  accent-color: #3b82f6;
+}
+
+.model-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.model-name {
+  font-weight: 500;
+  color: #334155;
+}
+
+.model-date {
+  font-size: 0.75rem;
+  color: #64748b;
+}
+
+.model-mape {
+  font-size: 0.75rem;
+  color: #10b981;
+  font-weight: 500;
+}
+
+.no-models {
+  padding: 24px;
+  text-align: center;
+  color: #64748b;
+  background: #f8fafc;
+  border-radius: 8px;
+  margin-top: 12px;
+}
+
+/* Training progress */
+.training-progress-section {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.training-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: #f0f9ff;
+  border-radius: 8px;
+  color: #0369a1;
+  font-size: 0.875rem;
+  margin-top: 8px;
+}
+
+.spinner-small {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(3, 105, 161, 0.3);
+  border-top-color: #0369a1;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.training-logs {
+  margin-top: 12px;
+  padding: 12px;
+  background: #1e293b;
+  border-radius: 8px;
+  max-height: 150px;
+  overflow-y: auto;
+  font-family: monospace;
+  font-size: 0.75rem;
+}
+
+.log-line {
+  color: #94a3b8;
+  line-height: 1.5;
+}
+
+.log-line:last-child {
+  color: #f1f5f9;
 }
 </style>

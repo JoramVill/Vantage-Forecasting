@@ -1012,14 +1012,40 @@ export class WeatherService {
     windClusterIds?: Set<string>
   ): Promise<Map<string, string>> {
     const results = new Map<string, string>();
+    const totalClusters = clusters.length;
+    const windCount = windClusterIds?.size || 0;
+    const dates = this.getDateRange(startDate, endDate);
+    const totalDays = dates.length;
+
+    // Show detailed header
+    onProgress?.(`   Clusters: ${totalClusters} locations (${windCount} wind, ${totalClusters - windCount} other)`);
+    onProgress?.(`   Period: ${startDate} to ${endDate} (${totalDays} days)`);
+    onProgress?.(`   Expected API calls: up to ${totalClusters * totalDays} (cached data will be skipped)`);
+
+    let totalCached = 0;
+    let totalDownloaded = 0;
+    let totalRefreshed = 0;
+    let processedCount = 0;
 
     for (const cluster of clusters) {
+      processedCount++;
       const isWindCluster = windClusterIds?.has(cluster.clusterId) || false;
+      const clusterType = isWindCluster ? '[WIND 100m]' : '[STANDARD]';
+
+      onProgress?.(`   [${processedCount}/${totalClusters}] ${cluster.clusterId} ${clusterType} @ ${cluster.latitude.toFixed(4)}, ${cluster.longitude.toFixed(4)}`);
+
       const result = await this.fetchClusterWeatherData(cluster, startDate, endDate, onProgress, isWindCluster);
       if (result.success && result.data) {
         results.set(cluster.clusterId, result.data);
+        totalCached += result.cached || 0;
+        totalDownloaded += result.downloaded || 0;
+        totalRefreshed += result.refreshed || 0;
       }
     }
+
+    // Show summary
+    onProgress?.(`   Summary: ${totalCached} cached, ${totalDownloaded} downloaded, ${totalRefreshed} refreshed`);
+    onProgress?.(`   Successfully fetched: ${results.size}/${totalClusters} clusters`);
 
     return results;
   }

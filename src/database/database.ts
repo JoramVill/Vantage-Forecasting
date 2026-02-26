@@ -1521,6 +1521,169 @@ export class DatabaseService {
     }
   }
 
+  // ============ CAPACITY FACTOR RECORDS (All station types) ============
+
+  /**
+   * Import capacity factor records from parsed CSV
+   * Used for training CFAC models from database
+   * Uses batch processing to handle large datasets (600k+ records)
+   */
+  importCfacRecords(
+    records: Array<{
+      datetime: Date | string;
+      stationCode: string;
+      capacityFactor: number;
+      stationType?: string;
+    }>,
+    sourceFile?: string
+  ): { inserted: number; updated: number } {
+    let inserted = 0;
+    let updated = 0;
+
+    const insert = this.db.prepare(`
+      INSERT INTO cfac_records (datetime, station_code, station_type, capacity_factor, source_file)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(datetime, station_code) DO UPDATE SET
+        capacity_factor = excluded.capacity_factor,
+        station_type = excluded.station_type,
+        source_file = excluded.source_file
+    `);
+
+    // Process in batches to avoid stack overflow with large datasets
+    const BATCH_SIZE = 10000;
+    const totalBatches = Math.ceil(records.length / BATCH_SIZE);
+
+    for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+      const start = batchIndex * BATCH_SIZE;
+      const end = Math.min(start + BATCH_SIZE, records.length);
+      const batch = records.slice(start, end);
+
+      const transaction = this.db.transaction(() => {
+        for (const record of batch) {
+          const datetime = record.datetime instanceof Date
+            ? DateTime.fromJSDate(record.datetime).toISO()
+            : record.datetime;
+
+          const result = insert.run(
+            datetime,
+            record.stationCode,
+            record.stationType || null,
+            record.capacityFactor,
+            sourceFile || null
+          );
+
+          if (result.changes > 0) {
+            inserted++;
+          }
+        }
+      });
+
+      transaction();
+    }
+
+    return { inserted, updated };
+  }
+
+  /**
+   * Get capacity factor records for training/calibration
+   */
+  getCfacRecords(
+    startDate?: string,
+    endDate?: string,
+    stationCode?: string,
+    stationType?: string
+  ): Array<{
+    datetime: Date;
+    stationCode: string;
+    stationType: string | null;
+    capacityFactor: number;
+  }> {
+    let sql = 'SELECT * FROM cfac_records WHERE 1=1';
+    const params: any[] = [];
+
+    if (startDate) {
+      sql += ' AND datetime >= ?';
+      params.push(startDate);
+    }
+    if (endDate) {
+      sql += ' AND datetime <= ?';
+      params.push(endDate);
+    }
+    if (stationCode) {
+      sql += ' AND station_code = ?';
+      params.push(stationCode);
+    }
+    if (stationType) {
+      sql += ' AND station_type = ?';
+      params.push(stationType);
+    }
+
+    sql += ' ORDER BY datetime, station_code';
+
+    const rows = this.db.prepare(sql).all(...params) as any[];
+    return rows.map(row => ({
+      datetime: new Date(row.datetime),
+      stationCode: row.station_code,
+      stationType: row.station_type,
+      capacityFactor: row.capacity_factor
+    }));
+  }
+
+  /**
+   * Get unique station codes from CFAC records
+   */
+  getCfacStations(): string[] {
+    const rows = this.db.prepare(`
+      SELECT DISTINCT station_code FROM cfac_records ORDER BY station_code
+    `).all() as any[];
+    return rows.map(r => r.station_code);
+  }
+
+  /**
+   * Get CFAC records statistics
+   */
+  getCfacStats(): {
+    totalRecords: number;
+    stations: number;
+    dateRange: { start: string | null; end: string | null };
+    byType: { type: string; count: number }[];
+  } {
+    const total = (this.db.prepare('SELECT COUNT(*) as count FROM cfac_records').get() as any).count;
+    const stations = (this.db.prepare('SELECT COUNT(DISTINCT station_code) as count FROM cfac_records').get() as any).count;
+    const dateRange = this.db.prepare('SELECT MIN(datetime) as start, MAX(datetime) as end FROM cfac_records').get() as any;
+
+    const byType = this.db.prepare(`
+      SELECT station_type as type, COUNT(*) as count
+      FROM cfac_records
+      WHERE station_type IS NOT NULL
+      GROUP BY station_type
+      ORDER BY station_type
+    `).all() as any[];
+
+    return {
+      totalRecords: total,
+      stations,
+      dateRange: { start: dateRange?.start || null, end: dateRange?.end || null },
+      byType: byType.map(r => ({
+        type: r.type || 'unknown',
+        count: r.count
+      }))
+    };
+  }
+
+  /**
+   * Clear CFAC records
+   */
+  clearCfacRecords(stationCode?: string, stationType?: string): void {
+    if (stationCode) {
+      this.db.prepare('DELETE FROM cfac_records WHERE station_code = ?').run(stationCode);
+    } else if (stationType) {
+      this.db.prepare('DELETE FROM cfac_records WHERE station_type = ?').run(stationType);
+    } else {
+      this.db.exec('DELETE FROM cfac_records');
+    }
+  }
+
   // ============ CLUSTER WEATHER (Capacity Factor) ============
 
   /**

@@ -533,3 +533,53 @@ ipcMain.handle('import-to-database', async (_event, options: {
     });
   });
 });
+
+// IPC Handler: List trained calibration models
+ipcMain.handle('list-trained-models', async () => {
+  try {
+    const projectRoot = getProjectRoot();
+    const modelsDir = path.join(projectRoot, 'models', 'calibrator');
+
+    // Create directory if it doesn't exist
+    if (!fs.existsSync(modelsDir)) {
+      fs.mkdirSync(modelsDir, { recursive: true });
+      return { success: true, models: [] };
+    }
+
+    const files = fs.readdirSync(modelsDir);
+    const models: { name: string; date: string; mape?: number }[] = [];
+
+    for (const file of files) {
+      if (file.endsWith('.json')) {
+        const fullPath = path.join(modelsDir, file);
+        const stats = fs.statSync(fullPath);
+        const name = file.replace('.json', '');
+
+        // Try to read MAPE from the model file
+        let mape: number | undefined;
+        try {
+          const content = fs.readFileSync(fullPath, 'utf-8');
+          const modelData = JSON.parse(content);
+          if (modelData.validationMAPE) {
+            mape = modelData.validationMAPE;
+          }
+        } catch (e) {
+          // Ignore parse errors
+        }
+
+        models.push({
+          name,
+          date: stats.mtime.toISOString().split('T')[0],
+          mape
+        });
+      }
+    }
+
+    // Sort by date descending (newest first)
+    models.sort((a, b) => b.date.localeCompare(a.date));
+
+    return { success: true, models };
+  } catch (error: any) {
+    return { success: false, message: error.message };
+  }
+});

@@ -49,6 +49,11 @@ This index provides an overview of all documentation for Vantage Forecaster.
 | [planning/MREC_ML_HYBRID_DESIGN.md](planning/MREC_ML_HYBRID_DESIGN.md) | MREC + ML hybrid model design |
 | [planning/IPOOL_WIND_MREC_ANALYSIS.md](planning/IPOOL_WIND_MREC_ANALYSIS.md) | Wind MREC algorithm analysis |
 
+### Future Development
+| Document | Description |
+|----------|-------------|
+| [DEEP_TRAINING_SPECIFICATION.md](DEEP_TRAINING_SPECIFICATION.md) | **[PROPOSAL]** Deep Training system - automated algorithm generation and optimization per station/zone |
+
 ---
 
 ## Document Purposes by Use Case

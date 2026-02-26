@@ -34,4 +34,6 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     getDatabaseInfo: (dbPath) => electron_1.ipcRenderer.invoke('get-database-info', dbPath),
     // Import data to database
     importToDatabase: (options) => electron_1.ipcRenderer.invoke('import-to-database', options),
+    // List trained calibration models
+    listTrainedModels: () => electron_1.ipcRenderer.invoke('list-trained-models'),
 });

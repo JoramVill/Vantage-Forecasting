@@ -47,5 +47,10 @@ interface Window {
       stdout?: string;
       stderr?: string;
     }>;
+    listTrainedModels: () => Promise<{
+      success: boolean;
+      message?: string;
+      models?: { name: string; date: string; mape?: number }[];
+    }>;
   };
 }

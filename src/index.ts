@@ -19,7 +19,7 @@ import { getDatabase, closeDatabase, DatabaseStats, StoredModel } from './databa
 import { ModelRouter, WindMRECModel, calibrateAllMREC, calibrateAllMRECCFBased, calibrateAllMRECMLOptimized, WindMRECHybridModel, trainAllMRECHybrid, WindWeatherHybridModel, trainAllWeatherHybrid, SolarMRECModel, calibrateAllSolarMREC, SolarHybridModel, SolarIrradianceModel, SolarMRECHybridModel, calibrateAllSolarMRECHybrid, SolarSeasonalMRECModel, calibrateAllSeasonalSolarMREC, WindShearModel, trainAllWindShear, WindCubicModel, calibrateAllCubic, WindWeibullModel, calibrateAllWeibull, WindBiasCorrectionModel, calibrateAllBiasCorrection, WindEnhancedHybridModel, trainAllEnhancedHybrid, BiasCorrector, Wind4TierHybridModel, trainAll4TierHybrid, WindPhysicsHybridModel, trainAllPhysicsHybrid, WeatherCorrectionLSTM } from './models/capacityFactor/index.js';
 import type { SolarMRECCalibrationData } from './models/capacityFactor/index.js';
 import { MRECCalibrationData, WindCFacMethodology } from './types/capacityFactor.js';
-import { CFacWeatherFeatures, StationType, getStationTypeFromCode, CFacForecastResult, CFacTrainingSample } from './types/capacityFactor.js';
+import { CFacWeatherFeatures, StationType, getStationTypeFromCode, CFacForecastResult, CFacTrainingSample, RawCapacityFactorData } from './types/capacityFactor.js';
 import { parseOutageDirectory } from './parsers/index.js';
 import { generateAnalysisReport, formatProbability, getRiskColor } from './services/outageAnalysisService.js';
 import { OutageSeverity, TimePeriod, GridRegion, OutageRecord } from './types/outage.js';
@@ -69,12 +69,14 @@ async function runZonalForecast(options: any): Promise<void> {
   let demandData: ParsedDemandData;
 
   if (options.useDb || !options.demand) {
-    const db = getZonalDatabase();
+    // Use provided database path or default
+    const dbPath = options.useDb && options.demand ? options.demand : undefined;
+    const db = getZonalDatabase(dbPath);
     const trainDays = parseInt(options.trainDays) || 90;
     const forecastStart = DateTime.fromISO(options.start);
     const trainEnd = forecastStart.minus({ days: 1 }).toISODate()!;
     const trainStart = forecastStart.minus({ days: trainDays }).toISODate()!;
-    console.log(`  📂 Loading from zonal database: ${trainStart} to ${trainEnd}`);
+    console.log(`  📂 Loading from zonal database${dbPath ? ` (${dbPath})` : ''}: ${trainStart} to ${trainEnd}`);
     demandData = db.getDemandData(trainStart, trainEnd);
     closeZonalDatabase();
     if (demandData.records.length === 0) {
@@ -198,15 +200,35 @@ async function runZonalForecast(options: any): Promise<void> {
   }));
   model.learnWeekendCorrections(predictionData);
 
-  // Train XGBoost calibrator for hybrid model corrections
-  console.log('\n🔧 Training XGBoost calibrator...');
-  const calibrator = new DemandCalibrator();
-  const calibratorMetrics = await calibrator.train(
-    samples,
-    (sample: TrainingSample) => model.predictForRegion(sample.features, sample.region) || sample.demand
-  );
-  model.setCalibrator(calibrator);
-  console.log(`  ✅ Calibrator trained: Val MAPE=${calibratorMetrics.validationMAPE.toFixed(2)}%`);
+  // Train XGBoost calibrator for hybrid model corrections (unless disabled)
+  if (options.calibrate !== false) {
+    if (options.loadCalibrator) {
+      // Load existing calibrator
+      console.log(`\n🔧 Loading calibrator from ${options.loadCalibrator}...`);
+      const calibrator = DemandCalibrator.load(options.loadCalibrator);
+      model.setCalibrator(calibrator);
+      const metrics = calibrator.getMetrics();
+      console.log(`  ✅ Calibrator loaded: Val MAPE=${metrics?.validationMAPE?.toFixed(2) || 'N/A'}%`);
+    } else {
+      // Train new calibrator
+      console.log('\n🔧 Training XGBoost calibrator...');
+      const calibrator = new DemandCalibrator();
+      const calibratorMetrics = await calibrator.train(
+        samples,
+        (sample: TrainingSample) => model.predictForRegion(sample.features, sample.region) || sample.demand
+      );
+      model.setCalibrator(calibrator);
+      console.log(`  ✅ Calibrator trained: Val MAPE=${calibratorMetrics.validationMAPE.toFixed(2)}%`);
+
+      // Save if requested
+      if (options.saveCalibrator) {
+        calibrator.save(options.saveCalibrator);
+        console.log(`  💾 Calibrator saved to ${options.saveCalibrator}`);
+      }
+    }
+  } else {
+    console.log('\n🔧 XGBoost calibration disabled (using hybrid model only)');
+  }
 
   // Fetch weather for forecast period
   console.log('\n🌤️  Fetching weather data for forecast period...');
@@ -603,6 +625,9 @@ program
   .option('--use-db', 'Use demand data from database instead of file')
   .option('--train-days <days>', 'Number of days of historical data to use for training (default: 90)', '90')
   .option('--zonal', 'Use 14-zone sub-region mode (requires zonal demand data)')
+  .option('--no-calibrate', 'Disable XGBoost calibration layer (uses hybrid model only)')
+  .option('--save-calibrator <path>', 'Save trained calibrator model to file')
+  .option('--load-calibrator <path>', 'Load calibrator model from file (skips training)')
   .action(async (options) => {
     try {
       // Check for zonal mode
@@ -1562,17 +1587,18 @@ dbCommand
 // DB IMPORT - Import data into database
 dbCommand
   .command('import')
-  .description('Import demand or weather data into the database')
-  .requiredOption('-t, --type <type>', 'Data type: demand or weather')
+  .description('Import demand, cfac, or weather data into the database')
+  .requiredOption('-t, --type <type>', 'Data type: demand, cfac, or weather')
   .requiredOption('-f, --file <path>', 'File or folder path to import')
   .option('-l, --location <name>', 'Location name for weather data (e.g., Manila, Cebu, Davao)')
   .option('--forecast', 'Mark weather data as forecast (not historical)')
   .option('--zonal', 'Use zonal database (14-zone system)')
-  .action((options) => {
+  .option('--db <path>', 'Database path (default: ./forecast.db)')
+  .action(async (options) => {
     console.log('\n🔄 Importing data...\n');
 
     try {
-      const db = options.zonal ? getZonalDatabase() : getDatabase();
+      const db = options.zonal ? getZonalDatabase() : getDatabase(options.db);
 
       if (options.type === 'demand') {
         const demandData = parseDemandCsv(options.file);
@@ -1604,8 +1630,52 @@ dbCommand
         console.log(`   Type: ${options.forecast ? 'Forecast' : 'Historical'}`);
         console.log(`   Date Range: ${DateTime.fromJSDate(weatherData.startDate).toISODate()} to ${DateTime.fromJSDate(weatherData.endDate).toISODate()}`);
 
+      } else if (options.type === 'cfac') {
+        // Parse capacity factor data using CapacityFactorService
+        const cfacData = await capacityFactorService.parseCapacityFactorDirectory(
+          options.file,
+          (msg) => console.log(`   ${msg}`)
+        );
+
+        // Convert to database format with station type detection
+        // Process in batches to avoid stack overflow with large arrays
+        const records: Array<{
+          datetime: Date;
+          stationCode: string;
+          capacityFactor: number;
+          stationType: string;
+        }> = [];
+
+        for (const record of cfacData) {
+          records.push({
+            datetime: record.datetime,
+            stationCode: record.stationCode,
+            capacityFactor: record.capacityFactor,
+            stationType: getStationTypeFromCode(record.stationCode).toLowerCase()
+          });
+        }
+
+        const result = db.importCfacRecords(records, options.file);
+
+        // Get date range using loop to avoid stack overflow with spread operator
+        let minTime = Infinity;
+        let maxTime = -Infinity;
+        const stationSet = new Set<string>();
+        for (const r of cfacData) {
+          const time = r.datetime.getTime();
+          if (time < minTime) minTime = time;
+          if (time > maxTime) maxTime = time;
+          stationSet.add(r.stationCode);
+        }
+        const startDate = new Date(minTime);
+        const endDate = new Date(maxTime);
+
+        console.log(`✅ Imported ${result.inserted} CFAC records`);
+        console.log(`   Stations: ${stationSet.size}`);
+        console.log(`   Date Range: ${DateTime.fromJSDate(startDate).toISODate()} to ${DateTime.fromJSDate(endDate).toISODate()}`);
+
       } else {
-        console.error('❌ Invalid type. Use "demand" or "weather"');
+        console.error('❌ Invalid type. Use "demand", "cfac", or "weather"');
         process.exit(1);
       }
 
@@ -2142,6 +2212,8 @@ cfacCommand
   .option('--no-wind-4tier', 'Disable 4-tier MREC wind model (use legacy enhanced-hybrid instead)')
   .option('--wind-4tier', 'Use 4-tier MREC for wind - DEFAULT (LOW/RAMP/RATED/HIGH regions, ~50% MAPE)')
   .option('--lstm-correction', 'Enable LSTM correction layer for wind and solar (learns temporal weather patterns)')
+  .option('--use-db', 'Load CFAC training data from database instead of CSV files')
+  .option('--db <path>', 'Database path when using --use-db (default: ./forecast.db)')
   // NOTE: LSTM model option removed from production - experimental only via direct code modification
   .action(async (options) => {
     try {
@@ -2259,10 +2331,49 @@ cfacCommand
 
       // Parse training data (capacity factors)
       console.log('\n📚 Parsing capacity factor training data...');
-      let cfacData = await capacityFactorService.parseCapacityFactorDirectory(
-        options.training,
-        (msg) => console.log(`   ${msg}`)
-      );
+      let cfacData: RawCapacityFactorData[];
+
+      if (options.useDb) {
+        // Load from database
+        console.log('   Loading from database...');
+        const db = getDatabase(options.db);
+        const dbRecords = db.getCfacRecords();
+
+        if (dbRecords.length === 0) {
+          console.error('❌ No CFAC records found in database. Please import data first with: db import --type cfac --file <path>');
+          process.exit(1);
+        }
+
+        // Convert database records to RawCapacityFactorData format
+        cfacData = dbRecords.map(record => ({
+          datetime: record.datetime,
+          stationCode: record.stationCode,
+          capacityFactor: record.capacityFactor
+        }));
+
+        // Get date range for display (avoid spread operators for large arrays)
+        let minTime = Infinity;
+        let maxTime = -Infinity;
+        const stationSet = new Set<string>();
+        for (const r of cfacData) {
+          const time = r.datetime.getTime();
+          if (time < minTime) minTime = time;
+          if (time > maxTime) maxTime = time;
+          stationSet.add(r.stationCode);
+        }
+        const minDate = new Date(minTime);
+        const maxDate = new Date(maxTime);
+
+        console.log(`   Loaded ${cfacData.length.toLocaleString()} records from database`);
+        console.log(`   Date range: ${minDate.toISOString().split('T')[0]} to ${maxDate.toISOString().split('T')[0]}`);
+        console.log(`   Stations: ${stationSet.size}`);
+      } else {
+        // Load from CSV directory
+        cfacData = await capacityFactorService.parseCapacityFactorDirectory(
+          options.training,
+          (msg) => console.log(`   ${msg}`)
+        );
+      }
 
       // Apply training-end date filter if specified
       const trainingEndDate = options.trainingEnd ? DateTime.fromISO(options.trainingEnd).endOf('day').toJSDate() : null;

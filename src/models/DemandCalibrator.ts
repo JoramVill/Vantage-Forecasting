@@ -10,6 +10,8 @@
 
 import { TrainingSample, FeatureVector } from '../types/index.js';
 import { isPhilippineHoliday } from '../constants/index.js';
+import * as fs from 'fs';
+import * as path from 'path';
 
 // Zone code mapping for one-hot encoding
 const ZONE_CODES = [
@@ -554,5 +556,53 @@ export class DemandCalibrator {
    */
   static getZoneCodes(): string[] {
     return ZONE_CODES;
+  }
+
+  /**
+   * Save calibrator state to a JSON file
+   */
+  save(filepath: string): void {
+    const state = {
+      version: 1,
+      type: 'demand-calibrator',
+      trees: this.trees,
+      basePrediction: this.basePrediction,
+      metrics: this.metrics,
+      featureNames: this.featureNames,
+      trainedAt: new Date().toISOString(),
+      validationMAPE: this.metrics?.validationMAPE  // For IPC handler compatibility
+    };
+
+    // Ensure directory exists
+    const dir = path.dirname(filepath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    fs.writeFileSync(filepath, JSON.stringify(state, null, 2));
+  }
+
+  /**
+   * Load calibrator state from a JSON file
+   */
+  static load(filepath: string): DemandCalibrator {
+    if (!fs.existsSync(filepath)) {
+      throw new Error(`Calibrator file not found: ${filepath}`);
+    }
+
+    const content = fs.readFileSync(filepath, 'utf-8');
+    const state = JSON.parse(content);
+
+    if (state.type !== 'demand-calibrator') {
+      throw new Error('Invalid calibrator file format');
+    }
+
+    const calibrator = new DemandCalibrator();
+    calibrator.trees = state.trees;
+    calibrator.basePrediction = state.basePrediction;
+    calibrator.metrics = state.metrics;
+    calibrator.trained = true;
+
+    return calibrator;
   }
 }
