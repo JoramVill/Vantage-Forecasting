@@ -10,8 +10,8 @@ const weatherDataDir = ref('');
 const demandOutputDir = ref('output/Demand');
 const cfacOutputDir = ref('output/CFAC');
 
-// Weather directory validation
-const weatherDirStatus = ref<{ valid: boolean; message: string } | null>(null);
+// Weather directory validation - UNUSED
+// const weatherDirStatus = ref<{ valid: boolean; message: string } | null>(null);
 
 // Database info
 const databaseInfo = ref<{
@@ -20,8 +20,8 @@ const databaseInfo = ref<{
   weather?: { records: number; range?: string | null } | null;
 } | null>(null);
 const isLoadingDbInfo = ref(false);
-const isImporting = ref(false);
-const showDbUpdatePanel = ref(false);
+// const isImporting = ref(false); // UNUSED
+// const showDbUpdatePanel = ref(false); // Unused - commented out
 
 // Date ranges
 const trainingStart = ref('');
@@ -41,11 +41,11 @@ const cfacModel = ref<'hybrid' | 'hybrid-lstm' | 'legacy'>('hybrid'); // Hybrid 
 const demandModel = ref<'hybrid' | 'hybrid-calibrated'>('hybrid-calibrated'); // Hybrid + XGBoost calibration is best (4.77% MAPE)
 const pushToGateway = ref(false); // Push forecasts to Vantage-Gateway server
 
-// Scheduler state
-const schedulerMode = ref<'run' | 'backfill'>('run');
-const schedulerAsOfDate = ref('');
-const schedulerStartDate = ref('');
-const schedulerEndDate = ref('');
+// Scheduler state - OLD (legacy, not used by new scheduler tab)
+// const schedulerMode = ref<'run' | 'backfill'>('run');
+// const schedulerAsOfDate = ref('');
+// const schedulerStartDate = ref('');
+// const schedulerEndDate = ref('');
 const schedulerDailyEnabled = ref(true);
 const schedulerWeeklyEnabled = ref(true);
 const schedulerDemandEnabled = ref(true);
@@ -81,6 +81,51 @@ const schedulerOutputSuffix = ref('');
 const schedulerTrainingMode = ref<'auto' | 'saved'>('auto'); // auto = train on-the-fly, saved = use pre-trained model
 const schedulerSelectedCalibrator = ref<string>('');
 
+// Scheduler configuration (for service automation)
+interface SchedulerConfig {
+  enabled: boolean;
+  runTimeMorning: string;
+  runTimeEvening: string;
+  secondRunEnabled: boolean;
+  runDays: string[];
+  forecastDemand: boolean;
+  forecastCfac: boolean;
+  horizonDaily: boolean;
+  horizonWeekly: boolean;
+  weatherMaxAge: number;
+  autoPushGateway: boolean;
+  archiveRetention: number;
+}
+
+interface ForecastRun {
+  id: number;
+  run_date: string;
+  forecast_type: string;
+  horizon: string;
+  status: string;
+  records_generated: number;
+  pushed_to_gateway: boolean;
+}
+
+const schedulerConfig = ref<SchedulerConfig>({
+  enabled: false,
+  runTimeMorning: '06:00',
+  runTimeEvening: '18:00',
+  secondRunEnabled: false,
+  runDays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+  forecastDemand: true,
+  forecastCfac: true,
+  horizonDaily: true,
+  horizonWeekly: true,
+  weatherMaxAge: 6,
+  autoPushGateway: false,
+  archiveRetention: 90
+});
+const recentRuns = ref<ForecastRun[]>([]);
+const manualRunDate = ref('');
+const manualRunType = ref<'both' | 'demand' | 'cfac'>('both');
+const manualRunHorizon = ref<'both' | 'daily' | 'weekly'>('both');
+
 // Calibration settings (for hybrid-calibrated mode)
 const calibrationMode = ref<'auto' | 'saved'>('auto'); // auto = train on-the-fly, saved = use saved model
 const selectedCalibrator = ref<string>('');
@@ -95,7 +140,7 @@ const outputSuffix = ref('');
 const useCustomName = ref(false);
 const customDemandName = ref('');
 const customCfacName = ref('');
-const showNamingOptions = ref(false);
+// const showNamingOptions = ref(false); // Unused - commented out
 
 // State
 const isRunning = ref(false);
@@ -110,7 +155,7 @@ const dataFormatType = ref<'info' | 'warning' | 'error' | ''>('');
 const progress = ref(0);
 const currentStatus = ref('');
 const statusHistory = ref<Array<{ time: string; message: string; type: 'info' | 'success' | 'error' }>>([]);
-const showHistory = ref(false);
+// const showHistory = ref(false); // Unused - commented out
 
 // Terminal panel state
 const terminalExpanded = ref(false);
@@ -146,8 +191,8 @@ function saveSettings() {
     customCfacName: customCfacName.value,
     // Tab state
     activeTab: activeTab.value,
-    // Scheduler settings
-    schedulerMode: schedulerMode.value,
+    // Scheduler settings (schedulerMode removed - legacy)
+    // schedulerMode: schedulerMode.value,
     schedulerDailyEnabled: schedulerDailyEnabled.value,
     schedulerWeeklyEnabled: schedulerWeeklyEnabled.value,
     schedulerDemandEnabled: schedulerDemandEnabled.value,
@@ -176,8 +221,8 @@ function saveSettings() {
   });
 }
 
-// Watch for settings changes and persist them
-watch([dataSource, databasePath, demandDataDir, cfacDataDir, weatherDataDir, demandOutputDir, cfacOutputDir, enableDemand, enableCfac, enableZonal, scalingPercent, cfacModel, demandModel, pushToGateway, calibrationMode, selectedCalibrator, saveCalibrator, demandPrefix, demandZonalPrefix, cfacPrefix, outputSuffix, useCustomName, customDemandName, customCfacName, activeTab, schedulerMode, schedulerDailyEnabled, schedulerWeeklyEnabled, schedulerDemandEnabled, schedulerCfacEnabled, schedulerZonalEnabled, schedulerDemandPath, schedulerCfacPath, schedulerOutputDir, schedulerDbPath, schedulerDemandModel, schedulerUseXgboost, schedulerAsymmetricLoss, schedulerBiasCorrection, schedulerCalibDays, schedulerCalibThreshold, schedulerMaxIterations], () => {
+// Watch for settings changes and persist them (schedulerMode removed - legacy)
+watch([dataSource, databasePath, demandDataDir, cfacDataDir, weatherDataDir, demandOutputDir, cfacOutputDir, enableDemand, enableCfac, enableZonal, scalingPercent, cfacModel, demandModel, pushToGateway, calibrationMode, selectedCalibrator, saveCalibrator, demandPrefix, demandZonalPrefix, cfacPrefix, outputSuffix, useCustomName, customDemandName, customCfacName, activeTab, schedulerDailyEnabled, schedulerWeeklyEnabled, schedulerDemandEnabled, schedulerCfacEnabled, schedulerZonalEnabled, schedulerDemandPath, schedulerCfacPath, schedulerOutputDir, schedulerDbPath, schedulerDemandModel, schedulerUseXgboost, schedulerAsymmetricLoss, schedulerBiasCorrection, schedulerCalibDays, schedulerCalibThreshold, schedulerMaxIterations], () => {
   saveSettings();
 });
 
@@ -195,6 +240,7 @@ onMounted(async () => {
   trainingEnd.value = formatDate(today);
   forecastStart.value = formatDate(tomorrow);
   forecastEnd.value = formatDate(nextWeek);
+  manualRunDate.value = formatDate(today);
 
   // Load saved settings
   try {
@@ -229,8 +275,8 @@ onMounted(async () => {
     if (settings.customCfacName) customCfacName.value = settings.customCfacName;
     // Tab state
     if (settings.activeTab === 'manual' || settings.activeTab === 'scheduler') activeTab.value = settings.activeTab;
-    // Scheduler settings
-    if (settings.schedulerMode === 'run' || settings.schedulerMode === 'backfill') schedulerMode.value = settings.schedulerMode;
+    // Scheduler settings (schedulerMode removed - legacy)
+    // if (settings.schedulerMode === 'run' || settings.schedulerMode === 'backfill') schedulerMode.value = settings.schedulerMode;
     if (typeof settings.schedulerDailyEnabled === 'boolean') schedulerDailyEnabled.value = settings.schedulerDailyEnabled;
     if (typeof settings.schedulerWeeklyEnabled === 'boolean') schedulerWeeklyEnabled.value = settings.schedulerWeeklyEnabled;
     if (typeof settings.schedulerDemandEnabled === 'boolean') schedulerDemandEnabled.value = settings.schedulerDemandEnabled;
@@ -267,6 +313,10 @@ onMounted(async () => {
 
   // Load available calibrator models
   loadCalibratorModels();
+
+  // Load scheduler configuration and recent runs
+  loadSchedulerConfig();
+  loadRecentRuns();
 
   // Set up real-time output listener
   window.electronAPI.onCommandOutput((data) => {
@@ -421,20 +471,20 @@ async function browseCfacOutputDir() {
   if (path) cfacOutputDir.value = path;
 }
 
-async function browseWeatherDir() {
-  const path = await window.electronAPI.selectDirectory();
-  if (path) {
-    weatherDataDir.value = path;
-    // Validate weather directory structure
-    const result = await window.electronAPI.checkWeatherDirectory(path);
-    weatherDirStatus.value = result;
-    if (!result.valid) {
-      dataFormatMessage.value = result.message;
-      dataFormatType.value = 'warning';
-      setTimeout(clearFormatMessage, 5000);
-    }
-  }
-}
+// async function browseWeatherDir() {
+//   const path = await window.electronAPI.selectDirectory();
+//   if (path) {
+//     weatherDataDir.value = path;
+//     // Validate weather directory structure
+//     const result = await window.electronAPI.checkWeatherDirectory(path);
+//     weatherDirStatus.value = result;
+//     if (!result.valid) {
+//       dataFormatMessage.value = result.message;
+//       dataFormatType.value = 'warning';
+//       setTimeout(clearFormatMessage, 5000);
+//     }
+//   }
+// } // Unused - commented out
 
 // Database info functions
 async function loadDatabaseInfo() {
@@ -478,42 +528,42 @@ async function loadDatabaseInfo() {
   }
 }
 
-async function importData(dataType: 'demand' | 'cfac' | 'weather') {
-  let sourcePath = '';
-  if (dataType === 'demand') sourcePath = demandDataDir.value;
-  else if (dataType === 'cfac') sourcePath = cfacDataDir.value;
-  else if (dataType === 'weather') sourcePath = weatherDataDir.value;
+// async function importData(dataType: 'demand' | 'cfac' | 'weather') {
+//   let sourcePath = '';
+//   if (dataType === 'demand') sourcePath = demandDataDir.value;
+//   else if (dataType === 'cfac') sourcePath = cfacDataDir.value;
+//   else if (dataType === 'weather') sourcePath = weatherDataDir.value;
 
-  if (!sourcePath || !databasePath.value) {
-    dataFormatMessage.value = `Please select a ${dataType} data directory first`;
-    dataFormatType.value = 'warning';
-    setTimeout(clearFormatMessage, 5000);
-    return;
-  }
+//   if (!sourcePath || !databasePath.value) {
+//     dataFormatMessage.value = `Please select a ${dataType} data directory first`;
+//     dataFormatType.value = 'warning';
+//     setTimeout(clearFormatMessage, 5000);
+//     return;
+//   }
 
-  isImporting.value = true;
-  addStatus(`Importing ${dataType} data...`);
+//   isImporting.value = true;
+//   addStatus(`Importing ${dataType} data...`);
 
-  try {
-    const result = await window.electronAPI.importToDatabase({
-      dbPath: databasePath.value,
-      dataType,
-      sourcePath
-    });
+//   try {
+//     const result = await window.electronAPI.importToDatabase({
+//       dbPath: databasePath.value,
+//       dataType,
+//       sourcePath
+//     });
 
-    if (result.success) {
-      addStatus(`${dataType} import completed`, 'success');
-      // Refresh database info
-      await loadDatabaseInfo();
-    } else {
-      addStatus(`${dataType} import failed: ${result.message}`, 'error');
-    }
-  } catch (e: any) {
-    addStatus(`${dataType} import error: ${e.message}`, 'error');
-  } finally {
-    isImporting.value = false;
-  }
-}
+//     if (result.success) {
+//       addStatus(`${dataType} import completed`, 'success');
+//       // Refresh database info
+//       await loadDatabaseInfo();
+//     } else {
+//       addStatus(`${dataType} import failed: ${result.message}`, 'error');
+//     }
+//   } catch (e: any) {
+//     addStatus(`${dataType} import error: ${e.message}`, 'error');
+//   } finally {
+//     isImporting.value = false;
+//   }
+// } // Unused - commented out
 
 // Watch for database path changes
 watch(databasePath, async (newPath) => {
@@ -715,21 +765,21 @@ function resetProgress() {
 
 // ============ SCHEDULER FUNCTIONS ============
 
-// Browse functions for scheduler
-async function browseSchedulerDemandPath() {
-  const path = await window.electronAPI.selectDirectory();
-  if (path) schedulerDemandPath.value = path;
-}
+// Browse functions for scheduler - UNUSED (commented out)
+// async function browseSchedulerDemandPath() {
+//   const path = await window.electronAPI.selectDirectory();
+//   if (path) schedulerDemandPath.value = path;
+// }
 
-async function browseSchedulerCfacPath() {
-  const path = await window.electronAPI.selectDirectory();
-  if (path) schedulerCfacPath.value = path;
-}
+// async function browseSchedulerCfacPath() {
+//   const path = await window.electronAPI.selectDirectory();
+//   if (path) schedulerCfacPath.value = path;
+// }
 
-async function browseSchedulerOutputDir() {
-  const path = await window.electronAPI.selectDirectory();
-  if (path) schedulerOutputDir.value = path;
-}
+// async function browseSchedulerOutputDir() {
+//   const path = await window.electronAPI.selectDirectory();
+//   if (path) schedulerOutputDir.value = path;
+// }
 
 // Add scheduler status message
 function addSchedulerStatus(message: string, type: 'info' | 'success' | 'error' = 'info') {
@@ -741,122 +791,174 @@ function addSchedulerStatus(message: string, type: 'info' | 'success' | 'error' 
   });
 }
 
-// Schedule time management
-function addScheduleTime() {
-  if (schedulerTimes.value.length < 6) {
-    schedulerTimes.value.push('06:00');
-    saveSettings();
-  }
-}
+// Schedule time management - UNUSED (commented out)
+// function addScheduleTime() {
+//   if (schedulerTimes.value.length < 6) {
+//     schedulerTimes.value.push('06:00');
+//     saveSettings();
+//   }
+// }
 
-function removeScheduleTime(index: number) {
-  if (schedulerTimes.value.length > 1) {
-    schedulerTimes.value.splice(index, 1);
-    saveSettings();
-  }
-}
+// function removeScheduleTime(index: number) {
+//   if (schedulerTimes.value.length > 1) {
+//     schedulerTimes.value.splice(index, 1);
+//     saveSettings();
+//   }
+// }
 
-function updateScheduleTime(index: number, value: string) {
-  schedulerTimes.value[index] = value;
-  saveSettings();
-}
+// function updateScheduleTime(index: number, value: string) {
+//   schedulerTimes.value[index] = value;
+//   saveSettings();
+// }
 
-// Run scheduler
-async function runScheduler() {
-  // Validate inputs
-  if (schedulerMode.value === 'run' && !schedulerAsOfDate.value) {
-    addSchedulerStatus('Please select an as-of date', 'error');
-    return;
-  }
-  if (schedulerMode.value === 'backfill' && (!schedulerStartDate.value || !schedulerEndDate.value)) {
-    addSchedulerStatus('Please select start and end dates', 'error');
-    return;
-  }
+// Run scheduler - UNUSED (legacy function, commented out - use runSchedulerManual instead)
+// async function runScheduler() {
+//   // Validate inputs
+//   if (schedulerMode.value === 'run' && !schedulerAsOfDate.value) {
+//     addSchedulerStatus('Please select an as-of date', 'error');
+//     return;
+//   }
+//   if (schedulerMode.value === 'backfill' && (!schedulerStartDate.value || !schedulerEndDate.value)) {
+//     addSchedulerStatus('Please select start and end dates', 'error');
+//     return;
+//   }
 
-  // Reset state
-  schedulerIsRunning.value = true;
-  schedulerProgress.value = 0;
-  schedulerStatusHistory.value = [];
-  schedulerCurrentStatus.value = 'Starting scheduler...';
+//   // Reset state
+//   schedulerIsRunning.value = true;
+//   schedulerProgress.value = 0;
+//   schedulerStatusHistory.value = [];
+//   schedulerCurrentStatus.value = 'Starting scheduler...';
 
-  // Build CLI args
-  const args = ['scheduler', schedulerMode.value === 'run' ? 'run' : 'backfill'];
+//   // Build CLI args
+//   const args = ['scheduler', schedulerMode.value === 'run' ? 'run' : 'backfill'];
 
-  // Date args
-  if (schedulerMode.value === 'run') {
-    args.push('-d', schedulerAsOfDate.value);
-  } else {
-    args.push('-s', schedulerStartDate.value, '-e', schedulerEndDate.value);
-  }
+//   // Date args
+//   if (schedulerMode.value === 'run') {
+//     args.push('-d', schedulerAsOfDate.value);
+//   } else {
+//     args.push('-s', schedulerStartDate.value, '-e', schedulerEndDate.value);
+//   }
 
-  // Forecast type flags
-  if (schedulerDailyEnabled.value && !schedulerWeeklyEnabled.value) {
-    args.push('--daily');
-  } else if (schedulerWeeklyEnabled.value && !schedulerDailyEnabled.value) {
-    args.push('--weekly');
-  }
+//   // Forecast type flags
+//   if (schedulerDailyEnabled.value && !schedulerWeeklyEnabled.value) {
+//     args.push('--daily');
+//   } else if (schedulerWeeklyEnabled.value && !schedulerDailyEnabled.value) {
+//     args.push('--weekly');
+//   }
 
-  if (schedulerDemandEnabled.value && !schedulerCfacEnabled.value) {
-    args.push('--demand-only');
-  } else if (schedulerCfacEnabled.value && !schedulerDemandEnabled.value) {
-    args.push('--cfac-only');
-  }
+//   if (schedulerDemandEnabled.value && !schedulerCfacEnabled.value) {
+//     args.push('--demand-only');
+//   } else if (schedulerCfacEnabled.value && !schedulerDemandEnabled.value) {
+//     args.push('--cfac-only');
+//   }
 
-  // Data paths
-  if (schedulerDemandPath.value) {
-    args.push('--demand-path', schedulerDemandPath.value);
-  }
-  if (schedulerCfacPath.value) {
-    args.push('--cfac-path', schedulerCfacPath.value);
-  }
-  if (schedulerOutputDir.value) {
-    args.push('--output', schedulerOutputDir.value);
-  }
-  if (schedulerDbPath.value) {
-    args.push('--db', schedulerDbPath.value);
-  }
+//   // Data paths
+//   if (schedulerDemandPath.value) {
+//     args.push('--demand-path', schedulerDemandPath.value);
+//   }
+//   if (schedulerCfacPath.value) {
+//     args.push('--cfac-path', schedulerCfacPath.value);
+//   }
+//   if (schedulerOutputDir.value) {
+//     args.push('--output', schedulerOutputDir.value);
+//   }
+//   if (schedulerDbPath.value) {
+//     args.push('--db', schedulerDbPath.value);
+//   }
 
-  // Model settings
-  if (schedulerDemandModel.value) {
-    args.push('--demand-model', schedulerDemandModel.value);
-  }
-  if (schedulerUseXgboost.value) {
-    args.push('--use-xgboost');
-  }
-  if (schedulerAsymmetricLoss.value) {
-    args.push('--asymmetric-loss');
-  }
-  if (schedulerBiasCorrection.value) {
-    args.push('--bias-correction');
-  }
+//   // Model settings
+//   if (schedulerDemandModel.value) {
+//     args.push('--demand-model', schedulerDemandModel.value);
+//   }
+//   if (schedulerUseXgboost.value) {
+//     args.push('--use-xgboost');
+//   }
+//   if (schedulerAsymmetricLoss.value) {
+//     args.push('--asymmetric-loss');
+//   }
+//   if (schedulerBiasCorrection.value) {
+//     args.push('--bias-correction');
+//   }
 
-  // Zonal mode
-  if (schedulerZonalEnabled.value && schedulerDemandEnabled.value) {
-    args.push('--zonal');
-  }
+//   // Zonal mode
+//   if (schedulerZonalEnabled.value && schedulerDemandEnabled.value) {
+//     args.push('--zonal');
+//   }
 
-  // Calibration settings
-  args.push('--calib-days', schedulerCalibDays.value.toString());
-  args.push('--calib-threshold', schedulerCalibThreshold.value.toString());
-  args.push('--max-iterations', schedulerMaxIterations.value.toString());
+//   // Calibration settings
+//   args.push('--calib-days', schedulerCalibDays.value.toString());
+//   args.push('--calib-threshold', schedulerCalibThreshold.value.toString());
+//   args.push('--max-iterations', schedulerMaxIterations.value.toString());
 
+//   try {
+//     addSchedulerStatus('Running scheduler command...');
+//     schedulerProgress.value = 10;
+
+//     const result = await window.electronAPI.runCommand(args);
+
+//     schedulerProgress.value = 100;
+
+//     if (result.code === 0) {
+//       addSchedulerStatus('Scheduler completed successfully!', 'success');
+//     } else {
+//       const errorLines = result.stderr?.split('\n').filter((l: string) => l.trim()).slice(-3) || [];
+//       const errorMsg = errorLines.join(' ').substring(0, 200) || result.error || 'Unknown error';
+//       addSchedulerStatus('Scheduler failed: ' + errorMsg, 'error');
+//     }
+//   } catch (error: any) {
+//     addSchedulerStatus('Error: ' + error.message, 'error');
+//   } finally {
+//     schedulerIsRunning.value = false;
+//   }
+// }
+
+// Scheduler configuration management
+async function loadSchedulerConfig() {
   try {
-    addSchedulerStatus('Running scheduler command...');
-    schedulerProgress.value = 10;
-
-    const result = await window.electronAPI.runCommand(args);
-
-    schedulerProgress.value = 100;
-
-    if (result.code === 0) {
-      addSchedulerStatus('Scheduler completed successfully!', 'success');
-    } else {
-      const errorLines = result.stderr?.split('\n').filter((l: string) => l.trim()).slice(-3) || [];
-      const errorMsg = errorLines.join(' ').substring(0, 200) || result.error || 'Unknown error';
-      addSchedulerStatus('Scheduler failed: ' + errorMsg, 'error');
+    const config = await window.electronAPI.loadSchedulerConfig();
+    if (config) {
+      schedulerConfig.value = config;
     }
   } catch (error: any) {
-    addSchedulerStatus('Error: ' + error.message, 'error');
+    console.error('Failed to load scheduler config:', error);
+  }
+}
+
+async function saveSchedulerConfig() {
+  try {
+    await window.electronAPI.saveSchedulerConfig(schedulerConfig.value);
+    addSchedulerStatus('Configuration saved', 'success');
+  } catch (error: any) {
+    addSchedulerStatus('Failed to save configuration: ' + error.message, 'error');
+  }
+}
+
+async function loadRecentRuns(limit = 20) {
+  try {
+    const runs = await window.electronAPI.getRecentRuns(limit);
+    recentRuns.value = runs;
+  } catch (error: any) {
+    console.error('Failed to load recent runs:', error);
+  }
+}
+
+async function runSchedulerManual() {
+  if (!manualRunDate.value) {
+    addSchedulerStatus('Please select a date', 'error');
+    return;
+  }
+
+  schedulerIsRunning.value = true;
+  try {
+    await window.electronAPI.runSchedulerManual(
+      manualRunDate.value,
+      manualRunType.value,
+      manualRunHorizon.value
+    );
+    addSchedulerStatus('Manual run completed', 'success');
+    await loadRecentRuns();
+  } catch (error: any) {
+    addSchedulerStatus('Manual run failed: ' + error.message, 'error');
   } finally {
     schedulerIsRunning.value = false;
   }
@@ -1191,247 +1293,223 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 
       <!-- ============ SCHEDULER TAB ============ -->
       <div v-if="activeTab === 'scheduler'" class="tab-content">
+        <h1 class="page-title">Scheduler Configuration</h1>
+        <p class="page-subtitle">Configure automated forecast scheduling and view run history</p>
         <!-- Main Grid Layout for Scheduler Tab -->
         <div class="content-grid">
           <!-- Left Column -->
           <div class="grid-column">
-            <!-- Mode Selection -->
+            <!-- Configuration Section -->
             <section class="card">
-              <h2>Scheduler Mode</h2>
-              <div class="source-toggle">
-                <label class="radio-label">
-                  <input type="radio" v-model="schedulerMode" value="run" :disabled="schedulerIsRunning" />
-                  <span>Run Now</span>
-                </label>
-                <label class="radio-label">
-                  <input type="radio" v-model="schedulerMode" value="backfill" :disabled="schedulerIsRunning" />
-                  <span>Backfill</span>
+              <h2>Automated Schedule</h2>
+              <div class="toggle-group" style="margin-bottom: 12px;">
+                <label class="toggle">
+                  <input type="checkbox" v-model="schedulerConfig.enabled" />
+                  <span class="toggle-slider"></span>
+                  <span class="toggle-label">Enable Scheduler</span>
                 </label>
               </div>
-              <p class="hint">{{ schedulerMode === 'run' ? 'Single date forecasts' : 'Date range backfill' }}</p>
+
+              <div class="form-group compact">
+                <label>Morning Run Time</label>
+                <input type="time" v-model="schedulerConfig.runTimeMorning" />
+              </div>
+
+              <div class="toggle-group" style="margin-top: 12px; margin-bottom: 8px;">
+                <label class="toggle">
+                  <input type="checkbox" v-model="schedulerConfig.secondRunEnabled" />
+                  <span class="toggle-slider"></span>
+                  <span class="toggle-label">Enable Evening Run</span>
+                </label>
+              </div>
+
+              <div v-if="schedulerConfig.secondRunEnabled" class="form-group compact">
+                <label>Evening Run Time</label>
+                <input type="time" v-model="schedulerConfig.runTimeEvening" />
+              </div>
+
+              <div class="form-group compact" style="margin-top: 12px;">
+                <label>Run Days</label>
+                <div class="checkbox-options" style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;">
+                  <label class="checkbox-label" v-for="day in ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']" :key="day">
+                    <input
+                      type="checkbox"
+                      :checked="schedulerConfig.runDays.includes(day)"
+                      @change="(e) => {
+                        if ((e.target as HTMLInputElement).checked) {
+                          schedulerConfig.runDays.push(day);
+                        } else {
+                          schedulerConfig.runDays = schedulerConfig.runDays.filter(d => d !== day);
+                        }
+                      }"
+                    />
+                    <span>{{ day }}</span>
+                  </label>
+                </div>
+              </div>
             </section>
 
-            <!-- Date Configuration -->
+            <!-- Weather Settings -->
             <section class="card">
-              <h2>{{ schedulerMode === 'run' ? 'As-Of Date' : 'Date Range' }}</h2>
-              <div v-if="schedulerMode === 'run'" class="form-group compact">
+              <h2>Weather Settings</h2>
+              <div class="form-group compact">
+                <label>Max Weather Age (hours)</label>
+                <input type="number" v-model="schedulerConfig.weatherMaxAge" min="1" max="24" />
+              </div>
+              <p class="hint">Reject weather data older than this many hours</p>
+            </section>
+
+            <!-- Manual Run Section -->
+            <section class="card">
+              <h2>Manual Run</h2>
+              <div class="form-group compact">
                 <label>Date</label>
-                <input type="date" v-model="schedulerAsOfDate" :disabled="schedulerIsRunning" />
-              </div>
-              <div v-else class="date-row">
-                <div class="form-group compact">
-                  <label>Start</label>
-                  <input type="date" v-model="schedulerStartDate" :disabled="schedulerIsRunning" />
-                </div>
-                <div class="form-group compact">
-                  <label>End</label>
-                  <input type="date" v-model="schedulerEndDate" :disabled="schedulerIsRunning" />
-                </div>
-              </div>
-            </section>
-
-            <!-- Data Sources -->
-            <section class="card">
-              <h2>Data Sources</h2>
-              <div class="form-group compact">
-                <label>Demand Data</label>
-                <div class="input-row">
-                  <input type="text" v-model="schedulerDemandPath" placeholder="Data Samples/Demand" :disabled="schedulerIsRunning" />
-                  <button @click="browseSchedulerDemandPath" class="btn btn-secondary btn-sm" :disabled="schedulerIsRunning">Browse</button>
-                </div>
+                <input type="date" v-model="manualRunDate" />
               </div>
               <div class="form-group compact">
-                <label>CFAC Data</label>
-                <div class="input-row">
-                  <input type="text" v-model="schedulerCfacPath" placeholder="Data Samples/Capacity Factor" :disabled="schedulerIsRunning" />
-                  <button @click="browseSchedulerCfacPath" class="btn btn-secondary btn-sm" :disabled="schedulerIsRunning">Browse</button>
-                </div>
+                <label>Type</label>
+                <select v-model="manualRunType" class="calibrator-dropdown">
+                  <option value="both">Both</option>
+                  <option value="demand">Demand Only</option>
+                  <option value="cfac">CFAC Only</option>
+                </select>
               </div>
               <div class="form-group compact">
-                <label>Output Directory</label>
-                <div class="input-row">
-                  <input type="text" v-model="schedulerOutputDir" placeholder="output/forecasts" :disabled="schedulerIsRunning" />
-                  <button @click="browseSchedulerOutputDir" class="btn btn-secondary btn-sm" :disabled="schedulerIsRunning">Browse</button>
-                </div>
+                <label>Horizon</label>
+                <select v-model="manualRunHorizon" class="calibrator-dropdown">
+                  <option value="both">Both</option>
+                  <option value="daily">Daily Only</option>
+                  <option value="weekly">Weekly Only</option>
+                </select>
               </div>
+              <button @click="runSchedulerManual" class="btn btn-primary" style="width: 100%; margin-top: 8px;">
+                Run Now
+              </button>
             </section>
           </div>
 
           <!-- Center Column -->
           <div class="grid-column">
-            <!-- Forecast Types -->
+            <!-- Forecast Types Configuration -->
             <section class="card">
               <h2>Forecast Types</h2>
               <div class="options-grid-2x2">
                 <div class="toggle-group">
                   <label class="toggle">
-                    <input type="checkbox" v-model="schedulerDailyEnabled" :disabled="schedulerIsRunning" />
-                    <span class="toggle-slider"></span>
-                    <span class="toggle-label">Day-Ahead</span>
-                  </label>
-                </div>
-                <div class="toggle-group">
-                  <label class="toggle">
-                    <input type="checkbox" v-model="schedulerWeeklyEnabled" :disabled="schedulerIsRunning" />
-                    <span class="toggle-slider"></span>
-                    <span class="toggle-label">Week-Ahead</span>
-                  </label>
-                </div>
-                <div class="toggle-group">
-                  <label class="toggle">
-                    <input type="checkbox" v-model="schedulerDemandEnabled" :disabled="schedulerIsRunning" />
+                    <input type="checkbox" v-model="schedulerConfig.forecastDemand" />
                     <span class="toggle-slider"></span>
                     <span class="toggle-label">Demand</span>
                   </label>
                 </div>
                 <div class="toggle-group">
                   <label class="toggle">
-                    <input type="checkbox" v-model="schedulerCfacEnabled" :disabled="schedulerIsRunning" />
+                    <input type="checkbox" v-model="schedulerConfig.forecastCfac" />
                     <span class="toggle-slider"></span>
                     <span class="toggle-label">CFAC</span>
                   </label>
                 </div>
               </div>
-              <div class="toggle-group" style="margin-top: 12px;">
-                <label class="toggle">
-                  <input type="checkbox" v-model="schedulerZonalEnabled" :disabled="schedulerIsRunning || !schedulerDemandEnabled" />
-                  <span class="toggle-slider"></span>
-                  <span class="toggle-label">Zonal Mode (14)</span>
-                </label>
+            </section>
+
+            <!-- Horizons Configuration -->
+            <section class="card">
+              <h2>Horizons</h2>
+              <div class="options-grid-2x2">
+                <div class="toggle-group">
+                  <label class="toggle">
+                    <input type="checkbox" v-model="schedulerConfig.horizonDaily" />
+                    <span class="toggle-slider"></span>
+                    <span class="toggle-label">Daily</span>
+                  </label>
+                </div>
+                <div class="toggle-group">
+                  <label class="toggle">
+                    <input type="checkbox" v-model="schedulerConfig.horizonWeekly" />
+                    <span class="toggle-slider"></span>
+                    <span class="toggle-label">Weekly</span>
+                  </label>
+                </div>
               </div>
             </section>
 
-            <!-- Model Settings -->
+            <!-- Gateway Settings -->
             <section class="card">
-              <h2>Model Settings</h2>
-              <div class="form-group compact">
-                <label>Demand Model</label>
-                <select v-model="schedulerDemandModel" :disabled="schedulerIsRunning" class="calibrator-dropdown">
-                  <option value="hybrid">Hybrid</option>
-                  <option value="regression">Regression</option>
-                  <option value="xgboost">XGBoost</option>
-                </select>
-              </div>
-              <div class="checkbox-options">
-                <label class="checkbox-label">
-                  <input type="checkbox" v-model="schedulerUseXgboost" :disabled="schedulerIsRunning" />
-                  <span>XGBoost CFAC</span>
-                </label>
-                <label class="checkbox-label">
-                  <input type="checkbox" v-model="schedulerAsymmetricLoss" :disabled="schedulerIsRunning" />
-                  <span>Asymm Loss</span>
-                </label>
-                <label class="checkbox-label">
-                  <input type="checkbox" v-model="schedulerBiasCorrection" :disabled="schedulerIsRunning" />
-                  <span>Bias Corr</span>
+              <h2>Gateway Integration</h2>
+              <div class="toggle-group gateway-toggle">
+                <label class="toggle">
+                  <input type="checkbox" v-model="schedulerConfig.autoPushGateway" />
+                  <span class="toggle-slider gateway"></span>
+                  <span class="toggle-label">Auto-Push to Gateway</span>
                 </label>
               </div>
+              <p class="hint">Automatically push forecasts to Vantage-Gateway server</p>
             </section>
+
+            <!-- Save Configuration Button -->
+            <button @click="saveSchedulerConfig" class="btn btn-primary" style="width: 100%;">
+              Save Configuration
+            </button>
           </div>
 
           <!-- Right Column -->
           <div class="grid-column">
-            <!-- Calibration Settings -->
+            <!-- Archive Settings -->
             <section class="card">
-              <h2>Calibration</h2>
-              <div class="params-grid">
-                <div class="form-group compact">
-                  <label>Days</label>
-                  <input type="number" v-model="schedulerCalibDays" min="1" max="30" :disabled="schedulerIsRunning" />
-                </div>
-                <div class="form-group compact">
-                  <label>Threshold %</label>
-                  <input type="number" v-model="schedulerCalibThreshold" min="1" max="20" :disabled="schedulerIsRunning" />
-                </div>
-                <div class="form-group compact">
-                  <label>Iterations</label>
-                  <input type="number" v-model="schedulerMaxIterations" min="1" max="10" :disabled="schedulerIsRunning" />
-                </div>
+              <h2>Archive Settings</h2>
+              <div class="form-group compact">
+                <label>Retention Days</label>
+                <input type="number" v-model="schedulerConfig.archiveRetention" min="7" max="365" />
               </div>
+              <p class="hint">Delete forecast records older than this many days</p>
             </section>
 
-            <!-- Training Mode -->
-            <section class="card">
-              <h2>Training Mode</h2>
-              <div class="source-toggle">
-                <label class="radio-label">
-                  <input type="radio" v-model="schedulerTrainingMode" value="auto" :disabled="schedulerIsRunning" />
-                  <span>Auto Train</span>
-                </label>
-                <label class="radio-label">
-                  <input type="radio" v-model="schedulerTrainingMode" value="saved" :disabled="schedulerIsRunning" />
-                  <span>Use Saved</span>
-                </label>
+            <!-- Recent Runs -->
+            <section class="card" style="grid-row: span 2;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                <h2 style="margin: 0;">Recent Runs</h2>
+                <button @click="loadRecentRuns()" class="btn btn-text btn-sm">Refresh</button>
               </div>
-              <div v-if="schedulerTrainingMode === 'saved'" class="form-group compact" style="margin-top: 8px;">
-                <label>Calibrator Model</label>
-                <select v-model="schedulerSelectedCalibrator" :disabled="schedulerIsRunning" class="calibrator-dropdown">
-                  <option value="">Select saved model...</option>
-                  <option v-for="model in availableCalibratorModels" :key="model.name" :value="model.name">
-                    {{ model.name }} ({{ model.date }})
-                  </option>
-                </select>
-              </div>
-              <p class="hint">{{ schedulerTrainingMode === 'auto' ? 'Train fresh model each run' : 'Use pre-trained calibrator' }}</p>
-            </section>
 
-            <!-- Schedule Times -->
-            <section class="card">
-              <h2>Auto Schedule</h2>
-              <div class="toggle-group" style="margin-bottom: 8px;">
-                <label class="toggle">
-                  <input type="checkbox" v-model="schedulerAutoEnabled" :disabled="schedulerIsRunning" />
-                  <span class="toggle-slider"></span>
-                  <span class="toggle-label">Enable Auto-Run</span>
-                </label>
+              <div v-if="recentRuns.length === 0" class="hint" style="text-align: center; padding: 20px;">
+                No recent runs found
               </div>
-              <div v-if="schedulerAutoEnabled" class="schedule-times-list">
-                <div v-for="(time, index) in schedulerTimes" :key="index" class="schedule-time-row">
-                  <input
-                    type="time"
-                    :value="time"
-                    @change="updateScheduleTime(index, ($event.target as HTMLInputElement).value)"
-                    :disabled="schedulerIsRunning"
-                    class="time-input"
-                  />
-                  <button
-                    v-if="schedulerTimes.length > 1"
-                    @click="removeScheduleTime(index)"
-                    class="btn btn-danger btn-sm btn-icon"
-                    :disabled="schedulerIsRunning"
-                    title="Remove time"
-                  >-</button>
-                </div>
-                <button
-                  v-if="schedulerTimes.length < 6"
-                  @click="addScheduleTime"
-                  class="btn btn-secondary btn-sm"
-                  :disabled="schedulerIsRunning"
-                  style="margin-top: 4px;"
-                >+ Add Time</button>
-              </div>
-              <p v-if="schedulerAutoEnabled" class="hint">Run automatically at {{ schedulerTimes.length }} time(s) daily</p>
-              <p v-else class="hint">Auto-scheduling disabled</p>
-            </section>
 
-            <!-- Output Naming -->
-            <section class="card">
-              <h2>Output Naming</h2>
-              <div class="form-group compact">
-                <label>Demand Prefix</label>
-                <input type="text" v-model="schedulerDemandPrefix" placeholder="FC_DEM_" :disabled="schedulerIsRunning" />
-              </div>
-              <div class="form-group compact">
-                <label>Zonal Prefix</label>
-                <input type="text" v-model="schedulerDemandZonalPrefix" placeholder="FC_ZDEM_" :disabled="schedulerIsRunning" />
-              </div>
-              <div class="form-group compact">
-                <label>CFAC Prefix</label>
-                <input type="text" v-model="schedulerCfacPrefix" placeholder="FC_CF_" :disabled="schedulerIsRunning" />
-              </div>
-              <div class="form-group compact">
-                <label>Suffix</label>
-                <input type="text" v-model="schedulerOutputSuffix" placeholder="Optional suffix" :disabled="schedulerIsRunning" />
+              <div v-else style="overflow-x: auto; max-height: 400px; overflow-y: auto;">
+                <table class="runs-table" style="width: 100%; font-size: 12px;">
+                  <thead style="position: sticky; top: 0; background: var(--bg-primary); z-index: 1;">
+                    <tr>
+                      <th style="padding: 8px; text-align: left; border-bottom: 1px solid var(--border-color);">Date</th>
+                      <th style="padding: 8px; text-align: left; border-bottom: 1px solid var(--border-color);">Type</th>
+                      <th style="padding: 8px; text-align: left; border-bottom: 1px solid var(--border-color);">Horizon</th>
+                      <th style="padding: 8px; text-align: center; border-bottom: 1px solid var(--border-color);">Status</th>
+                      <th style="padding: 8px; text-align: right; border-bottom: 1px solid var(--border-color);">Records</th>
+                      <th style="padding: 8px; text-align: center; border-bottom: 1px solid var(--border-color);">Gateway</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="run in recentRuns" :key="run.id" style="border-bottom: 1px solid var(--border-color-light);">
+                      <td style="padding: 6px 8px;">{{ run.run_date }}</td>
+                      <td style="padding: 6px 8px;">{{ run.forecast_type }}</td>
+                      <td style="padding: 6px 8px;">{{ run.horizon }}</td>
+                      <td style="padding: 6px 8px; text-align: center;">
+                        <span :style="{
+                          padding: '2px 8px',
+                          borderRadius: '12px',
+                          fontSize: '11px',
+                          backgroundColor: run.status === 'completed' ? 'var(--success-bg)' : run.status === 'failed' ? 'var(--error-bg)' : 'var(--warning-bg)',
+                          color: run.status === 'completed' ? 'var(--success-color)' : run.status === 'failed' ? 'var(--error-color)' : 'var(--warning-color)'
+                        }">
+                          {{ run.status }}
+                        </span>
+                      </td>
+                      <td style="padding: 6px 8px; text-align: right;">{{ run.records_generated }}</td>
+                      <td style="padding: 6px 8px; text-align: center;">
+                        <span v-if="run.pushed_to_gateway" style="color: var(--gateway-color);">✓</span>
+                        <span v-else style="color: var(--text-muted);">-</span>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
             </section>
 
@@ -1456,18 +1534,6 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
             Running...
           </span>
           <span v-else>Generate Forecast</span>
-        </button>
-        <button
-          v-if="activeTab === 'scheduler'"
-          @click.stop="runScheduler"
-          :disabled="schedulerIsRunning || (!schedulerDemandEnabled && !schedulerCfacEnabled) || (!schedulerDailyEnabled && !schedulerWeeklyEnabled)"
-          class="btn btn-primary btn-generate"
-        >
-          <span v-if="schedulerIsRunning" class="btn-content">
-            <span class="spinner"></span>
-            Running...
-          </span>
-          <span v-else>{{ schedulerMode === 'run' ? 'Run Scheduler' : 'Run Backfill' }}</span>
         </button>
 
         <!-- Terminal Toggle Area -->

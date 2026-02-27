@@ -16,9 +16,10 @@ import Database from 'better-sqlite3';
 import { execSync } from 'child_process';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync, statSync } from 'fs';
 import { parse } from 'csv-parse/sync';
-import { autoPushIfEnabled, isGatewayEnabled } from './sftpPushService.js';
+import { pushFileToGateway, isGatewayEnabled, type ForecastCategory, type PushResult } from './sftpPushService.js';
+import { createHash } from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -79,6 +80,35 @@ interface SchedulerConfig {
   autoCalibrateDays?: number;
   // Gateway options
   pushToGateway?: boolean;  // Push generated forecasts to Vantage-Gateway (respects global VANTAGE_GATEWAY_ENABLED)
+
+  // New: Configurable run times (PHT)
+  runTimes?: string[];           // e.g., ['06:00', '18:00']
+  runDays?: number[];            // 1-7 (1=Monday)
+
+  // New: Weather refresh
+  weatherMaxAgeHours?: number;   // Default: 6
+  weatherRefreshMode?: 'auto' | 'always' | 'never';
+
+  // New: Archiving
+  archiveEnabled?: boolean;
+  archiveRetentionDays?: number; // Default: 90
+
+  // New: Gateway naming
+  gatewayNaming?: 'gateway' | 'legacy';  // Use DA_DEM_* or FC_DEM_*
+}
+
+interface SchedulerConfigDB {
+  id: number;
+  enabled: boolean;
+  run_time_morning: string;
+  run_time_evening: string | null;
+  run_days: string;  // Comma-separated
+  forecast_types: string;  // Comma-separated
+  horizons: string;  // Comma-separated
+  weather_max_age_hours: number;
+  auto_push_gateway: boolean;
+  archive_retention_days: number;
+  updated_at: string;
 }
 
 export class ForecastSchedulerService {
@@ -129,6 +159,8 @@ export class ForecastSchedulerService {
         error_message TEXT,
         scale_wind REAL,
         scale_solar REAL,
+        gateway_path TEXT,
+        gateway_category TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
       );
 
@@ -163,8 +195,72 @@ export class ForecastSchedulerService {
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
       );
 
+      -- Scheduler configuration (singleton table)
+      CREATE TABLE IF NOT EXISTS scheduler_config (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        enabled INTEGER DEFAULT 0,
+        run_time_morning TEXT DEFAULT '06:00',
+        run_time_evening TEXT DEFAULT '18:00',
+        run_days TEXT DEFAULT '1,2,3,4,5,6,7',
+        forecast_types TEXT DEFAULT 'demand,cfac',
+        horizons TEXT DEFAULT 'daily,weekly',
+        weather_max_age_hours INTEGER DEFAULT 6,
+        auto_push_gateway INTEGER DEFAULT 1,
+        archive_retention_days INTEGER DEFAULT 90,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      );
+
+      -- Forecast archive tracking
+      CREATE TABLE IF NOT EXISTS forecast_archive (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id INTEGER NOT NULL,
+        archive_date TEXT NOT NULL,
+        forecast_date TEXT NOT NULL,
+        horizon TEXT NOT NULL,
+        forecast_type TEXT NOT NULL,
+        local_path TEXT NOT NULL,
+        gateway_path TEXT,
+        file_size_bytes INTEGER,
+        checksum TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (run_id) REFERENCES forecast_runs(id)
+      );
+
+      -- Hourly demand forecast values
+      CREATE TABLE IF NOT EXISTS demand_forecast_hourly (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id INTEGER NOT NULL,
+        datetime TEXT NOT NULL,
+        region TEXT NOT NULL,
+        forecast_mw REAL NOT NULL,
+        actual_mw REAL,
+        error_mw REAL,
+        error_pct REAL,
+        FOREIGN KEY (run_id) REFERENCES forecast_runs(id)
+      );
+
+      -- Hourly CFAC forecast values
+      CREATE TABLE IF NOT EXISTS cfac_forecast_hourly (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id INTEGER NOT NULL,
+        datetime TEXT NOT NULL,
+        station_code TEXT NOT NULL,
+        station_type TEXT NOT NULL,
+        forecast_cf REAL NOT NULL,
+        actual_cf REAL,
+        error_cf REAL,
+        error_pct REAL,
+        FOREIGN KEY (run_id) REFERENCES forecast_runs(id)
+      );
+
       CREATE INDEX IF NOT EXISTS idx_forecast_runs_date ON forecast_runs(run_date);
       CREATE INDEX IF NOT EXISTS idx_forecast_runs_status ON forecast_runs(status);
+      CREATE INDEX IF NOT EXISTS idx_archive_date ON forecast_archive(archive_date);
+      CREATE INDEX IF NOT EXISTS idx_archive_forecast_date ON forecast_archive(forecast_date);
+      CREATE INDEX IF NOT EXISTS idx_demand_hourly_run ON demand_forecast_hourly(run_id);
+      CREATE INDEX IF NOT EXISTS idx_demand_hourly_dt ON demand_forecast_hourly(datetime);
+      CREATE INDEX IF NOT EXISTS idx_cfac_hourly_run ON cfac_forecast_hourly(run_id);
+      CREATE INDEX IF NOT EXISTS idx_cfac_hourly_dt ON cfac_forecast_hourly(datetime);
     `);
   }
 
@@ -866,6 +962,11 @@ export class ForecastSchedulerService {
       args.push('--bias-correction');
     }
 
+    // Add weather max age if configured
+    if (this.config.weatherMaxAgeHours !== undefined) {
+      args.push('--weather-max-age', this.config.weatherMaxAgeHours.toString());
+    }
+
     execSync(`"${this.nodeCmd}" ${args.map(a => `"${a}"`).join(' ')}`, {
       cwd: this.projectRoot,
       encoding: 'utf-8',
@@ -902,6 +1003,11 @@ export class ForecastSchedulerService {
     }
     if (scaleOffpeak !== undefined && scaleOffpeak !== 0) {
       args.push('--scale-offpeak', scaleOffpeak.toString());
+    }
+
+    // Add weather max age if configured
+    if (this.config.weatherMaxAgeHours !== undefined) {
+      args.push('--weather-max-age', this.config.weatherMaxAgeHours.toString());
     }
 
     execSync(`"${this.nodeCmd}" ${args.map(a => `"${a}"`).join(' ')}`, {
@@ -982,12 +1088,64 @@ export class ForecastSchedulerService {
         console.log(`   📄 ${outputFile}`);
       }
 
+      // Store hourly forecasts in database
+      this.storeHourlyForecasts(runId, outputFile, 'cfac');
+
+      // Archive forecast if enabled
+      let archivePath: string | null = null;
+      if (this.config.archiveEnabled !== false) {  // Default: enabled
+        archivePath = this.archiveForecast(outputFile, asOfDate, horizon, 'cfac');
+        if (archivePath && verbose) {
+          console.log(`   📦 Archived: ${archivePath}`);
+        }
+      }
+
       // Push to gateway if enabled (respects global VANTAGE_GATEWAY_ENABLED and config.pushToGateway)
+      let gatewayPath: string | null = null;
+      let gatewayCategory: ForecastCategory | null = null;
       if (this.config.pushToGateway || isGatewayEnabled()) {
         if (verbose) {
           console.log(`   📤 Pushing to gateway...`);
         }
-        await autoPushIfEnabled(outputFile, this.config.pushToGateway);
+        try {
+          gatewayCategory = this.getForecastCategory(horizon, 'cfac');
+          const pushResult: PushResult = await pushFileToGateway(outputFile, gatewayCategory);
+          if (pushResult.success) {
+            gatewayPath = pushResult.remotePath;
+            if (verbose) {
+              console.log(`   ✅ Pushed to gateway: ${gatewayPath}`);
+            }
+          } else if (verbose) {
+            console.log(`   ⚠️  Gateway push failed: ${pushResult.error}`);
+          }
+        } catch (error: any) {
+          if (verbose) {
+            console.log(`   ⚠️  Gateway push error: ${error.message}`);
+          }
+        }
+      }
+
+      // Update run with gateway info
+      if (gatewayPath || gatewayCategory) {
+        this.db.prepare(`
+          UPDATE forecast_runs SET gateway_path = ?, gateway_category = ? WHERE id = ?
+        `).run(gatewayPath, gatewayCategory, runId);
+      }
+
+      // Record archive in database
+      if (archivePath) {
+        const targetDate = horizon === 'daily'
+          ? DateTime.fromISO(asOfDate).plus({ days: 1 }).toISODate()!
+          : DateTime.fromISO(asOfDate).plus({ days: 1 }).toISODate()!;
+
+        const fileStats = statSync(archivePath);
+        const checksum = this.calculateChecksum(archivePath);
+
+        this.db.prepare(`
+          INSERT INTO forecast_archive
+          (run_id, archive_date, forecast_date, horizon, forecast_type, local_path, gateway_path, file_size_bytes, checksum)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(runId, asOfDate, targetDate, horizon, 'cfac', archivePath, gatewayPath, fileStats.size, checksum);
       }
 
       return this.getRunById(runId)!;
@@ -1137,12 +1295,64 @@ export class ForecastSchedulerService {
         console.log(`   📄 ${outputFile}`);
       }
 
+      // Store hourly forecasts in database
+      this.storeHourlyForecasts(runId, outputFile, 'demand');
+
+      // Archive forecast if enabled
+      let archivePath: string | null = null;
+      if (this.config.archiveEnabled !== false) {  // Default: enabled
+        archivePath = this.archiveForecast(outputFile, asOfDate, horizon, 'demand');
+        if (archivePath && verbose) {
+          console.log(`   📦 Archived: ${archivePath}`);
+        }
+      }
+
       // Push to gateway if enabled (respects global VANTAGE_GATEWAY_ENABLED and config.pushToGateway)
+      let gatewayPath: string | null = null;
+      let gatewayCategory: ForecastCategory | null = null;
       if (this.config.pushToGateway || isGatewayEnabled()) {
         if (verbose) {
           console.log(`   📤 Pushing to gateway...`);
         }
-        await autoPushIfEnabled(outputFile, this.config.pushToGateway);
+        try {
+          gatewayCategory = this.getForecastCategory(horizon, 'demand');
+          const pushResult: PushResult = await pushFileToGateway(outputFile, gatewayCategory);
+          if (pushResult.success) {
+            gatewayPath = pushResult.remotePath;
+            if (verbose) {
+              console.log(`   ✅ Pushed to gateway: ${gatewayPath}`);
+            }
+          } else if (verbose) {
+            console.log(`   ⚠️  Gateway push failed: ${pushResult.error}`);
+          }
+        } catch (error: any) {
+          if (verbose) {
+            console.log(`   ⚠️  Gateway push error: ${error.message}`);
+          }
+        }
+      }
+
+      // Update run with gateway info
+      if (gatewayPath || gatewayCategory) {
+        this.db.prepare(`
+          UPDATE forecast_runs SET gateway_path = ?, gateway_category = ? WHERE id = ?
+        `).run(gatewayPath, gatewayCategory, runId);
+      }
+
+      // Record archive in database
+      if (archivePath) {
+        const targetDate = horizon === 'daily'
+          ? DateTime.fromISO(asOfDate).plus({ days: 1 }).toISODate()!
+          : DateTime.fromISO(asOfDate).plus({ days: 1 }).toISODate()!;
+
+        const fileStats = statSync(archivePath);
+        const checksum = this.calculateChecksum(archivePath);
+
+        this.db.prepare(`
+          INSERT INTO forecast_archive
+          (run_id, archive_date, forecast_date, horizon, forecast_type, local_path, gateway_path, file_size_bytes, checksum)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(runId, asOfDate, targetDate, horizon, 'demand', archivePath, gatewayPath, fileStats.size, checksum);
       }
 
       return this.getRunById(runId)!;
@@ -1284,6 +1494,396 @@ export class ForecastSchedulerService {
 
     await checkAndRun();
     setInterval(checkAndRun, interval);
+  }
+
+  /**
+   * ═══════════════════════════════════════════════════════════════════════════
+   * SCHEDULER CONFIGURATION MANAGEMENT
+   * ═══════════════════════════════════════════════════════════════════════════
+   */
+
+  /**
+   * Load scheduler configuration from database
+   */
+  loadSchedulerConfig(): SchedulerConfigDB | null {
+    const row = this.db.prepare('SELECT * FROM scheduler_config WHERE id = 1').get() as any;
+    if (!row) return null;
+
+    return {
+      id: row.id,
+      enabled: row.enabled === 1,
+      run_time_morning: row.run_time_morning,
+      run_time_evening: row.run_time_evening,
+      run_days: row.run_days,
+      forecast_types: row.forecast_types,
+      horizons: row.horizons,
+      weather_max_age_hours: row.weather_max_age_hours,
+      auto_push_gateway: row.auto_push_gateway === 1,
+      archive_retention_days: row.archive_retention_days,
+      updated_at: row.updated_at
+    };
+  }
+
+  /**
+   * Save scheduler configuration to database
+   */
+  saveSchedulerConfig(config: Partial<SchedulerConfigDB>): void {
+    // Ensure singleton row exists
+    this.db.prepare(`
+      INSERT OR IGNORE INTO scheduler_config (id, enabled) VALUES (1, 0)
+    `).run();
+
+    // Build update query dynamically
+    const fields: string[] = [];
+    const values: any[] = [];
+
+    if (config.enabled !== undefined) {
+      fields.push('enabled = ?');
+      values.push(config.enabled ? 1 : 0);
+    }
+    if (config.run_time_morning !== undefined) {
+      fields.push('run_time_morning = ?');
+      values.push(config.run_time_morning);
+    }
+    if (config.run_time_evening !== undefined) {
+      fields.push('run_time_evening = ?');
+      values.push(config.run_time_evening);
+    }
+    if (config.run_days !== undefined) {
+      fields.push('run_days = ?');
+      values.push(config.run_days);
+    }
+    if (config.forecast_types !== undefined) {
+      fields.push('forecast_types = ?');
+      values.push(config.forecast_types);
+    }
+    if (config.horizons !== undefined) {
+      fields.push('horizons = ?');
+      values.push(config.horizons);
+    }
+    if (config.weather_max_age_hours !== undefined) {
+      fields.push('weather_max_age_hours = ?');
+      values.push(config.weather_max_age_hours);
+    }
+    if (config.auto_push_gateway !== undefined) {
+      fields.push('auto_push_gateway = ?');
+      values.push(config.auto_push_gateway ? 1 : 0);
+    }
+    if (config.archive_retention_days !== undefined) {
+      fields.push('archive_retention_days = ?');
+      values.push(config.archive_retention_days);
+    }
+
+    if (fields.length > 0) {
+      fields.push('updated_at = CURRENT_TIMESTAMP');
+      this.db.prepare(`
+        UPDATE scheduler_config SET ${fields.join(', ')} WHERE id = 1
+      `).run(...values);
+    }
+  }
+
+  /**
+   * ═══════════════════════════════════════════════════════════════════════════
+   * ARCHIVE MANAGEMENT
+   * ═══════════════════════════════════════════════════════════════════════════
+   */
+
+  /**
+   * Get gateway-compatible filename based on configuration
+   * @param horizon - 'daily' or 'weekly'
+   * @param type - 'demand' or 'cfac'
+   * @param targetDate - Date being forecasted (YYYY-MM-DD)
+   * @param naming - Naming convention ('gateway' uses DA_/WA_ prefix, 'legacy' uses FC_)
+   * @returns Filename string
+   */
+  getGatewayFilename(config: {
+    horizon: 'daily' | 'weekly';
+    type: 'demand' | 'cfac';
+    targetDate: string;
+    naming?: 'gateway' | 'legacy';
+  }): string {
+    const { horizon, type, targetDate, naming = 'gateway' } = config;
+
+    // Gateway naming: DA_DEM_YYYY-MM-DD.csv, WA_DEM_YYYY-MM-DD.csv
+    // Legacy naming: FC_DEM_YYYY-MM-DD.csv (kept for backwards compatibility)
+    const prefix = naming === 'gateway'
+      ? (horizon === 'daily' ? 'DA_' : 'WA_')
+      : 'FC_';
+
+    const typeCode = type === 'demand' ? 'DEM' : 'MHCF';
+    return `${prefix}${typeCode}_${targetDate}.csv`;
+  }
+
+  /**
+   * Get forecast category for gateway push based on horizon and type
+   */
+  private getForecastCategory(horizon: 'daily' | 'weekly', type: 'demand' | 'cfac'): ForecastCategory {
+    if (horizon === 'daily') {
+      return type === 'demand' ? 'day-ahead-demand' : 'day-ahead-mhcf';
+    } else {
+      return type === 'demand' ? 'week-ahead-demand' : 'week-ahead-mhcf';
+    }
+  }
+
+  /**
+   * Calculate SHA256 checksum for a file (synchronous)
+   */
+  private calculateChecksum(filePath: string): string {
+    const hash = createHash('sha256');
+    const content = readFileSync(filePath);
+    hash.update(content);
+    return hash.digest('hex');
+  }
+
+  /**
+   * Archive a forecast file with gateway naming convention
+   * Structure: output/archive/YYYY-MM/YYYY-MM-DD/DA_DEM_YYYY-MM-DD.csv
+   *
+   * @param outputFile - Source file path
+   * @param asOfDate - As-of date (YYYY-MM-DD)
+   * @param horizon - 'daily' or 'weekly'
+   * @param type - 'demand' or 'cfac'
+   * @returns Archive file path
+   */
+  archiveForecast(
+    outputFile: string,
+    asOfDate: string,
+    horizon: 'daily' | 'weekly',
+    type: 'demand' | 'cfac'
+  ): string | null {
+    if (!existsSync(outputFile)) {
+      return null;
+    }
+
+    try {
+      // Parse as-of date
+      const asOf = DateTime.fromISO(asOfDate);
+      const yearMonth = asOf.toFormat('yyyy-MM');
+
+      // Create archive directory structure: output/archive/YYYY-MM/YYYY-MM-DD/
+      const archiveDir = join(this.config.outputDir, 'archive', yearMonth, asOfDate);
+      if (!existsSync(archiveDir)) {
+        mkdirSync(archiveDir, { recursive: true });
+      }
+
+      // Get target date (start of forecast period)
+      const targetDate = horizon === 'daily'
+        ? asOf.plus({ days: 1 }).toISODate()!
+        : asOf.plus({ days: 1 }).toISODate()!;  // Week-ahead also starts next day
+
+      // Generate gateway-compatible filename
+      const naming = this.config.gatewayNaming || 'gateway';
+      const archiveFilename = this.getGatewayFilename({ horizon, type, targetDate, naming });
+      const archivePath = join(archiveDir, archiveFilename);
+
+      // Copy file to archive
+      const content = readFileSync(outputFile);
+      writeFileSync(archivePath, content);
+
+      return archivePath;
+    } catch (error) {
+      console.error(`Failed to archive forecast: ${error}`);
+      return null;
+    }
+  }
+
+  /**
+   * Clean up old archives based on retention policy
+   */
+  cleanupOldArchives(): { deleted: number; errors: number } {
+    const retentionDays = this.config.archiveRetentionDays || 90;
+    const cutoffDate = DateTime.now().minus({ days: retentionDays });
+
+    let deleted = 0;
+    let errors = 0;
+
+    try {
+      const archiveRoot = join(this.config.outputDir, 'archive');
+      if (!existsSync(archiveRoot)) {
+        return { deleted: 0, errors: 0 };
+      }
+
+      // Iterate through YYYY-MM directories
+      const yearMonthDirs = readdirSync(archiveRoot);
+
+      for (const yearMonth of yearMonthDirs) {
+        const yearMonthPath = join(archiveRoot, yearMonth);
+        if (!statSync(yearMonthPath).isDirectory()) continue;
+
+        // Iterate through YYYY-MM-DD directories
+        const dateDirs = readdirSync(yearMonthPath);
+
+        for (const dateDir of dateDirs) {
+          try {
+            const archiveDate = DateTime.fromISO(dateDir);
+            if (!archiveDate.isValid) continue;
+
+            if (archiveDate < cutoffDate) {
+              const datePath = join(yearMonthPath, dateDir);
+              // Delete all files in this date directory
+              const files = readdirSync(datePath);
+              for (const file of files) {
+                unlinkSync(join(datePath, file));
+                deleted++;
+              }
+              // Remove empty directory
+              try {
+                const remainingFiles = readdirSync(datePath);
+                if (remainingFiles.length === 0) {
+                  // Use rmdir via execSync for safety
+                  execSync(`rmdir "${datePath}"`, { cwd: this.projectRoot });
+                }
+              } catch (e) {
+                // Directory not empty or other error, ignore
+              }
+            }
+          } catch (e) {
+            errors++;
+          }
+        }
+      }
+    } catch (error) {
+      console.error(`Archive cleanup failed: ${error}`);
+      errors++;
+    }
+
+    return { deleted, errors };
+  }
+
+  /**
+   * ═══════════════════════════════════════════════════════════════════════════
+   * HOURLY FORECAST STORAGE
+   * ═══════════════════════════════════════════════════════════════════════════
+   */
+
+  /**
+   * Store hourly demand forecast values in database using transaction
+   */
+  storeHourlyDemandForecasts(runId: number, forecastFile: string): { stored: number } {
+    if (!existsSync(forecastFile)) {
+      return { stored: 0 };
+    }
+
+    try {
+      const content = readFileSync(forecastFile, 'utf-8');
+      const data = parse(content, { columns: true, skip_empty_lines: true });
+
+      if (data.length === 0) {
+        return { stored: 0 };
+      }
+
+      let stored = 0;
+
+      // Get region columns (exclude DateTimeEnding)
+      const columns = Object.keys(data[0]);
+      const regions = columns.filter(col => col !== 'DateTimeEnding');
+
+      const insertStmt = this.db.prepare(`
+        INSERT INTO demand_forecast_hourly (run_id, datetime, region, forecast_mw)
+        VALUES (?, ?, ?, ?)
+      `);
+
+      // Use transaction for bulk insert
+      const transaction = this.db.transaction(() => {
+        for (const row of data) {
+          const datetime = row.DateTimeEnding;
+
+          for (const region of regions) {
+            const forecastMW = parseFloat(row[region]);
+            if (!isNaN(forecastMW)) {
+              insertStmt.run(runId, datetime, region, forecastMW);
+              stored++;
+            }
+          }
+        }
+      });
+
+      transaction();
+      return { stored };
+
+    } catch (error) {
+      console.error(`Failed to store hourly demand forecasts: ${error}`);
+      return { stored: 0 };
+    }
+  }
+
+  /**
+   * Store hourly CFAC forecast values in database using transaction
+   */
+  storeHourlyCfacForecasts(runId: number, forecastFile: string): { stored: number } {
+    if (!existsSync(forecastFile)) {
+      return { stored: 0 };
+    }
+
+    try {
+      const content = readFileSync(forecastFile, 'utf-8');
+      const data = parse(content, { columns: true, skip_empty_lines: true });
+
+      if (data.length === 0) {
+        return { stored: 0 };
+      }
+
+      let stored = 0;
+
+      // Get station columns (exclude DateTimeEnding)
+      const columns = Object.keys(data[0]);
+      const stations = columns.filter(col => col !== 'DateTimeEnding');
+
+      // Detect station type from suffix
+      const getStationType = (stationCode: string): string => {
+        if (stationCode.endsWith('_W')) return 'WIND';
+        if (stationCode.endsWith('_S')) return 'SOLAR';
+        if (stationCode.endsWith('_H')) return 'HYDRO';
+        if (stationCode.endsWith('_B')) return 'BATTERY';
+        if (stationCode.endsWith('_G') || stationCode.endsWith('_GP')) return 'GEOTHERMAL';
+        if (stationCode.endsWith('_BI') || stationCode.endsWith('_BG') || stationCode.endsWith('_BL')) return 'BIOMASS';
+
+        // Explicit wind stations (non-standard naming)
+        const windStations = ['01BURGOS', '01LAOAG', '01PAGUDPUD', '02DOLORES', '02MMPP_G01', '03AWOC_G01', '08PWIND_G01', '08WIND_G02'];
+        if (windStations.includes(stationCode)) return 'WIND';
+
+        return 'UNKNOWN';
+      };
+
+      const insertStmt = this.db.prepare(`
+        INSERT INTO cfac_forecast_hourly (run_id, datetime, station_code, station_type, forecast_cf)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+
+      // Use transaction for bulk insert
+      const transaction = this.db.transaction(() => {
+        for (const row of data) {
+          const datetime = row.DateTimeEnding;
+
+          for (const station of stations) {
+            const forecastCF = parseFloat(row[station]);
+            if (!isNaN(forecastCF)) {
+              const stationType = getStationType(station);
+              insertStmt.run(runId, datetime, station, stationType, forecastCF);
+              stored++;
+            }
+          }
+        }
+      });
+
+      transaction();
+      return { stored };
+
+    } catch (error) {
+      console.error(`Failed to store hourly CFAC forecasts: ${error}`);
+      return { stored: 0 };
+    }
+  }
+
+  /**
+   * Store hourly forecasts based on type
+   */
+  private storeHourlyForecasts(runId: number, forecastFile: string, type: 'demand' | 'cfac'): void {
+    if (type === 'demand') {
+      this.storeHourlyDemandForecasts(runId, forecastFile);
+    } else {
+      this.storeHourlyCfacForecasts(runId, forecastFile);
+    }
   }
 
   close(): void {

@@ -36,4 +36,9 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     importToDatabase: (options) => electron_1.ipcRenderer.invoke('import-to-database', options),
     // List trained calibration models
     listTrainedModels: () => electron_1.ipcRenderer.invoke('list-trained-models'),
+    // Scheduler configuration management
+    loadSchedulerConfig: () => electron_1.ipcRenderer.invoke('load-scheduler-config'),
+    saveSchedulerConfig: (config) => electron_1.ipcRenderer.invoke('save-scheduler-config', config),
+    getRecentRuns: (limit) => electron_1.ipcRenderer.invoke('get-recent-runs', limit),
+    runSchedulerManual: (date, type, horizon) => electron_1.ipcRenderer.invoke('run-scheduler-manual', date, type, horizon),
 });

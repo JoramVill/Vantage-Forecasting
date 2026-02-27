@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, unlinkSync } from 'fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, unlinkSync, statSync } from 'fs';
 import { join } from 'path';
 import { DateTime } from 'luxon';
 import { getDatabase, closeDatabase, DatabaseService } from '../database/index.js';
@@ -25,6 +25,21 @@ export interface WeatherServiceConfig {
   apiKey: string;
   cacheDir: string;
   locations: WeatherLocation[];
+}
+
+export interface WeatherCacheInfo {
+  path: string;
+  exists: boolean;
+  ageHours: number;
+  isHistorical: boolean;  // Target date is fully in the past
+  needsRefresh: boolean;
+}
+
+export type WeatherRefreshMode = 'cache' | 'refresh' | 'force-refresh';
+
+export interface FetchWeatherOptions {
+  refreshMode?: WeatherRefreshMode;
+  maxAgeHours?: number;
 }
 
 // Default locations for Philippine grid regions
@@ -295,6 +310,43 @@ export class WeatherService {
       return readFileSync(filePath, 'utf8');
     }
     return null;
+  }
+
+  /**
+   * Check if weather cache needs refresh
+   *
+   * Rule: Historical data (target date fully passed) never expires.
+   * Future data expires after maxAgeHours (default 6).
+   *
+   * IMPORTANT: "Historical" is determined by comparing the target date
+   * to the current date in PHT, not by current time. This handles the
+   * midnight edge case correctly.
+   */
+  checkCacheAge(
+    targetDate: string,  // YYYY-MM-DD
+    cachePath: string,
+    maxAgeHours: number = 6
+  ): WeatherCacheInfo {
+    const now = DateTime.now().setZone('Asia/Manila');
+    const target = DateTime.fromISO(targetDate).setZone('Asia/Manila');
+
+    // Target is historical if the entire day has passed
+    // (target date < today's date, not just current time)
+    const isHistorical = target.startOf('day') < now.startOf('day');
+
+    const exists = existsSync(cachePath);
+    let ageHours = 0;
+
+    if (exists) {
+      const stats = statSync(cachePath);
+      ageHours = (now.toMillis() - stats.mtimeMs) / (1000 * 60 * 60);
+    }
+
+    // Historical data never needs refresh
+    // Future data needs refresh if older than maxAgeHours
+    const needsRefresh = !isHistorical && exists && ageHours > maxAgeHours;
+
+    return { path: cachePath, exists, ageHours, isHistorical, needsRefresh };
   }
 
   /**

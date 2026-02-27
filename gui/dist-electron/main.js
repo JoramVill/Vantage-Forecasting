@@ -41,6 +41,7 @@ const child_process_1 = require("child_process");
 const path = __importStar(require("path"));
 const fs = __importStar(require("fs"));
 const electron_store_1 = __importDefault(require("electron-store"));
+const better_sqlite3_1 = __importDefault(require("better-sqlite3"));
 // Zone codes for detection
 const ZONAL_CODES = ['01NLUZ', '02METRO', '03SLUZ', '04LEYTE', '05CEBU', '06NEGROS', '07BOHOL', '08PANAY', '09NWMIN', '10LANAO', '11NCMIN', '12NEMIN', '13SEMIN', '14SWMIN'];
 const REGIONAL_CODES = ['CLUZ', 'CVIS', 'CMIN'];
@@ -546,4 +547,218 @@ electron_1.ipcMain.handle('list-trained-models', async () => {
     catch (error) {
         return { success: false, message: error.message };
     }
+});
+// ═══════════════════════════════════════════════════════════════════════════════
+// SCHEDULER IPC HANDLERS
+// ═══════════════════════════════════════════════════════════════════════════════
+// Load scheduler configuration from database
+electron_1.ipcMain.handle('load-scheduler-config', async () => {
+    try {
+        const projectRoot = getProjectRoot();
+        const dbPath = path.join(projectRoot, 'forecast.db');
+        // Check if database exists
+        if (!fs.existsSync(dbPath)) {
+            // Return defaults if database doesn't exist
+            return {
+                enabled: false,
+                runTimeMorning: '06:00',
+                runTimeEvening: '18:00',
+                secondRunEnabled: false,
+                runDays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+                forecastDemand: true,
+                forecastCfac: true,
+                horizonDaily: true,
+                horizonWeekly: true,
+                weatherMaxAge: 6,
+                autoPushGateway: false,
+                archiveRetention: 90
+            };
+        }
+        // Use better-sqlite3 to read config
+        const db = new better_sqlite3_1.default(dbPath);
+        const config = db.prepare('SELECT * FROM scheduler_config WHERE id = 1').get();
+        db.close();
+        if (!config) {
+            // Return defaults if no config found
+            return {
+                enabled: false,
+                runTimeMorning: '06:00',
+                runTimeEvening: '18:00',
+                secondRunEnabled: false,
+                runDays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+                forecastDemand: true,
+                forecastCfac: true,
+                horizonDaily: true,
+                horizonWeekly: true,
+                weatherMaxAge: 6,
+                autoPushGateway: false,
+                archiveRetention: 90
+            };
+        }
+        // Parse database values to config format
+        const dayMap = { '1': 'Mon', '2': 'Tue', '3': 'Wed', '4': 'Thu', '5': 'Fri', '6': 'Sat', '7': 'Sun' };
+        const runDays = config.run_days ? config.run_days.split(',').map((d) => {
+            return dayMap[d.trim()] || d.trim();
+        }) : ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+        const forecastTypes = config.forecast_types || 'demand,cfac';
+        const horizons = config.horizons || 'daily,weekly';
+        return {
+            enabled: config.enabled === 1,
+            runTimeMorning: config.run_time_morning || '06:00',
+            runTimeEvening: config.run_time_evening || '18:00',
+            secondRunEnabled: !!config.run_time_evening,
+            runDays,
+            forecastDemand: forecastTypes.includes('demand'),
+            forecastCfac: forecastTypes.includes('cfac'),
+            horizonDaily: horizons.includes('daily'),
+            horizonWeekly: horizons.includes('weekly'),
+            weatherMaxAge: config.weather_max_age_hours || 6,
+            autoPushGateway: config.auto_push_gateway === 1,
+            archiveRetention: config.archive_retention_days || 90
+        };
+    }
+    catch (error) {
+        console.error('Failed to load scheduler config:', error);
+        // Return defaults on error
+        return {
+            enabled: false,
+            runTimeMorning: '06:00',
+            runTimeEvening: '18:00',
+            secondRunEnabled: false,
+            runDays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+            forecastDemand: true,
+            forecastCfac: true,
+            horizonDaily: true,
+            horizonWeekly: true,
+            weatherMaxAge: 6,
+            autoPushGateway: false,
+            archiveRetention: 90
+        };
+    }
+});
+// Save scheduler configuration to database
+electron_1.ipcMain.handle('save-scheduler-config', async (_event, config) => {
+    try {
+        const projectRoot = getProjectRoot();
+        const dbPath = path.join(projectRoot, 'forecast.db');
+        const db = new better_sqlite3_1.default(dbPath);
+        // Convert runDays to database format (1-7)
+        const dayMap = { 'Mon': '1', 'Tue': '2', 'Wed': '3', 'Thu': '4', 'Fri': '5', 'Sat': '6', 'Sun': '7' };
+        const runDays = config.runDays.map((d) => dayMap[d] || d).join(',');
+        // Build forecast_types and horizons
+        const forecastTypes = [];
+        if (config.forecastDemand)
+            forecastTypes.push('demand');
+        if (config.forecastCfac)
+            forecastTypes.push('cfac');
+        const horizons = [];
+        if (config.horizonDaily)
+            horizons.push('daily');
+        if (config.horizonWeekly)
+            horizons.push('weekly');
+        db.prepare(`
+      INSERT INTO scheduler_config (id, enabled, run_time_morning, run_time_evening,
+        run_days, forecast_types, horizons, weather_max_age_hours,
+        auto_push_gateway, archive_retention_days, updated_at)
+      VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      ON CONFLICT(id) DO UPDATE SET
+        enabled = excluded.enabled,
+        run_time_morning = excluded.run_time_morning,
+        run_time_evening = excluded.run_time_evening,
+        run_days = excluded.run_days,
+        forecast_types = excluded.forecast_types,
+        horizons = excluded.horizons,
+        weather_max_age_hours = excluded.weather_max_age_hours,
+        auto_push_gateway = excluded.auto_push_gateway,
+        archive_retention_days = excluded.archive_retention_days,
+        updated_at = excluded.updated_at
+    `).run(config.enabled ? 1 : 0, config.runTimeMorning, config.secondRunEnabled ? config.runTimeEvening : null, runDays, forecastTypes.join(','), horizons.join(','), config.weatherMaxAge, config.autoPushGateway ? 1 : 0, config.archiveRetention);
+        db.close();
+        return { success: true };
+    }
+    catch (error) {
+        console.error('Failed to save scheduler config:', error);
+        return { success: false, error: error.message };
+    }
+});
+// Get recent forecast runs from database
+electron_1.ipcMain.handle('get-recent-runs', async (_event, limit = 20) => {
+    try {
+        const projectRoot = getProjectRoot();
+        const dbPath = path.join(projectRoot, 'forecast.db');
+        // Check if database exists
+        if (!fs.existsSync(dbPath)) {
+            return [];
+        }
+        const db = new better_sqlite3_1.default(dbPath);
+        const runs = db.prepare(`
+      SELECT id, run_date, forecast_type, horizon, status,
+             records_generated, gateway_path, created_at
+      FROM forecast_runs
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(limit);
+        db.close();
+        return runs.map((run) => ({
+            ...run,
+            pushed_to_gateway: !!run.gateway_path
+        }));
+    }
+    catch (error) {
+        console.error('Failed to get recent runs:', error);
+        return [];
+    }
+});
+// Run scheduler manually with specified parameters
+electron_1.ipcMain.handle('run-scheduler-manual', async (_event, date, type, horizon) => {
+    const cliPath = getCliPath();
+    const projectRoot = getProjectRoot();
+    // Build CLI arguments
+    const args = [cliPath, 'scheduler', 'run', '-d', date];
+    if (type === 'demand')
+        args.push('--demand-only');
+    else if (type === 'cfac')
+        args.push('--cfac-only');
+    if (horizon === 'daily')
+        args.push('--daily');
+    else if (horizon === 'weekly')
+        args.push('--weekly');
+    console.log('Running scheduler:', 'node', ...args);
+    // Return promise that resolves when command completes
+    return new Promise((resolve) => {
+        const child = (0, child_process_1.spawn)('node', args, {
+            cwd: projectRoot,
+            shell: false,
+            env: { ...process.env }
+        });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (data) => {
+            const text = data.toString();
+            stdout += text;
+            // Send real-time output to renderer
+            if (mainWindow) {
+                mainWindow.webContents.send('command-output', { type: 'stdout', data: text });
+            }
+        });
+        child.stderr.on('data', (data) => {
+            const text = data.toString();
+            stderr += text;
+            // Send real-time output to renderer
+            if (mainWindow) {
+                mainWindow.webContents.send('command-output', { type: 'stderr', data: text });
+            }
+        });
+        child.on('close', (code) => {
+            if (code === 0) {
+                resolve({ success: true, output: stdout });
+            }
+            else {
+                resolve({ success: false, error: stderr || stdout });
+            }
+        });
+        child.on('error', (err) => {
+            resolve({ success: false, error: err.message });
+        });
+    });
 });

@@ -1,6 +1,6 @@
 // Database schema definitions
 
-export const SCHEMA_VERSION = 7;  // Fixed weather_records UNIQUE constraint for zonal mode (datetime, location)
+export const SCHEMA_VERSION = 8;  // Added scheduler enhancements: config, archive, enhanced tracking
 
 export const CREATE_TABLES_SQL = `
 -- Schema version tracking
@@ -468,7 +468,16 @@ CREATE TABLE IF NOT EXISTS forecast_runs (
   records_generated INTEGER,
   duration_ms INTEGER,
   error_message TEXT,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+  -- Enhanced tracking (v8)
+  run_source TEXT DEFAULT 'manual',    -- 'manual', 'scheduled', 'backfill', 'gui'
+  weather_refresh_mode TEXT DEFAULT 'cache', -- 'cache', 'refresh', 'force-refresh'
+  archive_path TEXT,                   -- Path where forecast was archived
+  pushed_to_gateway INTEGER DEFAULT 0, -- 0 = not pushed, 1 = pushed successfully
+  push_timestamp TEXT,                 -- When the file was pushed to gateway
+  gateway_path TEXT,                   -- Remote path on gateway
+  file_checksum TEXT                   -- SHA256 of the output file
 );
 
 -- Demand forecasts - stores hourly demand forecast values
@@ -515,6 +524,68 @@ CREATE TABLE IF NOT EXISTS forecast_evaluations (
   UNIQUE(run_id)
 );
 
+-- ============================================
+-- SCHEDULER CONFIGURATION (v8)
+-- ============================================
+
+-- Scheduler configuration (singleton table)
+CREATE TABLE IF NOT EXISTS scheduler_config (
+  id INTEGER PRIMARY KEY CHECK (id = 1),  -- Singleton row
+  enabled INTEGER DEFAULT 0,
+  run_time_morning TEXT DEFAULT '06:00',   -- HH:MM format (PHT)
+  run_time_evening TEXT DEFAULT '18:00',   -- Optional second run
+  run_days TEXT DEFAULT '1,2,3,4,5,6,7',   -- Comma-separated day numbers (1=Mon)
+  forecast_types TEXT DEFAULT 'demand,cfac', -- Comma-separated
+  horizons TEXT DEFAULT 'daily,weekly',      -- Comma-separated
+  weather_max_age_hours INTEGER DEFAULT 6,   -- Cache expiry for future dates
+  auto_push_gateway INTEGER DEFAULT 1,       -- Push on successful forecast
+  archive_retention_days INTEGER DEFAULT 90, -- Days to keep local archives
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Forecast archive tracking
+CREATE TABLE IF NOT EXISTS forecast_archive (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL,
+  archive_date TEXT NOT NULL,          -- Date archived (YYYY-MM-DD)
+  forecast_date TEXT NOT NULL,         -- Target date being forecasted
+  horizon TEXT NOT NULL,               -- 'daily' or 'weekly'
+  forecast_type TEXT NOT NULL,         -- 'demand' or 'cfac'
+  local_path TEXT NOT NULL,            -- Local archive path
+  gateway_path TEXT,                   -- Remote gateway path (if pushed)
+  file_size_bytes INTEGER,
+  checksum TEXT,                       -- SHA256 for integrity
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (run_id) REFERENCES forecast_runs(id)
+);
+
+-- Hourly demand forecast values
+CREATE TABLE IF NOT EXISTS demand_forecast_hourly (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL,
+  datetime TEXT NOT NULL,              -- ISO 8601 timestamp
+  region TEXT NOT NULL,                -- CLUZ, CVIS, CMIN (or 14 zone codes)
+  forecast_mw REAL NOT NULL,
+  actual_mw REAL,                      -- Populated during evaluation
+  error_mw REAL,                       -- forecast - actual
+  error_pct REAL,                      -- Percentage error
+  FOREIGN KEY (run_id) REFERENCES forecast_runs(id)
+);
+
+-- Hourly CFAC forecast values
+CREATE TABLE IF NOT EXISTS cfac_forecast_hourly (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL,
+  datetime TEXT NOT NULL,
+  station_code TEXT NOT NULL,          -- e.g., 01BURGOS, 01SNMANUEL_S
+  station_type TEXT NOT NULL,          -- WIND, SOLAR, HYDRO, etc.
+  forecast_cf REAL NOT NULL,           -- Capacity factor 0-1
+  actual_cf REAL,                      -- Populated during evaluation
+  error_cf REAL,
+  error_pct REAL,
+  FOREIGN KEY (run_id) REFERENCES forecast_runs(id)
+);
+
 -- Indexes for forecast tables
 CREATE INDEX IF NOT EXISTS idx_forecast_runs_date ON forecast_runs(run_date);
 CREATE INDEX IF NOT EXISTS idx_forecast_runs_type ON forecast_runs(forecast_type, horizon);
@@ -525,6 +596,14 @@ CREATE INDEX IF NOT EXISTS idx_demand_forecasts_region ON demand_forecasts(regio
 CREATE INDEX IF NOT EXISTS idx_cfac_forecasts_run ON cfac_forecasts(run_id);
 CREATE INDEX IF NOT EXISTS idx_cfac_forecasts_datetime ON cfac_forecasts(datetime);
 CREATE INDEX IF NOT EXISTS idx_cfac_forecasts_station ON cfac_forecasts(station_code);
+
+-- Indexes for v8 tables
+CREATE INDEX IF NOT EXISTS idx_archive_date ON forecast_archive(archive_date);
+CREATE INDEX IF NOT EXISTS idx_archive_forecast_date ON forecast_archive(forecast_date);
+CREATE INDEX IF NOT EXISTS idx_demand_hourly_run ON demand_forecast_hourly(run_id);
+CREATE INDEX IF NOT EXISTS idx_demand_hourly_dt ON demand_forecast_hourly(datetime);
+CREATE INDEX IF NOT EXISTS idx_cfac_hourly_run ON cfac_forecast_hourly(run_id);
+CREATE INDEX IF NOT EXISTS idx_cfac_hourly_dt ON cfac_forecast_hourly(datetime);
 `;
 
 export const REGION_MAPPING: Record<string, string> = {

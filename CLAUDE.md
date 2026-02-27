@@ -65,6 +65,20 @@ npm run electron:build                   # Package for distribution
 | `scheduler evaluate` | Evaluate pending forecasts against actuals |
 | `scheduler status` | Show run history and metrics |
 | `scheduler service` | Run as background service (daily at 6 AM) |
+| `scheduler config get/set/reset` | Manage scheduler configuration |
+
+### Gateway Integration
+| Command | Description |
+|---------|-------------|
+| `gateway push <file>` | Push forecast to Vantage Gateway via SFTP |
+| `gateway push --all` | Push all archived forecasts to gateway |
+| `gateway push --category <cat>` | Push specific category (day-ahead-demand, week-ahead-demand, etc.) |
+
+**Gateway categories:**
+- `day-ahead-demand` - Next-day demand forecasts
+- `day-ahead-mhcf` - Next-day capacity factor forecasts
+- `week-ahead-demand` - 7-day demand forecasts
+- `week-ahead-mhcf` - 7-day capacity factor forecasts
 
 ### Other
 | Command | Description |
@@ -346,6 +360,13 @@ node dist/index.js scheduler run \
   --output ./output
 ```
 
+**Run with weather refresh (recommended for future dates):**
+```bash
+node dist/index.js scheduler run \
+  -d 2025-10-15 \
+  --refresh-weather
+```
+
 **Backfill date range:**
 ```bash
 node dist/index.js scheduler backfill \
@@ -353,22 +374,68 @@ node dist/index.js scheduler backfill \
   --daily --demand-only
 ```
 
+**Backfill with overwrite (regenerate existing forecasts):**
+```bash
+node dist/index.js scheduler backfill \
+  -s 2025-10-01 -e 2025-10-31 \
+  --overwrite \
+  --suffix "revised"
+```
+
 **View status and history:**
 ```bash
 node dist/index.js scheduler status
 ```
 
-**All scheduler flags:**
+**Manage configuration:**
+```bash
+# View current configuration
+node dist/index.js scheduler config get
+
+# Set configuration values
+node dist/index.js scheduler config set demand_training_path "Data Samples/Demand"
+node dist/index.js scheduler config set cfac_training_path "Data Samples/Capacity Factor"
+node dist/index.js scheduler config set auto_push_gateway true
+
+# Reset to defaults
+node dist/index.js scheduler config reset
+```
+
+**All scheduler run flags:**
 | Flag | Description |
 |------|-------------|
 | `-d, --date <date>` | As-of date (YYYY-MM-DD), default: today |
-| `-s, --start <date>` | Backfill start date |
-| `-e, --end <date>` | Backfill end date |
 | `--demand-only` | Only generate demand forecasts |
 | `--daily` | Daily (next-day) forecasts only |
 | `--weekly` | Weekly (7-day) forecasts only |
 | `--output <dir>` | Output directory (default: `./output`) |
 | `--db <path>` | Database path (default: `./forecast.db`) |
+| `--refresh-weather` | Force weather cache refresh (recommended for future dates) |
+| `--no-push` | Skip gateway push |
+| `--no-archive` | Skip forecast archiving |
+
+**All scheduler backfill flags:**
+| Flag | Description |
+|------|-------------|
+| `-s, --start <date>` | Backfill start date (required) |
+| `-e, --end <date>` | Backfill end date (required) |
+| `--demand-only` | Only generate demand forecasts |
+| `--daily` | Daily (next-day) forecasts only |
+| `--weekly` | Weekly (7-day) forecasts only |
+| `--output <dir>` | Output directory (default: `./output`) |
+| `--db <path>` | Database path (default: `./forecast.db`) |
+| `--overwrite` | Regenerate existing forecasts |
+| `--suffix <text>` | Append custom suffix to archived filenames |
+
+**Scheduler configuration keys:**
+| Key | Description | Default |
+|-----|-------------|---------|
+| `demand_training_path` | Path to demand training data | `Data Samples/Demand` |
+| `cfac_training_path` | Path to capacity factor training data | `Data Samples/Capacity Factor` |
+| `weather_cache_dir` | Weather cache directory | `./weather_cache` |
+| `auto_push_gateway` | Auto-push to Vantage Gateway | `false` |
+| `archive_forecasts` | Enable forecast archiving | `true` |
+| `archive_path` | Archive directory path | `./output/archive` |
 
 **Output Structure:**
 ```
@@ -376,6 +443,10 @@ output/forecasts/
 └── 2025-10-15/           # As-of date folder
     ├── demand_daily.csv   # Next-day forecast (Oct 16)
     └── demand_weekly.csv  # 7-day forecast (Oct 16-22)
+
+output/archive/
+├── D+1_demand_2025-10-15_2025-10-16_2025-10-16.csv
+└── D+7_demand_2025-10-15_2025-10-16_2025-10-22.csv
 ```
 
 ---

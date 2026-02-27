@@ -44,6 +44,15 @@ export interface GatewayConfig {
   enabled: boolean;
 }
 
+export type ForecastCategory =
+  | 'day-ahead-demand'
+  | 'day-ahead-mhcf'
+  | 'week-ahead-demand'
+  | 'week-ahead-mhcf'
+  | 'historical-scenarios-weekly'
+  | 'historical-scenarios-monthly'
+  | 'historical-databases';
+
 interface ConfigFile {
   gateway?: {
     host?: string;
@@ -86,23 +95,70 @@ export function getConfig(): GatewayConfig {
 }
 
 /**
- * Determine remote directory based on filename pattern
+ * Get remote directory based on filename pattern or explicit category
+ * Matches structure in Documents/vantage-gateway/GATEWAY_SETUP_COMPLETE.md
  * Note: The SFTP user is chrooted to /opt/vantage/csv_storage
  * so paths are relative to that directory
  */
-export function getRemoteDirectory(filename: string): string {
+export function getRemoteDirectory(filename: string, category?: ForecastCategory): string {
+  // If explicit category provided
+  if (category) {
+    const pathMap: Record<ForecastCategory, string> = {
+      'day-ahead-demand': '/day-ahead/demand',
+      'day-ahead-mhcf': '/day-ahead/mhcf',
+      'week-ahead-demand': '/week-ahead/demand',
+      'week-ahead-mhcf': '/week-ahead/mhcf',
+      'historical-scenarios-weekly': '/historical/scenarios/weekly',
+      'historical-scenarios-monthly': '/historical/scenarios/monthly',
+      'historical-databases': '/historical/databases'
+    };
+    return pathMap[category] || '/other';
+  }
+
+  // Auto-detect from filename
+  const fn = filename.toUpperCase();
+
+  // Day-Ahead patterns
+  if (fn.startsWith('DA_DEM') || fn.includes('DAY_AHEAD_DEM')) {
+    return '/day-ahead/demand';
+  }
+  if (fn.startsWith('DA_MHCF') || fn.startsWith('DA_CF') || fn.includes('DAY_AHEAD_MHCF')) {
+    return '/day-ahead/mhcf';
+  }
+
+  // Week-Ahead patterns
+  if (fn.startsWith('WA_DEM') || fn.includes('WEEK_AHEAD_DEM')) {
+    return '/week-ahead/demand';
+  }
+  if (fn.startsWith('WA_MHCF') || fn.startsWith('WA_CF') || fn.includes('WEEK_AHEAD_MHCF')) {
+    return '/week-ahead/mhcf';
+  }
+
+  // Legacy patterns (backward compatibility)
   // Zonal demand files (must check before regional)
-  if (filename.startsWith('FC_ZDEM_') || filename.includes('ZDEM')) {
+  if (fn.startsWith('FC_ZDEM_') || fn.includes('ZDEM')) {
     return '/demand/zonal';
   }
   // Regional demand files
-  if (filename.startsWith('FC_DEM_') || filename.includes('_DEM_')) {
+  if (fn.startsWith('FC_DEM_') || fn.includes('_DEM_')) {
     return '/demand/regional';
   }
   // Capacity factor files
-  if (filename.startsWith('FC_CF_') || filename.includes('CFAC') || filename.includes('_CF_')) {
+  if (fn.startsWith('FC_CF_') || fn.includes('CFAC') || fn.includes('_CF_')) {
     return '/cfac';
   }
+
+  // Historical patterns
+  if (fn.includes('HIST') && fn.includes('WEEKLY')) {
+    return '/historical/scenarios/weekly';
+  }
+  if (fn.includes('HIST') && fn.includes('MONTHLY')) {
+    return '/historical/scenarios/monthly';
+  }
+  if (fn.endsWith('.MDB') || fn.endsWith('.ACCDB')) {
+    return '/historical/databases';
+  }
+
   // Default fallback
   return '/other';
 }
@@ -156,11 +212,11 @@ export async function autoPushIfEnabled(localPath: string, explicitPush?: boolea
 /**
  * Push a single file to the gateway server
  */
-export async function pushFileToGateway(localPath: string): Promise<PushResult> {
+export async function pushFileToGateway(localPath: string, category?: ForecastCategory): Promise<PushResult> {
   const config = getConfig();
   const sftp = new SftpClient();
   const filename = path.basename(localPath);
-  const remoteDir = getRemoteDirectory(filename);
+  const remoteDir = getRemoteDirectory(filename, category);
   const remotePath = `${remoteDir}/${filename}`;
 
   // Check if password is configured
@@ -279,6 +335,10 @@ export async function testGatewayConnection(): Promise<GatewayTestResult> {
   const sftp = new SftpClient();
 
   const directories = [
+    '/day-ahead/demand',
+    '/day-ahead/mhcf',
+    '/week-ahead/demand',
+    '/week-ahead/mhcf',
     '/demand/regional',
     '/demand/zonal',
     '/cfac',

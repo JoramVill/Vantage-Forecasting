@@ -35,7 +35,8 @@ import {
   isGatewayEnabled,
   isGatewayConfigured,
   autoPushIfEnabled,
-  getConfig as getGatewayConfig
+  getConfig as getGatewayConfig,
+  ForecastCategory
 } from './services/sftpPushService.js';
 import { CapacityUpdateService } from './services/capacityUpdateService.js';
 import { mergeZonalData, MergedRecord } from './utils/index.js';
@@ -9366,6 +9367,10 @@ scheduler
   .option('--use-xgboost', 'Use XGBoost for CFAC residual models')
   .option('--asymmetric-loss', 'Penalize under-predictions 2x for CFAC')
   .option('--bias-correction', 'Enable station-specific bias correction')
+  // Enhanced Phase 3A options
+  .option('--refresh-weather', 'Force refresh weather cache for future dates')
+  .option('--no-push', 'Skip gateway push even if enabled')
+  .option('--no-archive', 'Skip archiving')
   .action(async (options) => {
     try {
       const service = new ForecastSchedulerService({
@@ -9427,6 +9432,9 @@ scheduler
   .option('--output <dir>', 'Output directory', './output')
   .option('--db <path>', 'Scheduler database path', './forecast.db')
   .option('--calib-days <days>', 'Days to use for calibration', '7')
+  // Enhanced Phase 3A options
+  .option('--overwrite', 'Overwrite existing archives')
+  .option('--suffix <text>', 'Add suffix to filenames (e.g., "_v2")')
   .action(async (options) => {
     try {
       const service = new ForecastSchedulerService({
@@ -9620,6 +9628,108 @@ scheduler
       }
 
       db.close();
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+// scheduler config - View or set scheduler configuration
+scheduler
+  .command('config')
+  .description('View or set scheduler configuration')
+  .option('--show', 'Show current configuration')
+  .option('--set-times <times>', 'Set run times (comma-separated, e.g., "06:00,18:00")')
+  .option('--set-days <days>', 'Set run days (1-7, comma-separated, e.g., "1,2,3,4,5")')
+  .option('--weather-max-age <hours>', 'Set weather cache max age in hours')
+  .option('--archive-retention <days>', 'Set archive retention in days')
+  .option('--enable', 'Enable scheduler')
+  .option('--disable', 'Disable scheduler')
+  .option('--db <path>', 'Scheduler database path', './forecast.db')
+  .action(async (options) => {
+    try {
+      const service = new ForecastSchedulerService({
+        demandDataPath: 'Data Samples/Demand',
+        cfacDataPath: 'Data Samples/Capacity Factor',
+        outputDir: './output',
+        dbPath: options.db
+      });
+
+      // If --show flag or no modification flags, display current config
+      const isModifying = options.setTimes || options.setDays || options.weatherMaxAge ||
+                         options.archiveRetention || options.enable || options.disable;
+
+      if (options.show || !isModifying) {
+        const config = service.loadSchedulerConfig();
+
+        console.log('\n═══════════════════════════════════════════════════════');
+        console.log('         Scheduler Configuration');
+        console.log('═══════════════════════════════════════════════════════');
+        console.log('');
+
+        if (config) {
+          console.log(`Status:              ${config.enabled ? '✓ Enabled' : '✗ Disabled'}`);
+          console.log(`Morning run time:    ${config.run_time_morning}`);
+          console.log(`Evening run time:    ${config.run_time_evening || 'Not set'}`);
+          console.log(`Run days:            ${config.run_days}`);
+          console.log(`Forecast types:      ${config.forecast_types}`);
+          console.log(`Horizons:            ${config.horizons}`);
+          console.log(`Weather max age:     ${config.weather_max_age_hours} hours`);
+          console.log(`Auto-push gateway:   ${config.auto_push_gateway ? 'Yes' : 'No'}`);
+          console.log(`Archive retention:   ${config.archive_retention_days} days`);
+          console.log(`Last updated:        ${config.updated_at}`);
+        } else {
+          console.log('No configuration found. Using defaults.');
+        }
+
+        console.log('═══════════════════════════════════════════════════════');
+      }
+
+      // Apply modifications if provided
+      if (isModifying) {
+        const updates: any = {};
+
+        if (options.setTimes) {
+          const times = options.setTimes.split(',').map((t: string) => t.trim());
+          if (times.length > 0) updates.run_time_morning = times[0];
+          if (times.length > 1) updates.run_time_evening = times[1];
+        }
+
+        if (options.setDays) {
+          updates.run_days = options.setDays;
+        }
+
+        if (options.weatherMaxAge) {
+          updates.weather_max_age_hours = parseInt(options.weatherMaxAge);
+        }
+
+        if (options.archiveRetention) {
+          updates.archive_retention_days = parseInt(options.archiveRetention);
+        }
+
+        if (options.enable !== undefined) {
+          updates.enabled = options.enable;
+        }
+
+        if (options.disable !== undefined) {
+          updates.enabled = !options.disable;
+        }
+
+        service.saveSchedulerConfig(updates);
+        console.log('\n✅ Configuration updated successfully');
+
+        // Show updated config
+        const updated = service.loadSchedulerConfig();
+        if (updated) {
+          console.log('\nUpdated settings:');
+          Object.keys(updates).forEach((key: string) => {
+            const displayKey = key.replace(/_/g, ' ');
+            console.log(`  ${displayKey}: ${(updated as any)[key]}`);
+          });
+        }
+      }
+
+      service.close();
     } catch (error: any) {
       console.error(`\n❌ Error: ${error.message}`);
       process.exit(1);
@@ -10156,14 +10266,33 @@ gatewayCmd
 gatewayCmd
   .command('push')
   .description('Push a file or all forecast files from a directory to gateway')
-  .argument('<path>', 'File or directory path to push')
-  .option('-a, --all', 'Push all matching forecast files from directory')
-  .action(async (filePath: string, options) => {
+  .argument('[path]', 'File or directory path to push (optional if using --all)')
+  .option('-a, --all', 'Push all pending forecasts from output directory')
+  .option('--category <cat>', 'Explicit category (day-ahead-demand, day-ahead-mhcf, week-ahead-demand, week-ahead-mhcf)')
+  .action(async (filePath: string | undefined, options) => {
     try {
       if (!isGatewayConfigured()) {
         console.error('\n❌ Gateway password not configured.');
         console.error('   Set via VANTAGE_GATEWAY_PASSWORD environment variable');
         console.error('   or add to config.json: { "gateway": { "password": "<password>" } }');
+        process.exit(1);
+      }
+
+      // Validate category if provided
+      const validCategories = ['day-ahead-demand', 'day-ahead-mhcf', 'week-ahead-demand', 'week-ahead-mhcf'];
+      if (options.category && !validCategories.includes(options.category)) {
+        console.error(`\n❌ Invalid category: ${options.category}`);
+        console.error(`   Valid categories: ${validCategories.join(', ')}`);
+        process.exit(1);
+      }
+
+      // Handle --all flag with no path (use default output directory)
+      if (options.all && !filePath) {
+        filePath = './output';
+      }
+
+      if (!filePath) {
+        console.error('\n❌ Error: path argument required unless using --all');
         process.exit(1);
       }
 
@@ -10181,7 +10310,7 @@ gatewayCmd
 
         if (results.length === 0) {
           console.log('\n⚠️  No matching forecast files found.');
-          console.log('   Looking for: FC_DEM_*.csv, FC_ZDEM_*.csv, FC_CF_*.csv');
+          console.log('   Looking for: DA_*.csv, WA_*.csv, FC_DEM_*.csv, FC_ZDEM_*.csv, FC_CF_*.csv');
         } else {
           const successful = results.filter(r => r.success);
           const failed = results.filter(r => !r.success);
@@ -10208,9 +10337,12 @@ gatewayCmd
           console.log('\n' + '═'.repeat(60));
         }
       } else {
-        // Push single file
+        // Push single file with optional category
         console.log(`\n📄 Pushing file: ${fullPath}`);
-        const result = await pushFileToGateway(fullPath);
+        if (options.category) {
+          console.log(`   Category: ${options.category}`);
+        }
+        const result = await pushFileToGateway(fullPath, options.category);
 
         if (result.success) {
           const kb = ((result.bytesTransferred || 0) / 1024).toFixed(1);
