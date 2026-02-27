@@ -3204,7 +3204,7 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 16px;
-  align-items: start;
+  align-items: stretch; /* Equal height cards */
 }
 
 @media (max-width: 1200px) {
@@ -3223,11 +3223,17 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 @media (max-width: 800px) {
   .cards-grid-3 {
     grid-template-columns: 1fr;
+    max-height: calc(100vh - 200px);
+    overflow-y: auto;
   }
 
   .cards-grid-3 .stacked-cards {
     grid-column: span 1;
     grid-template-columns: 1fr;
+  }
+
+  .card-compact {
+    height: auto; /* Natural height in single column */
   }
 }
 
@@ -3238,10 +3244,15 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
   gap: 16px;
 }
 
-/* Compact card with max height constraint */
+/* Compact card - uniform height with equal content distribution */
 .card-compact {
-  max-height: 380px;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  height: 100%; /* Fill grid cell height for equal sizing */
+}
+
+.card-compact > h2 {
+  flex-shrink: 0; /* Keep header fixed size */
 }
 
 /* Forecast Period Row (inside Forecast Options card) */

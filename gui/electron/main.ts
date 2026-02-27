@@ -29,6 +29,13 @@ function createWindow() {
     minHeight: 600,
     title: 'Vantage Forecaster',
     icon: iconPath,
+    backgroundColor: '#0f172a', // Match app's dark blue theme
+    titleBarStyle: 'default',
+    titleBarOverlay: {
+      color: '#0f172a',
+      symbolColor: '#94a3b8',
+      height: 32,
+    },
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,

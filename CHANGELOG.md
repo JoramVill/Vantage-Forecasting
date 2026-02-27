@@ -40,6 +40,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Auto-refresh with configurable interval
   - Save/reset configuration buttons
 
+- **GUI Layout Improvements**
+  - Uniform card sizing for Output Naming, Model Training, and Forecast Options
+  - Equal-height cards using CSS Grid with flexbox stretch alignment
+  - Responsive single-column layout with scrollable container on narrow screens (<800px)
+  - Dark blue Electron window background (#0f172a) matching app theme
+  - Styled titlebar overlay with matching colors and contrast symbols
+
 - **Electron IPC Integration**
   - `load-scheduler-config` handler for retrieving scheduler settings
   - `save-scheduler-config` handler for persisting configuration changes
