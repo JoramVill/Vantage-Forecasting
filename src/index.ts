@@ -27,6 +27,16 @@ import { parseInterconnectorCsv } from './parsers/interconnectorParser.js';
 import { buildInterconnectorTrainingSamples } from './features/interconnectorFeatures.js';
 import { InterconnectorCongestionModel } from './models/interconnector/index.js';
 import { ForecastSchedulerService } from './services/forecastSchedulerService.js';
+import {
+  pushFileToGateway,
+  pushAllForecasts,
+  testGatewayConnection,
+  formatTestResults,
+  isGatewayEnabled,
+  isGatewayConfigured,
+  autoPushIfEnabled,
+  getConfig as getGatewayConfig
+} from './services/sftpPushService.js';
 import { CapacityUpdateService } from './services/capacityUpdateService.js';
 import { mergeZonalData, MergedRecord } from './utils/index.js';
 import { extractZonalFeatures } from './features/featureEngineering.js';
@@ -456,6 +466,9 @@ async function runZonalForecast(options: any): Promise<void> {
   console.log(`\n✅ Zonal forecast written to: ${options.output}`);
   console.log(`   📊 ${forecasts.length} predictions across ${[...new Set(forecasts.map(f => f.region))].length} zones`);
   console.log(`   📅 Period: ${options.start} to ${options.end}`);
+
+  // Push to gateway if requested or auto-push enabled
+  await autoPushIfEnabled(options.output, options.push);
 }
 
 const program = new Command();
@@ -628,6 +641,7 @@ program
   .option('--no-calibrate', 'Disable XGBoost calibration layer (uses hybrid model only)')
   .option('--save-calibrator <path>', 'Save trained calibrator model to file')
   .option('--load-calibrator <path>', 'Load calibrator model from file (skips training)')
+  .option('--push', 'Push generated forecast to Vantage-Gateway server')
   .action(async (options) => {
     try {
       // Check for zonal mode
@@ -1148,6 +1162,9 @@ program
       console.log(`\n✅ Forecast written to: ${options.output}`);
       console.log(`   📊 ${forecasts.length} predictions across ${[...new Set(forecasts.map(f => f.region))].length} regions`);
       console.log(`   📅 Period: ${options.start} to ${options.end}`);
+
+      // Push to gateway if requested or auto-push enabled
+      await autoPushIfEnabled(options.output, options.push);
 
     } catch (error: any) {
       console.error(`\n❌ Error: ${error.message}`);
@@ -2214,6 +2231,7 @@ cfacCommand
   .option('--lstm-correction', 'Enable LSTM correction layer for wind and solar (learns temporal weather patterns)')
   .option('--use-db', 'Load CFAC training data from database instead of CSV files')
   .option('--db <path>', 'Database path when using --use-db (default: ./forecast.db)')
+  .option('--push', 'Push generated forecast to Vantage-Gateway server')
   // NOTE: LSTM model option removed from production - experimental only via direct code modification
   .action(async (options) => {
     try {
@@ -3823,6 +3841,9 @@ cfacCommand
         if (effectiveOtherScale !== 1) console.log(`      Other: ${(effectiveOtherScale * 100).toFixed(1)}% of raw`);
       }
       console.log('');
+
+      // Push to gateway if requested or auto-push enabled
+      await autoPushIfEnabled(options.output, options.push);
 
     } catch (error: any) {
       console.error(`\n❌ Error: ${error.message}`);
@@ -10068,6 +10089,187 @@ capacityCmd
         console.log(`📄 Report saved to: ${options.output}`);
       }
 
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+// GATEWAY command group - Manage Vantage-Gateway file push
+const gatewayCmd = program.command('gateway').description('Manage forecast file push to Vantage-Gateway server');
+
+// gateway test - Test connection to gateway
+gatewayCmd
+  .command('test')
+  .description('Test connection to Vantage-Gateway server')
+  .action(async () => {
+    try {
+      const result = await testGatewayConnection();
+      console.log(formatTestResults(result));
+
+      if (!result.connected) {
+        process.exit(1);
+      }
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+// gateway status - Show gateway configuration status
+gatewayCmd
+  .command('status')
+  .description('Show gateway configuration status')
+  .action(() => {
+    const config = getGatewayConfig();
+
+    console.log('\n═══════════════════════════════════════════════════════');
+    console.log('         Vantage Gateway Configuration');
+    console.log('═══════════════════════════════════════════════════════');
+    console.log('');
+    console.log(`Host:       ${config.host}:${config.port}`);
+    console.log(`User:       ${config.username}`);
+    console.log(`Password:   ${config.password ? '********' : '(not configured)'}`);
+    console.log(`Enabled:    ${config.enabled ? '✓ Yes (auto-push active)' : '✗ No (manual push only)'}`);
+    console.log('');
+    console.log('Configuration sources (in priority order):');
+    console.log('  1. Environment variables: VANTAGE_GATEWAY_*');
+    console.log('  2. Config file: config.json → gateway.*');
+    console.log('');
+
+    if (!config.password) {
+      console.log('⚠️  Password not configured. Set via:');
+      console.log('   - Environment: VANTAGE_GATEWAY_PASSWORD=<password>');
+      console.log('   - Config file: { "gateway": { "password": "<password>" } }');
+    } else if (!config.enabled) {
+      console.log('💡 To enable auto-push globally:');
+      console.log('   - Environment: VANTAGE_GATEWAY_ENABLED=true');
+      console.log('   - Config file: { "gateway": { "enabled": true } }');
+    } else {
+      console.log('✅ Gateway is configured and auto-push is enabled.');
+    }
+
+    console.log('═══════════════════════════════════════════════════════');
+  });
+
+// gateway push - Manually push a file or directory
+gatewayCmd
+  .command('push')
+  .description('Push a file or all forecast files from a directory to gateway')
+  .argument('<path>', 'File or directory path to push')
+  .option('-a, --all', 'Push all matching forecast files from directory')
+  .action(async (filePath: string, options) => {
+    try {
+      if (!isGatewayConfigured()) {
+        console.error('\n❌ Gateway password not configured.');
+        console.error('   Set via VANTAGE_GATEWAY_PASSWORD environment variable');
+        console.error('   or add to config.json: { "gateway": { "password": "<password>" } }');
+        process.exit(1);
+      }
+
+      const fullPath = filePath.startsWith('/') || filePath.includes(':')
+        ? filePath
+        : join(process.cwd(), filePath);
+
+      // Check if it's a file or directory
+      const stats = fs.statSync(fullPath);
+
+      if (stats.isDirectory() || options.all) {
+        // Push all matching files from directory
+        console.log(`\n📂 Pushing all forecast files from: ${fullPath}`);
+        const results = await pushAllForecasts(fullPath);
+
+        if (results.length === 0) {
+          console.log('\n⚠️  No matching forecast files found.');
+          console.log('   Looking for: FC_DEM_*.csv, FC_ZDEM_*.csv, FC_CF_*.csv');
+        } else {
+          const successful = results.filter(r => r.success);
+          const failed = results.filter(r => !r.success);
+
+          console.log('\n' + '═'.repeat(60));
+          console.log('PUSH RESULTS');
+          console.log('═'.repeat(60));
+
+          if (successful.length > 0) {
+            console.log(`\n✅ Successful (${successful.length}):`);
+            for (const r of successful) {
+              const kb = ((r.bytesTransferred || 0) / 1024).toFixed(1);
+              console.log(`   ${basename(r.localPath)} → ${r.remotePath} (${kb} KB)`);
+            }
+          }
+
+          if (failed.length > 0) {
+            console.log(`\n❌ Failed (${failed.length}):`);
+            for (const r of failed) {
+              console.log(`   ${basename(r.localPath)}: ${r.error}`);
+            }
+          }
+
+          console.log('\n' + '═'.repeat(60));
+        }
+      } else {
+        // Push single file
+        console.log(`\n📄 Pushing file: ${fullPath}`);
+        const result = await pushFileToGateway(fullPath);
+
+        if (result.success) {
+          const kb = ((result.bytesTransferred || 0) / 1024).toFixed(1);
+          console.log(`\n✅ Successfully pushed to ${result.remotePath} (${kb} KB)`);
+        } else {
+          console.error(`\n❌ Push failed: ${result.error}`);
+          process.exit(1);
+        }
+      }
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+// gateway enable - Enable auto-push globally
+gatewayCmd
+  .command('enable')
+  .description('Enable auto-push in config.json')
+  .action(() => {
+    try {
+      const configPath = join(process.cwd(), 'config.json');
+      let config: any = {};
+
+      if (existsSync(configPath)) {
+        config = JSON.parse(readFileSync(configPath, 'utf8'));
+      }
+
+      config.gateway = config.gateway || {};
+      config.gateway.enabled = true;
+
+      writeFileSync(configPath, JSON.stringify(config, null, 2));
+      console.log('\n✅ Auto-push enabled in config.json');
+      console.log('   Forecasts will now be automatically pushed to the gateway.');
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+// gateway disable - Disable auto-push globally
+gatewayCmd
+  .command('disable')
+  .description('Disable auto-push in config.json')
+  .action(() => {
+    try {
+      const configPath = join(process.cwd(), 'config.json');
+      let config: any = {};
+
+      if (existsSync(configPath)) {
+        config = JSON.parse(readFileSync(configPath, 'utf8'));
+      }
+
+      config.gateway = config.gateway || {};
+      config.gateway.enabled = false;
+
+      writeFileSync(configPath, JSON.stringify(config, null, 2));
+      console.log('\n✅ Auto-push disabled in config.json');
+      console.log('   Use --push flag to manually push forecasts.');
     } catch (error: any) {
       console.error(`\n❌ Error: ${error.message}`);
       process.exit(1);

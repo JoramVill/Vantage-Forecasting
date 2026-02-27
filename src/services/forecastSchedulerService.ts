@@ -18,6 +18,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'fs';
 import { parse } from 'csv-parse/sync';
+import { autoPushIfEnabled, isGatewayEnabled } from './sftpPushService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -76,6 +77,8 @@ interface SchedulerConfig {
   asymmetricLoss?: boolean;
   biasCorrection?: boolean;
   autoCalibrateDays?: number;
+  // Gateway options
+  pushToGateway?: boolean;  // Push generated forecasts to Vantage-Gateway (respects global VANTAGE_GATEWAY_ENABLED)
 }
 
 export class ForecastSchedulerService {
@@ -979,6 +982,14 @@ export class ForecastSchedulerService {
         console.log(`   📄 ${outputFile}`);
       }
 
+      // Push to gateway if enabled (respects global VANTAGE_GATEWAY_ENABLED and config.pushToGateway)
+      if (this.config.pushToGateway || isGatewayEnabled()) {
+        if (verbose) {
+          console.log(`   📤 Pushing to gateway...`);
+        }
+        await autoPushIfEnabled(outputFile, this.config.pushToGateway);
+      }
+
       return this.getRunById(runId)!;
 
     } catch (error: any) {
@@ -1126,6 +1137,14 @@ export class ForecastSchedulerService {
         console.log(`   📄 ${outputFile}`);
       }
 
+      // Push to gateway if enabled (respects global VANTAGE_GATEWAY_ENABLED and config.pushToGateway)
+      if (this.config.pushToGateway || isGatewayEnabled()) {
+        if (verbose) {
+          console.log(`   📤 Pushing to gateway...`);
+        }
+        await autoPushIfEnabled(outputFile, this.config.pushToGateway);
+      }
+
       return this.getRunById(runId)!;
 
     } catch (error: any) {
@@ -1239,6 +1258,7 @@ export class ForecastSchedulerService {
     console.log(`   Will run daily at ${runHour}:00`);
     console.log(`   Checking every ${interval / 60000} minutes`);
     console.log(`   Calibration: ${this.config.calibrationDays} days, ±${this.config.calibrationThreshold}% threshold`);
+    console.log(`   Gateway push: ${this.config.pushToGateway || isGatewayEnabled() ? 'ENABLED' : 'disabled'}`);
 
     let lastRunDate: string | null = null;
 

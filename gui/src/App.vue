@@ -29,6 +29,9 @@ const trainingEnd = ref('');
 const forecastStart = ref('');
 const forecastEnd = ref('');
 
+// Tab navigation
+const activeTab = ref<'manual' | 'scheduler'>('manual');
+
 // Forecast options
 const enableDemand = ref(true);
 const enableCfac = ref(true);
@@ -36,6 +39,47 @@ const enableZonal = ref(false);
 const scalingPercent = ref(100);
 const cfacModel = ref<'hybrid' | 'hybrid-lstm' | 'legacy'>('hybrid'); // Hybrid (physics + ML) is the best performer
 const demandModel = ref<'hybrid' | 'hybrid-calibrated'>('hybrid-calibrated'); // Hybrid + XGBoost calibration is best (4.77% MAPE)
+const pushToGateway = ref(false); // Push forecasts to Vantage-Gateway server
+
+// Scheduler state
+const schedulerMode = ref<'run' | 'backfill'>('run');
+const schedulerAsOfDate = ref('');
+const schedulerStartDate = ref('');
+const schedulerEndDate = ref('');
+const schedulerDailyEnabled = ref(true);
+const schedulerWeeklyEnabled = ref(true);
+const schedulerDemandEnabled = ref(true);
+const schedulerCfacEnabled = ref(true);
+const schedulerZonalEnabled = ref(false);
+const schedulerDemandPath = ref('Data Samples/Demand');
+const schedulerCfacPath = ref('Data Samples/Capacity Factor');
+const schedulerOutputDir = ref('output/forecasts');
+const schedulerDbPath = ref('./forecast.db');
+const schedulerDemandModel = ref<'hybrid' | 'regression' | 'xgboost'>('hybrid');
+const schedulerUseXgboost = ref(false);
+const schedulerAsymmetricLoss = ref(false);
+const schedulerBiasCorrection = ref(false);
+const schedulerCalibDays = ref(7);
+const schedulerCalibThreshold = ref(5);
+const schedulerMaxIterations = ref(3);
+const schedulerIsRunning = ref(false);
+const schedulerProgress = ref(0);
+const schedulerStatusHistory = ref<Array<{ time: string; message: string; type: 'info' | 'success' | 'error' }>>([]);
+const schedulerCurrentStatus = ref('');
+
+// Scheduler schedule times (for automatic runs)
+const schedulerTimes = ref<string[]>(['06:00']);
+const schedulerAutoEnabled = ref(false);
+
+// Scheduler output naming
+const schedulerDemandPrefix = ref('FC_DEM_');
+const schedulerDemandZonalPrefix = ref('FC_ZDEM_');
+const schedulerCfacPrefix = ref('FC_CF_');
+const schedulerOutputSuffix = ref('');
+
+// Scheduler training mode
+const schedulerTrainingMode = ref<'auto' | 'saved'>('auto'); // auto = train on-the-fly, saved = use pre-trained model
+const schedulerSelectedCalibrator = ref<string>('');
 
 // Calibration settings (for hybrid-calibrated mode)
 const calibrationMode = ref<'auto' | 'saved'>('auto'); // auto = train on-the-fly, saved = use saved model
@@ -68,6 +112,9 @@ const currentStatus = ref('');
 const statusHistory = ref<Array<{ time: string; message: string; type: 'info' | 'success' | 'error' }>>([]);
 const showHistory = ref(false);
 
+// Terminal panel state
+const terminalExpanded = ref(false);
+
 // Save settings to persistent storage
 function saveSettings() {
   window.electronAPI.saveSettings({
@@ -84,6 +131,7 @@ function saveSettings() {
     scalingPercent: scalingPercent.value,
     cfacModel: cfacModel.value,
     demandModel: demandModel.value,
+    pushToGateway: pushToGateway.value,
     // Calibration settings
     calibrationMode: calibrationMode.value,
     selectedCalibrator: selectedCalibrator.value,
@@ -96,11 +144,40 @@ function saveSettings() {
     useCustomName: useCustomName.value,
     customDemandName: customDemandName.value,
     customCfacName: customCfacName.value,
+    // Tab state
+    activeTab: activeTab.value,
+    // Scheduler settings
+    schedulerMode: schedulerMode.value,
+    schedulerDailyEnabled: schedulerDailyEnabled.value,
+    schedulerWeeklyEnabled: schedulerWeeklyEnabled.value,
+    schedulerDemandEnabled: schedulerDemandEnabled.value,
+    schedulerCfacEnabled: schedulerCfacEnabled.value,
+    schedulerZonalEnabled: schedulerZonalEnabled.value,
+    schedulerDemandPath: schedulerDemandPath.value,
+    schedulerCfacPath: schedulerCfacPath.value,
+    schedulerOutputDir: schedulerOutputDir.value,
+    schedulerDbPath: schedulerDbPath.value,
+    schedulerDemandModel: schedulerDemandModel.value,
+    schedulerUseXgboost: schedulerUseXgboost.value,
+    schedulerAsymmetricLoss: schedulerAsymmetricLoss.value,
+    schedulerBiasCorrection: schedulerBiasCorrection.value,
+    schedulerCalibDays: schedulerCalibDays.value,
+    schedulerCalibThreshold: schedulerCalibThreshold.value,
+    schedulerMaxIterations: schedulerMaxIterations.value,
+    // New scheduler settings
+    schedulerTimes: schedulerTimes.value,
+    schedulerAutoEnabled: schedulerAutoEnabled.value,
+    schedulerDemandPrefix: schedulerDemandPrefix.value,
+    schedulerDemandZonalPrefix: schedulerDemandZonalPrefix.value,
+    schedulerCfacPrefix: schedulerCfacPrefix.value,
+    schedulerOutputSuffix: schedulerOutputSuffix.value,
+    schedulerTrainingMode: schedulerTrainingMode.value,
+    schedulerSelectedCalibrator: schedulerSelectedCalibrator.value,
   });
 }
 
 // Watch for settings changes and persist them
-watch([dataSource, databasePath, demandDataDir, cfacDataDir, weatherDataDir, demandOutputDir, cfacOutputDir, enableDemand, enableCfac, enableZonal, scalingPercent, cfacModel, demandModel, calibrationMode, selectedCalibrator, saveCalibrator, demandPrefix, demandZonalPrefix, cfacPrefix, outputSuffix, useCustomName, customDemandName, customCfacName], () => {
+watch([dataSource, databasePath, demandDataDir, cfacDataDir, weatherDataDir, demandOutputDir, cfacOutputDir, enableDemand, enableCfac, enableZonal, scalingPercent, cfacModel, demandModel, pushToGateway, calibrationMode, selectedCalibrator, saveCalibrator, demandPrefix, demandZonalPrefix, cfacPrefix, outputSuffix, useCustomName, customDemandName, customCfacName, activeTab, schedulerMode, schedulerDailyEnabled, schedulerWeeklyEnabled, schedulerDemandEnabled, schedulerCfacEnabled, schedulerZonalEnabled, schedulerDemandPath, schedulerCfacPath, schedulerOutputDir, schedulerDbPath, schedulerDemandModel, schedulerUseXgboost, schedulerAsymmetricLoss, schedulerBiasCorrection, schedulerCalibDays, schedulerCalibThreshold, schedulerMaxIterations], () => {
   saveSettings();
 });
 
@@ -132,6 +209,7 @@ onMounted(async () => {
     if (typeof settings.enableDemand === 'boolean') enableDemand.value = settings.enableDemand;
     if (typeof settings.enableCfac === 'boolean') enableCfac.value = settings.enableCfac;
     if (typeof settings.enableZonal === 'boolean') enableZonal.value = settings.enableZonal;
+    if (typeof settings.pushToGateway === 'boolean') pushToGateway.value = settings.pushToGateway;
     if (typeof settings.scalingPercent === 'number') scalingPercent.value = settings.scalingPercent;
     if (settings.cfacModel === 'hybrid' || settings.cfacModel === 'hybrid-lstm' || settings.cfacModel === 'legacy') cfacModel.value = settings.cfacModel;
     // Migration: convert old 'lstm' setting to 'hybrid'
@@ -149,6 +227,35 @@ onMounted(async () => {
     if (typeof settings.useCustomName === 'boolean') useCustomName.value = settings.useCustomName;
     if (settings.customDemandName) customDemandName.value = settings.customDemandName;
     if (settings.customCfacName) customCfacName.value = settings.customCfacName;
+    // Tab state
+    if (settings.activeTab === 'manual' || settings.activeTab === 'scheduler') activeTab.value = settings.activeTab;
+    // Scheduler settings
+    if (settings.schedulerMode === 'run' || settings.schedulerMode === 'backfill') schedulerMode.value = settings.schedulerMode;
+    if (typeof settings.schedulerDailyEnabled === 'boolean') schedulerDailyEnabled.value = settings.schedulerDailyEnabled;
+    if (typeof settings.schedulerWeeklyEnabled === 'boolean') schedulerWeeklyEnabled.value = settings.schedulerWeeklyEnabled;
+    if (typeof settings.schedulerDemandEnabled === 'boolean') schedulerDemandEnabled.value = settings.schedulerDemandEnabled;
+    if (typeof settings.schedulerCfacEnabled === 'boolean') schedulerCfacEnabled.value = settings.schedulerCfacEnabled;
+    if (typeof settings.schedulerZonalEnabled === 'boolean') schedulerZonalEnabled.value = settings.schedulerZonalEnabled;
+    if (settings.schedulerDemandPath) schedulerDemandPath.value = settings.schedulerDemandPath;
+    if (settings.schedulerCfacPath) schedulerCfacPath.value = settings.schedulerCfacPath;
+    if (settings.schedulerOutputDir) schedulerOutputDir.value = settings.schedulerOutputDir;
+    if (settings.schedulerDbPath) schedulerDbPath.value = settings.schedulerDbPath;
+    if (settings.schedulerDemandModel) schedulerDemandModel.value = settings.schedulerDemandModel;
+    if (typeof settings.schedulerUseXgboost === 'boolean') schedulerUseXgboost.value = settings.schedulerUseXgboost;
+    if (typeof settings.schedulerAsymmetricLoss === 'boolean') schedulerAsymmetricLoss.value = settings.schedulerAsymmetricLoss;
+    if (typeof settings.schedulerBiasCorrection === 'boolean') schedulerBiasCorrection.value = settings.schedulerBiasCorrection;
+    if (typeof settings.schedulerCalibDays === 'number') schedulerCalibDays.value = settings.schedulerCalibDays;
+    if (typeof settings.schedulerCalibThreshold === 'number') schedulerCalibThreshold.value = settings.schedulerCalibThreshold;
+    if (typeof settings.schedulerMaxIterations === 'number') schedulerMaxIterations.value = settings.schedulerMaxIterations;
+    // New scheduler settings
+    if (Array.isArray(settings.schedulerTimes) && settings.schedulerTimes.length > 0) schedulerTimes.value = settings.schedulerTimes;
+    if (typeof settings.schedulerAutoEnabled === 'boolean') schedulerAutoEnabled.value = settings.schedulerAutoEnabled;
+    if (settings.schedulerDemandPrefix) schedulerDemandPrefix.value = settings.schedulerDemandPrefix;
+    if (settings.schedulerDemandZonalPrefix) schedulerDemandZonalPrefix.value = settings.schedulerDemandZonalPrefix;
+    if (settings.schedulerCfacPrefix) schedulerCfacPrefix.value = settings.schedulerCfacPrefix;
+    if (settings.schedulerOutputSuffix) schedulerOutputSuffix.value = settings.schedulerOutputSuffix;
+    if (settings.schedulerTrainingMode === 'auto' || settings.schedulerTrainingMode === 'saved') schedulerTrainingMode.value = settings.schedulerTrainingMode;
+    if (settings.schedulerSelectedCalibrator) schedulerSelectedCalibrator.value = settings.schedulerSelectedCalibrator;
 
     // Load database info if in database mode
     if (dataSource.value === 'database' && databasePath.value) {
@@ -474,6 +581,11 @@ async function runForecast() {
         demandArgs.push('--no-calibrate');
       }
 
+      // Add gateway push flag if enabled
+      if (pushToGateway.value) {
+        demandArgs.push('--push');
+      }
+
       const demandResult = await window.electronAPI.runCommand(demandArgs);
       completedSteps++;
       progress.value = (completedSteps / totalSteps) * 90;
@@ -528,6 +640,11 @@ async function runForecast() {
           cfacArgs.push('--training-end', trainingEnd.value);
         }
 
+        // Add gateway push flag if enabled
+        if (pushToGateway.value) {
+          cfacArgs.push('--push');
+        }
+
         cfacResult = await window.electronAPI.runCommand(cfacArgs);
       } else {
         // Legacy model - use cfac forecast2 with XGBoost
@@ -549,6 +666,11 @@ async function runForecast() {
 
         if (trainingEnd.value) {
           cfacArgs.push('--training-end', trainingEnd.value);
+        }
+
+        // Add gateway push flag if enabled
+        if (pushToGateway.value) {
+          cfacArgs.push('--push');
         }
 
         cfacResult = await window.electronAPI.runCommand(cfacArgs);
@@ -589,6 +711,155 @@ function resetProgress() {
   progress.value = 0;
   currentStatus.value = '';
   statusHistory.value = [];
+}
+
+// ============ SCHEDULER FUNCTIONS ============
+
+// Browse functions for scheduler
+async function browseSchedulerDemandPath() {
+  const path = await window.electronAPI.selectDirectory();
+  if (path) schedulerDemandPath.value = path;
+}
+
+async function browseSchedulerCfacPath() {
+  const path = await window.electronAPI.selectDirectory();
+  if (path) schedulerCfacPath.value = path;
+}
+
+async function browseSchedulerOutputDir() {
+  const path = await window.electronAPI.selectDirectory();
+  if (path) schedulerOutputDir.value = path;
+}
+
+// Add scheduler status message
+function addSchedulerStatus(message: string, type: 'info' | 'success' | 'error' = 'info') {
+  schedulerCurrentStatus.value = message;
+  schedulerStatusHistory.value.push({
+    time: formatTime(new Date()),
+    message,
+    type
+  });
+}
+
+// Schedule time management
+function addScheduleTime() {
+  if (schedulerTimes.value.length < 6) {
+    schedulerTimes.value.push('06:00');
+    saveSettings();
+  }
+}
+
+function removeScheduleTime(index: number) {
+  if (schedulerTimes.value.length > 1) {
+    schedulerTimes.value.splice(index, 1);
+    saveSettings();
+  }
+}
+
+function updateScheduleTime(index: number, value: string) {
+  schedulerTimes.value[index] = value;
+  saveSettings();
+}
+
+// Run scheduler
+async function runScheduler() {
+  // Validate inputs
+  if (schedulerMode.value === 'run' && !schedulerAsOfDate.value) {
+    addSchedulerStatus('Please select an as-of date', 'error');
+    return;
+  }
+  if (schedulerMode.value === 'backfill' && (!schedulerStartDate.value || !schedulerEndDate.value)) {
+    addSchedulerStatus('Please select start and end dates', 'error');
+    return;
+  }
+
+  // Reset state
+  schedulerIsRunning.value = true;
+  schedulerProgress.value = 0;
+  schedulerStatusHistory.value = [];
+  schedulerCurrentStatus.value = 'Starting scheduler...';
+
+  // Build CLI args
+  const args = ['scheduler', schedulerMode.value === 'run' ? 'run' : 'backfill'];
+
+  // Date args
+  if (schedulerMode.value === 'run') {
+    args.push('-d', schedulerAsOfDate.value);
+  } else {
+    args.push('-s', schedulerStartDate.value, '-e', schedulerEndDate.value);
+  }
+
+  // Forecast type flags
+  if (schedulerDailyEnabled.value && !schedulerWeeklyEnabled.value) {
+    args.push('--daily');
+  } else if (schedulerWeeklyEnabled.value && !schedulerDailyEnabled.value) {
+    args.push('--weekly');
+  }
+
+  if (schedulerDemandEnabled.value && !schedulerCfacEnabled.value) {
+    args.push('--demand-only');
+  } else if (schedulerCfacEnabled.value && !schedulerDemandEnabled.value) {
+    args.push('--cfac-only');
+  }
+
+  // Data paths
+  if (schedulerDemandPath.value) {
+    args.push('--demand-path', schedulerDemandPath.value);
+  }
+  if (schedulerCfacPath.value) {
+    args.push('--cfac-path', schedulerCfacPath.value);
+  }
+  if (schedulerOutputDir.value) {
+    args.push('--output', schedulerOutputDir.value);
+  }
+  if (schedulerDbPath.value) {
+    args.push('--db', schedulerDbPath.value);
+  }
+
+  // Model settings
+  if (schedulerDemandModel.value) {
+    args.push('--demand-model', schedulerDemandModel.value);
+  }
+  if (schedulerUseXgboost.value) {
+    args.push('--use-xgboost');
+  }
+  if (schedulerAsymmetricLoss.value) {
+    args.push('--asymmetric-loss');
+  }
+  if (schedulerBiasCorrection.value) {
+    args.push('--bias-correction');
+  }
+
+  // Zonal mode
+  if (schedulerZonalEnabled.value && schedulerDemandEnabled.value) {
+    args.push('--zonal');
+  }
+
+  // Calibration settings
+  args.push('--calib-days', schedulerCalibDays.value.toString());
+  args.push('--calib-threshold', schedulerCalibThreshold.value.toString());
+  args.push('--max-iterations', schedulerMaxIterations.value.toString());
+
+  try {
+    addSchedulerStatus('Running scheduler command...');
+    schedulerProgress.value = 10;
+
+    const result = await window.electronAPI.runCommand(args);
+
+    schedulerProgress.value = 100;
+
+    if (result.code === 0) {
+      addSchedulerStatus('Scheduler completed successfully!', 'success');
+    } else {
+      const errorLines = result.stderr?.split('\n').filter((l: string) => l.trim()).slice(-3) || [];
+      const errorMsg = errorLines.join(' ').substring(0, 200) || result.error || 'Unknown error';
+      addSchedulerStatus('Scheduler failed: ' + errorMsg, 'error');
+    }
+  } catch (error: any) {
+    addSchedulerStatus('Error: ' + error.message, 'error');
+  } finally {
+    schedulerIsRunning.value = false;
+  }
 }
 
 // Load available calibrator models
@@ -644,431 +915,541 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 </script>
 
 <template>
-  <div class="app">
-    <header class="header">
-      <div class="header-content">
-        <img src="../assets/VANTAGE_LOGO-removebg-preview.png" alt="Vantage Logo" class="header-logo" />
-        <div class="header-text">
-          <h1>Vantage Forecaster</h1>
-          <p class="subtitle">Demand & Capacity Factor Forecasting</p>
+  <div class="app dark-theme">
+    <!-- Left Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <img src="../assets/VANTAGE_LOGO-removebg-preview.png" alt="Vantage Logo" class="sidebar-logo" />
+        <div class="sidebar-title">
+          <span class="title-text">Vantage</span>
+          <span class="title-sub">Forecaster</span>
         </div>
       </div>
-    </header>
 
-    <main class="main">
-      <!-- Data Format Notification -->
-      <div v-if="dataFormatMessage" class="format-notification" :class="dataFormatType">
-        <span class="format-icon">{{ dataFormatType === 'error' ? '✕' : dataFormatType === 'warning' ? '⚠' : 'ℹ' }}</span>
-        <span>{{ dataFormatMessage }}</span>
-        <button @click="clearFormatMessage" class="format-close">&times;</button>
+      <nav class="sidebar-nav">
+        <button
+          class="nav-item"
+          :class="{ active: activeTab === 'manual' }"
+          @click="activeTab = 'manual'"
+          :disabled="isRunning || schedulerIsRunning"
+        >
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+          </svg>
+          <span class="nav-text">Manual Forecast</span>
+        </button>
+        <button
+          class="nav-item"
+          :class="{ active: activeTab === 'scheduler' }"
+          @click="activeTab = 'scheduler'"
+          :disabled="isRunning || schedulerIsRunning"
+        >
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M12 6v6l4 2"/>
+          </svg>
+          <span class="nav-text">Scheduler</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <span class="version-text">v2.1.0</span>
       </div>
+    </aside>
 
-      <!-- Data Source Section -->
-      <section class="card">
-        <h2>Data Source</h2>
-        <div class="source-toggle">
-          <label class="radio-label">
-            <input type="radio" v-model="dataSource" value="csv" :disabled="isRunning" />
-            <span>CSV Directory</span>
-          </label>
-          <label class="radio-label">
-            <input type="radio" v-model="dataSource" value="database" :disabled="isRunning" />
-            <span>Database</span>
-          </label>
+    <!-- Main Content Area -->
+    <main class="main-content">
+      <!-- ============ MANUAL FORECAST TAB ============ -->
+      <div v-if="activeTab === 'manual'" class="tab-content">
+
+        <!-- Data Format Notification -->
+        <div v-if="dataFormatMessage" class="format-notification" :class="dataFormatType">
+          <span class="format-icon">{{ dataFormatType === 'error' ? '✕' : dataFormatType === 'warning' ? '⚠' : 'ℹ' }}</span>
+          <span>{{ dataFormatMessage }}</span>
+          <button @click="clearFormatMessage" class="format-close">&times;</button>
         </div>
 
-        <div v-if="dataSource === 'database'" class="database-section">
-          <div class="form-group">
-            <label>Database Path</label>
-            <div class="input-row">
-              <input type="text" v-model="databasePath" placeholder="Select database file..." readonly />
-              <button @click="browseDatabase" class="btn btn-secondary" :disabled="isRunning">Browse</button>
-            </div>
-          </div>
-
-          <!-- Database Info Panel -->
-          <div v-if="databasePath" class="db-info-panel">
-            <div class="db-info-header">
-              <h3>Database Contents</h3>
-              <button @click="loadDatabaseInfo" class="btn btn-text" :disabled="isLoadingDbInfo">
-                {{ isLoadingDbInfo ? 'Loading...' : 'Refresh' }}
-              </button>
-            </div>
-
-            <div v-if="databaseInfo" class="db-info-grid">
-              <div class="db-info-item">
-                <span class="db-info-label">Demand</span>
-                <span class="db-info-value">
-                  {{ databaseInfo.demand?.records?.toLocaleString() || 0 }} records
-                </span>
-                <span v-if="databaseInfo.demand?.range" class="db-info-range">
-                  {{ typeof databaseInfo.demand.range === 'string' ? databaseInfo.demand.range : `${databaseInfo.demand.range.start} to ${databaseInfo.demand.range.end}` }}
-                </span>
-                <span v-if="databaseInfo.demand?.regions?.length" class="db-info-regions">
-                  {{ databaseInfo.demand.regions.length }} {{ databaseInfo.demand.regions.length === 3 ? 'regions' : 'zones' }}
-                </span>
-              </div>
-              <div class="db-info-item">
-                <span class="db-info-label">CFAC</span>
-                <span class="db-info-value">
-                  {{ databaseInfo.cfac?.records?.toLocaleString() || 0 }} records
-                </span>
-                <span v-if="databaseInfo.cfac?.range" class="db-info-range">{{ databaseInfo.cfac.range }}</span>
-              </div>
-              <div class="db-info-item">
-                <span class="db-info-label">Weather</span>
-                <span class="db-info-value">
-                  {{ databaseInfo.weather?.records?.toLocaleString() || 0 }} records
-                </span>
-                <span v-if="databaseInfo.weather?.range" class="db-info-range">{{ databaseInfo.weather.range }}</span>
-              </div>
-            </div>
-
-            <div v-else-if="!isLoadingDbInfo" class="db-info-empty">
-              No database info available. Click Refresh to load.
-            </div>
-
-            <!-- Update Database Panel -->
-            <div class="db-update-section">
-              <div class="db-update-header" @click="showDbUpdatePanel = !showDbUpdatePanel">
-                <span class="naming-toggle">{{ showDbUpdatePanel ? '▼' : '▶' }}</span>
-                <span>Update Database</span>
+        <!-- Row Layout for Manual Tab -->
+        <div class="manual-layout">
+          <!-- Row 1: Data Source (full width) -->
+          <section class="card card-full-row">
+            <h2>Data Source</h2>
+            <div class="data-source-content">
+              <div class="source-toggle">
+                <label class="radio-label">
+                  <input type="radio" v-model="dataSource" value="csv" :disabled="isRunning" />
+                  <span>CSV</span>
+                </label>
+                <label class="radio-label">
+                  <input type="radio" v-model="dataSource" value="database" :disabled="isRunning" />
+                  <span>Database</span>
+                </label>
               </div>
 
-              <div v-if="showDbUpdatePanel" class="db-update-panel">
-                <p class="hint">Import new data from directories into the database</p>
-
-                <div class="db-update-row">
-                  <div class="form-group">
-                    <label>Demand Data Directory</label>
-                    <div class="input-row">
-                      <input type="text" v-model="demandDataDir" placeholder="Select demand data folder..." readonly />
-                      <button @click="browseDemandDir" class="btn btn-secondary btn-sm" :disabled="isImporting">Browse</button>
-                    </div>
+              <div v-if="dataSource === 'database'" class="data-source-inputs">
+                <div class="form-group compact">
+                  <label>Database</label>
+                  <div class="input-row">
+                    <input type="text" v-model="databasePath" placeholder="Select database file..." readonly />
+                    <button @click="browseDatabase" class="btn btn-secondary btn-sm" :disabled="isRunning">Browse</button>
                   </div>
-                  <button @click="importData('demand')" class="btn btn-primary btn-sm" :disabled="isImporting || !demandDataDir">
-                    Import
-                  </button>
                 </div>
-
-                <div class="db-update-row">
-                  <div class="form-group">
-                    <label>CFAC Data Directory</label>
-                    <div class="input-row">
-                      <input type="text" v-model="cfacDataDir" placeholder="Select CFAC data folder..." readonly />
-                      <button @click="browseCfacDir" class="btn btn-secondary btn-sm" :disabled="isImporting">Browse</button>
-                    </div>
-                  </div>
-                  <button @click="importData('cfac')" class="btn btn-primary btn-sm" :disabled="isImporting || !cfacDataDir">
-                    Import
-                  </button>
+                <div v-if="databaseInfo" class="db-info-inline">
+                  <span class="db-stat">Demand: {{ databaseInfo.demand?.records?.toLocaleString() || 0 }}</span>
+                  <span class="db-stat">CFAC: {{ databaseInfo.cfac?.records?.toLocaleString() || 0 }}</span>
+                  <span class="db-stat">Weather: {{ databaseInfo.weather?.records?.toLocaleString() || 0 }}</span>
+                  <button @click="loadDatabaseInfo" class="btn btn-text btn-xs" :disabled="isLoadingDbInfo">Refresh</button>
                 </div>
+              </div>
 
-                <div class="db-update-row">
-                  <div class="form-group">
-                    <label>Weather Cache Directory <span class="optional">(default: ./weather_cache)</span></label>
-                    <div class="input-row">
-                      <input type="text" v-model="weatherDataDir" placeholder="Default: ./weather_cache" readonly />
-                      <button @click="browseWeatherDir" class="btn btn-secondary btn-sm" :disabled="isImporting">Browse</button>
-                    </div>
-                    <p v-if="weatherDirStatus" class="hint" :class="{ 'hint-error': !weatherDirStatus.valid, 'hint-success': weatherDirStatus.valid }">
-                      {{ weatherDirStatus.message }}
-                    </p>
+              <div v-else class="data-source-inputs csv-mode">
+                <div class="form-group compact" v-if="enableDemand">
+                  <label>Demand</label>
+                  <div class="input-row">
+                    <input type="text" v-model="demandDataDir" placeholder="Demand folder..." readonly />
+                    <button @click="browseDemandDir" class="btn btn-secondary btn-sm" :disabled="isRunning">Browse</button>
                   </div>
-                  <button @click="importData('weather')" class="btn btn-primary btn-sm" :disabled="isImporting || !weatherDataDir || !weatherDirStatus?.valid">
-                    Import
-                  </button>
+                </div>
+                <div class="form-group compact" v-if="enableCfac">
+                  <label>CFAC</label>
+                  <div class="input-row">
+                    <input type="text" v-model="cfacDataDir" placeholder="CFAC folder..." readonly />
+                    <button @click="browseCfacDir" class="btn btn-secondary btn-sm" :disabled="isRunning">Browse</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="output-dir-inputs">
+                <div class="form-group compact" v-if="enableDemand">
+                  <label>Demand Out</label>
+                  <div class="input-row">
+                    <input type="text" v-model="demandOutputDir" placeholder="Output folder..." :disabled="isRunning" />
+                    <button @click="browseDemandOutputDir" class="btn btn-secondary btn-sm" :disabled="isRunning">Browse</button>
+                  </div>
+                </div>
+                <div class="form-group compact" v-if="enableCfac">
+                  <label>CFAC Out</label>
+                  <div class="input-row">
+                    <input type="text" v-model="cfacOutputDir" placeholder="Output folder..." :disabled="isRunning" />
+                    <button @click="browseCfacOutputDir" class="btn btn-secondary btn-sm" :disabled="isRunning">Browse</button>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
-        </div>
+          </section>
 
-        <div v-else class="csv-inputs">
-          <div class="form-group" v-if="enableDemand">
-            <label>Demand Data Directory</label>
-            <div class="input-row">
-              <input type="text" v-model="demandDataDir" placeholder="Select demand data folder..." readonly />
-              <button @click="browseDemandDir" class="btn btn-secondary" :disabled="isRunning">Browse</button>
-            </div>
-          </div>
-          <div class="form-group" v-if="enableCfac">
-            <label>CFAC Data Directory</label>
-            <div class="input-row">
-              <input type="text" v-model="cfacDataDir" placeholder="Select capacity factor data folder..." readonly />
-              <button @click="browseCfacDir" class="btn btn-secondary" :disabled="isRunning">Browse</button>
-            </div>
-          </div>
-          <div class="form-group">
-            <label>Weather Cache Directory <span class="optional">(auto-created by CLI)</span></label>
-            <div class="input-row">
-              <input type="text" v-model="weatherDataDir" placeholder="Default: ./weather_cache" readonly />
-              <button @click="browseWeatherDir" class="btn btn-secondary" :disabled="isRunning">Browse</button>
-            </div>
-            <p v-if="weatherDirStatus" class="hint" :class="{ 'hint-success': weatherDirStatus.valid, 'hint-error': !weatherDirStatus.valid }">
-              {{ weatherDirStatus.message }}
-            </p>
-            <p v-else class="hint">Weather data is auto-fetched from Visual Crossing API and cached here</p>
-          </div>
-        </div>
-
-        <div class="output-dirs">
-          <div class="form-group" v-if="enableDemand">
-            <label>Demand Output Directory</label>
-            <div class="input-row">
-              <input type="text" v-model="demandOutputDir" placeholder="Demand output folder..." :disabled="isRunning" />
-              <button @click="browseDemandOutputDir" class="btn btn-secondary" :disabled="isRunning">Browse</button>
-            </div>
-          </div>
-          <div class="form-group" v-if="enableCfac">
-            <label>CFAC Output Directory</label>
-            <div class="input-row">
-              <input type="text" v-model="cfacOutputDir" placeholder="CFAC output folder..." :disabled="isRunning" />
-              <button @click="browseCfacOutputDir" class="btn btn-secondary" :disabled="isRunning">Browse</button>
-            </div>
-          </div>
-        </div>
-
-        <!-- Output Naming -->
-        <div class="naming-section">
-          <div class="naming-header" @click="showNamingOptions = !showNamingOptions">
-            <span class="naming-toggle">{{ showNamingOptions ? '▼' : '▶' }}</span>
-            <span>Output Naming</span>
-            <span class="naming-preview">
-              <span v-if="enableDemand" class="preview-tag">{{ demandFilenamePreview }}</span>
-              <span v-if="enableCfac" class="preview-tag">{{ cfacFilenamePreview }}</span>
-            </span>
-          </div>
-
-          <div v-if="showNamingOptions" class="naming-options">
-            <div class="naming-mode">
-              <label class="radio-label">
-                <input type="radio" :value="false" v-model="useCustomName" :disabled="isRunning" />
-                <span>Use prefix/suffix</span>
-              </label>
-              <label class="radio-label">
-                <input type="radio" :value="true" v-model="useCustomName" :disabled="isRunning" />
-                <span>Custom filenames</span>
-              </label>
-            </div>
-
-            <div v-if="!useCustomName" class="prefix-suffix-options">
-              <div class="naming-grid">
-                <div class="form-group" v-if="enableDemand">
-                  <label>Demand Prefix</label>
+          <!-- Row 2: 3-Column Grid -->
+          <div class="cards-grid-3">
+            <!-- Column 1: Output Naming Card -->
+            <section class="card card-compact">
+              <h2>Output Naming</h2>
+              <div class="output-preview">
+                <span v-if="enableDemand" class="preview-tag">{{ demandFilenamePreview }}</span>
+                <span v-if="enableCfac" class="preview-tag">{{ cfacFilenamePreview }}</span>
+              </div>
+              <div class="naming-mode">
+                <label class="radio-label">
+                  <input type="radio" :value="false" v-model="useCustomName" :disabled="isRunning" />
+                  <span>Prefix</span>
+                </label>
+                <label class="radio-label">
+                  <input type="radio" :value="true" v-model="useCustomName" :disabled="isRunning" />
+                  <span>Custom</span>
+                </label>
+              </div>
+              <div v-if="!useCustomName" class="naming-grid">
+                <div class="form-group compact" v-if="enableDemand">
+                  <label>Dem</label>
                   <input type="text" v-model="demandPrefix" placeholder="FC_DEM_" :disabled="isRunning" />
                 </div>
-                <div class="form-group" v-if="enableDemand && enableZonal">
-                  <label>Zonal Demand Prefix</label>
-                  <input type="text" v-model="demandZonalPrefix" placeholder="FC_ZDEM_" :disabled="isRunning" />
-                </div>
-                <div class="form-group" v-if="enableCfac">
-                  <label>CFAC Prefix</label>
+                <div class="form-group compact" v-if="enableCfac">
+                  <label>CFAC</label>
                   <input type="text" v-model="cfacPrefix" placeholder="FC_CF_" :disabled="isRunning" />
                 </div>
-                <div class="form-group">
-                  <label>Suffix (optional)</label>
+                <div class="form-group compact">
+                  <label>Suffix</label>
                   <input type="text" v-model="outputSuffix" placeholder="_v2" :disabled="isRunning" />
                 </div>
               </div>
-              <p class="hint">Format: [prefix][date][suffix].csv</p>
-            </div>
-
-            <div v-else class="custom-name-options">
-              <div class="form-group" v-if="enableDemand">
-                <label>Demand Filename</label>
-                <input type="text" v-model="customDemandName" placeholder="my_demand_forecast.csv" :disabled="isRunning" />
+              <div v-else class="naming-grid">
+                <div class="form-group compact" v-if="enableDemand">
+                  <label>Demand</label>
+                  <input type="text" v-model="customDemandName" placeholder="forecast.csv" :disabled="isRunning" />
+                </div>
+                <div class="form-group compact" v-if="enableCfac">
+                  <label>CFAC</label>
+                  <input type="text" v-model="customCfacName" placeholder="cfac.csv" :disabled="isRunning" />
+                </div>
               </div>
-              <div class="form-group" v-if="enableCfac">
-                <label>CFAC Filename</label>
-                <input type="text" v-model="customCfacName" placeholder="my_cfac_forecast.csv" :disabled="isRunning" />
+            </section>
+
+            <!-- Column 2: Model Training Card -->
+            <section class="card card-compact">
+              <h2>Model Training</h2>
+              <div class="calibration-mode-row">
+                <label class="radio-label">
+                  <input type="radio" v-model="calibrationMode" value="auto" :disabled="isRunning" />
+                  <span>Auto</span>
+                </label>
+                <label class="radio-label">
+                  <input type="radio" v-model="calibrationMode" value="saved" :disabled="isRunning || availableCalibratorModels.length === 0" />
+                  <span>Saved</span>
+                </label>
               </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- Forecast Period Section -->
-      <section class="card">
-        <h2>Forecast Period</h2>
-        <p class="hint">Dates to generate predictions for</p>
-        <div class="date-row">
-          <div class="form-group">
-            <label>Start</label>
-            <input type="date" v-model="forecastStart" :disabled="isRunning" />
-          </div>
-          <div class="form-group">
-            <label>End</label>
-            <input type="date" v-model="forecastEnd" :disabled="isRunning" />
-          </div>
-        </div>
-      </section>
-
-      <!-- Model Training Section -->
-      <section class="card">
-        <h2>Model Training</h2>
-        <p class="hint">Configure how models are calibrated for forecasting</p>
-
-        <div class="training-mode-container">
-          <div class="calibration-mode-row">
-            <label class="radio-label">
-              <input type="radio" v-model="calibrationMode" value="auto" :disabled="isRunning" />
-              <span>Auto-train</span>
-              <span class="hint-inline">(train on historical data)</span>
-            </label>
-            <label class="radio-label">
-              <input type="radio" v-model="calibrationMode" value="saved" :disabled="isRunning || availableCalibratorModels.length === 0" />
-              <span>Use saved model</span>
-              <span v-if="availableCalibratorModels.length === 0" class="hint-inline">(no models available)</span>
-            </label>
-          </div>
-
-          <!-- Training Period (when auto-train selected) -->
-          <div v-if="calibrationMode === 'auto'" class="training-period-section">
-            <h3>Training Period</h3>
-            <p class="hint">Historical data range used to train calibration models</p>
-            <div class="date-row">
-              <div class="form-group">
-                <label>Start</label>
-                <input type="date" v-model="trainingStart" :disabled="isRunning" />
+              <div v-if="calibrationMode === 'auto'" class="training-period-section">
+                <div class="date-row">
+                  <div class="form-group compact">
+                    <label>Start</label>
+                    <input type="date" v-model="trainingStart" :disabled="isRunning" />
+                  </div>
+                  <div class="form-group compact">
+                    <label>End</label>
+                    <input type="date" v-model="trainingEnd" :disabled="isRunning" />
+                  </div>
+                </div>
+                <div class="save-option">
+                  <label class="checkbox-label">
+                    <input type="checkbox" v-model="saveCalibrator" :disabled="isRunning" />
+                    <span>Save</span>
+                  </label>
+                </div>
               </div>
-              <div class="form-group">
-                <label>End</label>
-                <input type="date" v-model="trainingEnd" :disabled="isRunning" />
+              <div v-if="calibrationMode === 'saved'" class="saved-model-section">
+                <select v-model="selectedCalibrator" :disabled="isRunning" class="calibrator-dropdown">
+                  <option v-for="model in availableCalibratorModels" :key="model.name" :value="model.name">
+                    {{ model.name }}
+                  </option>
+                </select>
               </div>
-            </div>
-            <div class="save-option">
-              <label class="checkbox-label">
-                <input type="checkbox" v-model="saveCalibrator" :disabled="isRunning" />
-                <span>Save trained model for future use</span>
-              </label>
-            </div>
-          </div>
+            </section>
 
-          <!-- Saved Model Selector (when using saved) -->
-          <div v-if="calibrationMode === 'saved'" class="saved-model-section">
-            <h3>Select Calibration Model</h3>
-            <select v-model="selectedCalibrator" :disabled="isRunning" class="calibrator-dropdown-full">
-              <option v-for="model in availableCalibratorModels" :key="model.name" :value="model.name">
-                {{ model.name }} ({{ model.date }}){{ model.mape ? ` - MAPE: ${model.mape.toFixed(2)}%` : '' }}
-              </option>
-            </select>
-          </div>
-        </div>
-      </section>
-
-      <!-- Forecast Options Section -->
-      <section class="card">
-        <h2>Forecast Options</h2>
-        <div class="options-grid-4">
-          <div class="toggle-group">
-            <label class="toggle">
-              <input type="checkbox" v-model="enableDemand" :disabled="isRunning" />
-              <span class="toggle-slider"></span>
-              <span class="toggle-label">Demand Forecast</span>
-            </label>
-            <p class="hint">Regional electricity demand</p>
-            <div v-if="enableDemand" class="model-select">
-              <label class="model-label">Model:</label>
-              <select v-model="demandModel" :disabled="isRunning" class="model-dropdown">
-                <option value="hybrid-calibrated">Hybrid + Calibration (Best)</option>
-                <option value="hybrid">Hybrid Only</option>
-              </select>
-            </div>
-          </div>
-          <div class="toggle-group">
-            <label class="toggle">
-              <input type="checkbox" v-model="enableCfac" :disabled="isRunning" />
-              <span class="toggle-slider"></span>
-              <span class="toggle-label">Capacity Factor</span>
-            </label>
-            <p class="hint">Solar, wind, hydro output</p>
-            <div v-if="enableCfac" class="model-select">
-              <label class="model-label">Model:</label>
-              <select v-model="cfacModel" :disabled="isRunning" class="model-dropdown">
-                <option value="hybrid">Hybrid (Default)</option>
-                <option value="hybrid-lstm">Hybrid + LSTM Correction</option>
-                <option value="legacy">Legacy XGBoost</option>
-              </select>
-            </div>
-          </div>
-          <div class="toggle-group" :class="{ 'disabled': !enableDemand }">
-            <label class="toggle">
-              <input type="checkbox" v-model="enableZonal" :disabled="isRunning || !enableDemand" />
-              <span class="toggle-slider"></span>
-              <span class="toggle-label">Zonal Mode</span>
-            </label>
-            <p class="hint">14 sub-regions instead of 3</p>
-          </div>
-          <div class="scaling-group">
-            <label>Scaling Factor</label>
-            <div class="scaling-input">
-              <input type="number" v-model="scalingPercent" min="1" max="200" :disabled="isRunning" />
-              <span class="percent">%</span>
-            </div>
-            <p class="hint">Apply to demand (100% = none)</p>
-          </div>
-        </div>
-      </section>
-
-      <!-- Progress Section -->
-      <section class="card progress-card" v-if="isRunning || isComplete">
-        <div class="progress-header">
-          <h2>Progress</h2>
-          <button
-            v-if="statusHistory.length > 0"
-            @click="showHistory = !showHistory"
-            class="btn btn-text"
-          >
-            {{ showHistory ? 'Hide History' : 'View History' }}
-          </button>
-        </div>
-
-        <!-- Progress Bar -->
-        <div class="progress-bar-container">
-          <div
-            class="progress-bar"
-            :class="{ 'error': hasError, 'complete': isComplete && !hasError }"
-            :style="{ width: progress + '%' }"
-          ></div>
-        </div>
-        <div class="progress-text">{{ Math.round(progress) }}%</div>
-
-        <!-- Current Status -->
-        <div class="current-status" :class="{ 'error': hasError }">
-          <span class="status-indicator" :class="{ 'spinning': isRunning }"></span>
-          {{ currentStatus }}
-        </div>
-
-        <!-- Status History Modal -->
-        <div class="history-panel" v-if="showHistory">
-          <div
-            v-for="(item, i) in statusHistory"
-            :key="i"
-            class="history-item"
-            :class="item.type"
-          >
-            <span class="history-time">{{ item.time }}</span>
-            <span class="history-message">{{ item.message }}</span>
+            <!-- Column 3: Forecast Options Card (includes Period) -->
+            <section class="card card-compact">
+              <h2>Forecast Options</h2>
+              <!-- Forecast Period -->
+              <div class="forecast-period-row">
+                <div class="form-group compact">
+                  <label>Start</label>
+                  <input type="date" v-model="forecastStart" :disabled="isRunning" />
+                </div>
+                <div class="form-group compact">
+                  <label>End</label>
+                  <input type="date" v-model="forecastEnd" :disabled="isRunning" />
+                </div>
+              </div>
+              <!-- Toggles -->
+              <div class="options-grid-2x2">
+                <div class="toggle-group">
+                  <label class="toggle">
+                    <input type="checkbox" v-model="enableDemand" :disabled="isRunning" />
+                    <span class="toggle-slider"></span>
+                    <span class="toggle-label">Demand</span>
+                  </label>
+                  <select v-if="enableDemand" v-model="demandModel" :disabled="isRunning" class="model-dropdown-sm">
+                    <option value="hybrid-calibrated">+Calib</option>
+                    <option value="hybrid">Hybrid</option>
+                  </select>
+                </div>
+                <div class="toggle-group">
+                  <label class="toggle">
+                    <input type="checkbox" v-model="enableCfac" :disabled="isRunning" />
+                    <span class="toggle-slider"></span>
+                    <span class="toggle-label">CFAC</span>
+                  </label>
+                  <select v-if="enableCfac" v-model="cfacModel" :disabled="isRunning" class="model-dropdown-sm">
+                    <option value="hybrid">Hybrid</option>
+                    <option value="hybrid-lstm">+LSTM</option>
+                  </select>
+                </div>
+                <div class="toggle-group" :class="{ 'disabled': !enableDemand }">
+                  <label class="toggle">
+                    <input type="checkbox" v-model="enableZonal" :disabled="isRunning || !enableDemand" />
+                    <span class="toggle-slider"></span>
+                    <span class="toggle-label">Zonal</span>
+                  </label>
+                </div>
+                <div class="scaling-group-compact">
+                  <label>Scale</label>
+                  <div class="scaling-input">
+                    <input type="number" v-model="scalingPercent" min="1" max="200" :disabled="isRunning" />
+                    <span class="percent">%</span>
+                  </div>
+                </div>
+                <div class="toggle-group gateway-toggle">
+                  <label class="toggle">
+                    <input type="checkbox" v-model="pushToGateway" :disabled="isRunning" />
+                    <span class="toggle-slider gateway"></span>
+                    <span class="toggle-label">Push to Gateway</span>
+                  </label>
+                </div>
+              </div>
+            </section>
           </div>
         </div>
 
-        <!-- Reset button when complete -->
+      </div><!-- End Manual Forecast Tab -->
+
+      <!-- ============ SCHEDULER TAB ============ -->
+      <div v-if="activeTab === 'scheduler'" class="tab-content">
+        <!-- Main Grid Layout for Scheduler Tab -->
+        <div class="content-grid">
+          <!-- Left Column -->
+          <div class="grid-column">
+            <!-- Mode Selection -->
+            <section class="card">
+              <h2>Scheduler Mode</h2>
+              <div class="source-toggle">
+                <label class="radio-label">
+                  <input type="radio" v-model="schedulerMode" value="run" :disabled="schedulerIsRunning" />
+                  <span>Run Now</span>
+                </label>
+                <label class="radio-label">
+                  <input type="radio" v-model="schedulerMode" value="backfill" :disabled="schedulerIsRunning" />
+                  <span>Backfill</span>
+                </label>
+              </div>
+              <p class="hint">{{ schedulerMode === 'run' ? 'Single date forecasts' : 'Date range backfill' }}</p>
+            </section>
+
+            <!-- Date Configuration -->
+            <section class="card">
+              <h2>{{ schedulerMode === 'run' ? 'As-Of Date' : 'Date Range' }}</h2>
+              <div v-if="schedulerMode === 'run'" class="form-group compact">
+                <label>Date</label>
+                <input type="date" v-model="schedulerAsOfDate" :disabled="schedulerIsRunning" />
+              </div>
+              <div v-else class="date-row">
+                <div class="form-group compact">
+                  <label>Start</label>
+                  <input type="date" v-model="schedulerStartDate" :disabled="schedulerIsRunning" />
+                </div>
+                <div class="form-group compact">
+                  <label>End</label>
+                  <input type="date" v-model="schedulerEndDate" :disabled="schedulerIsRunning" />
+                </div>
+              </div>
+            </section>
+
+            <!-- Data Sources -->
+            <section class="card">
+              <h2>Data Sources</h2>
+              <div class="form-group compact">
+                <label>Demand Data</label>
+                <div class="input-row">
+                  <input type="text" v-model="schedulerDemandPath" placeholder="Data Samples/Demand" :disabled="schedulerIsRunning" />
+                  <button @click="browseSchedulerDemandPath" class="btn btn-secondary btn-sm" :disabled="schedulerIsRunning">Browse</button>
+                </div>
+              </div>
+              <div class="form-group compact">
+                <label>CFAC Data</label>
+                <div class="input-row">
+                  <input type="text" v-model="schedulerCfacPath" placeholder="Data Samples/Capacity Factor" :disabled="schedulerIsRunning" />
+                  <button @click="browseSchedulerCfacPath" class="btn btn-secondary btn-sm" :disabled="schedulerIsRunning">Browse</button>
+                </div>
+              </div>
+              <div class="form-group compact">
+                <label>Output Directory</label>
+                <div class="input-row">
+                  <input type="text" v-model="schedulerOutputDir" placeholder="output/forecasts" :disabled="schedulerIsRunning" />
+                  <button @click="browseSchedulerOutputDir" class="btn btn-secondary btn-sm" :disabled="schedulerIsRunning">Browse</button>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <!-- Center Column -->
+          <div class="grid-column">
+            <!-- Forecast Types -->
+            <section class="card">
+              <h2>Forecast Types</h2>
+              <div class="options-grid-2x2">
+                <div class="toggle-group">
+                  <label class="toggle">
+                    <input type="checkbox" v-model="schedulerDailyEnabled" :disabled="schedulerIsRunning" />
+                    <span class="toggle-slider"></span>
+                    <span class="toggle-label">Day-Ahead</span>
+                  </label>
+                </div>
+                <div class="toggle-group">
+                  <label class="toggle">
+                    <input type="checkbox" v-model="schedulerWeeklyEnabled" :disabled="schedulerIsRunning" />
+                    <span class="toggle-slider"></span>
+                    <span class="toggle-label">Week-Ahead</span>
+                  </label>
+                </div>
+                <div class="toggle-group">
+                  <label class="toggle">
+                    <input type="checkbox" v-model="schedulerDemandEnabled" :disabled="schedulerIsRunning" />
+                    <span class="toggle-slider"></span>
+                    <span class="toggle-label">Demand</span>
+                  </label>
+                </div>
+                <div class="toggle-group">
+                  <label class="toggle">
+                    <input type="checkbox" v-model="schedulerCfacEnabled" :disabled="schedulerIsRunning" />
+                    <span class="toggle-slider"></span>
+                    <span class="toggle-label">CFAC</span>
+                  </label>
+                </div>
+              </div>
+              <div class="toggle-group" style="margin-top: 12px;">
+                <label class="toggle">
+                  <input type="checkbox" v-model="schedulerZonalEnabled" :disabled="schedulerIsRunning || !schedulerDemandEnabled" />
+                  <span class="toggle-slider"></span>
+                  <span class="toggle-label">Zonal Mode (14)</span>
+                </label>
+              </div>
+            </section>
+
+            <!-- Model Settings -->
+            <section class="card">
+              <h2>Model Settings</h2>
+              <div class="form-group compact">
+                <label>Demand Model</label>
+                <select v-model="schedulerDemandModel" :disabled="schedulerIsRunning" class="calibrator-dropdown">
+                  <option value="hybrid">Hybrid</option>
+                  <option value="regression">Regression</option>
+                  <option value="xgboost">XGBoost</option>
+                </select>
+              </div>
+              <div class="checkbox-options">
+                <label class="checkbox-label">
+                  <input type="checkbox" v-model="schedulerUseXgboost" :disabled="schedulerIsRunning" />
+                  <span>XGBoost CFAC</span>
+                </label>
+                <label class="checkbox-label">
+                  <input type="checkbox" v-model="schedulerAsymmetricLoss" :disabled="schedulerIsRunning" />
+                  <span>Asymm Loss</span>
+                </label>
+                <label class="checkbox-label">
+                  <input type="checkbox" v-model="schedulerBiasCorrection" :disabled="schedulerIsRunning" />
+                  <span>Bias Corr</span>
+                </label>
+              </div>
+            </section>
+          </div>
+
+          <!-- Right Column -->
+          <div class="grid-column">
+            <!-- Calibration Settings -->
+            <section class="card">
+              <h2>Calibration</h2>
+              <div class="params-grid">
+                <div class="form-group compact">
+                  <label>Days</label>
+                  <input type="number" v-model="schedulerCalibDays" min="1" max="30" :disabled="schedulerIsRunning" />
+                </div>
+                <div class="form-group compact">
+                  <label>Threshold %</label>
+                  <input type="number" v-model="schedulerCalibThreshold" min="1" max="20" :disabled="schedulerIsRunning" />
+                </div>
+                <div class="form-group compact">
+                  <label>Iterations</label>
+                  <input type="number" v-model="schedulerMaxIterations" min="1" max="10" :disabled="schedulerIsRunning" />
+                </div>
+              </div>
+            </section>
+
+            <!-- Training Mode -->
+            <section class="card">
+              <h2>Training Mode</h2>
+              <div class="source-toggle">
+                <label class="radio-label">
+                  <input type="radio" v-model="schedulerTrainingMode" value="auto" :disabled="schedulerIsRunning" />
+                  <span>Auto Train</span>
+                </label>
+                <label class="radio-label">
+                  <input type="radio" v-model="schedulerTrainingMode" value="saved" :disabled="schedulerIsRunning" />
+                  <span>Use Saved</span>
+                </label>
+              </div>
+              <div v-if="schedulerTrainingMode === 'saved'" class="form-group compact" style="margin-top: 8px;">
+                <label>Calibrator Model</label>
+                <select v-model="schedulerSelectedCalibrator" :disabled="schedulerIsRunning" class="calibrator-dropdown">
+                  <option value="">Select saved model...</option>
+                  <option v-for="model in availableCalibratorModels" :key="model.name" :value="model.name">
+                    {{ model.name }} ({{ model.date }})
+                  </option>
+                </select>
+              </div>
+              <p class="hint">{{ schedulerTrainingMode === 'auto' ? 'Train fresh model each run' : 'Use pre-trained calibrator' }}</p>
+            </section>
+
+            <!-- Schedule Times -->
+            <section class="card">
+              <h2>Auto Schedule</h2>
+              <div class="toggle-group" style="margin-bottom: 8px;">
+                <label class="toggle">
+                  <input type="checkbox" v-model="schedulerAutoEnabled" :disabled="schedulerIsRunning" />
+                  <span class="toggle-slider"></span>
+                  <span class="toggle-label">Enable Auto-Run</span>
+                </label>
+              </div>
+              <div v-if="schedulerAutoEnabled" class="schedule-times-list">
+                <div v-for="(time, index) in schedulerTimes" :key="index" class="schedule-time-row">
+                  <input
+                    type="time"
+                    :value="time"
+                    @change="updateScheduleTime(index, ($event.target as HTMLInputElement).value)"
+                    :disabled="schedulerIsRunning"
+                    class="time-input"
+                  />
+                  <button
+                    v-if="schedulerTimes.length > 1"
+                    @click="removeScheduleTime(index)"
+                    class="btn btn-danger btn-sm btn-icon"
+                    :disabled="schedulerIsRunning"
+                    title="Remove time"
+                  >-</button>
+                </div>
+                <button
+                  v-if="schedulerTimes.length < 6"
+                  @click="addScheduleTime"
+                  class="btn btn-secondary btn-sm"
+                  :disabled="schedulerIsRunning"
+                  style="margin-top: 4px;"
+                >+ Add Time</button>
+              </div>
+              <p v-if="schedulerAutoEnabled" class="hint">Run automatically at {{ schedulerTimes.length }} time(s) daily</p>
+              <p v-else class="hint">Auto-scheduling disabled</p>
+            </section>
+
+            <!-- Output Naming -->
+            <section class="card">
+              <h2>Output Naming</h2>
+              <div class="form-group compact">
+                <label>Demand Prefix</label>
+                <input type="text" v-model="schedulerDemandPrefix" placeholder="FC_DEM_" :disabled="schedulerIsRunning" />
+              </div>
+              <div class="form-group compact">
+                <label>Zonal Prefix</label>
+                <input type="text" v-model="schedulerDemandZonalPrefix" placeholder="FC_ZDEM_" :disabled="schedulerIsRunning" />
+              </div>
+              <div class="form-group compact">
+                <label>CFAC Prefix</label>
+                <input type="text" v-model="schedulerCfacPrefix" placeholder="FC_CF_" :disabled="schedulerIsRunning" />
+              </div>
+              <div class="form-group compact">
+                <label>Suffix</label>
+                <input type="text" v-model="schedulerOutputSuffix" placeholder="Optional suffix" :disabled="schedulerIsRunning" />
+              </div>
+            </section>
+
+          </div>
+        </div>
+      </div><!-- End Scheduler Tab -->
+
+    </main>
+
+    <!-- Bottom Terminal Panel -->
+    <div class="terminal-panel" :class="{ expanded: terminalExpanded }">
+      <div class="terminal-header">
+        <!-- Generate Button (Left Side) -->
         <button
-          v-if="isComplete"
-          @click="resetProgress"
-          class="btn btn-secondary btn-reset"
-        >
-          Clear
-        </button>
-      </section>
-
-      <!-- Action Section -->
-      <section class="action-section">
-        <button
-          @click="runForecast"
+          v-if="activeTab === 'manual'"
+          @click.stop="runForecast"
           :disabled="!canRunForecast || isRunning"
-          class="btn btn-primary btn-large"
+          class="btn btn-primary btn-generate"
         >
           <span v-if="isRunning" class="btn-content">
             <span class="spinner"></span>
@@ -1076,83 +1457,318 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
           </span>
           <span v-else>Generate Forecast</span>
         </button>
-      </section>
-    </main>
+        <button
+          v-if="activeTab === 'scheduler'"
+          @click.stop="runScheduler"
+          :disabled="schedulerIsRunning || (!schedulerDemandEnabled && !schedulerCfacEnabled) || (!schedulerDailyEnabled && !schedulerWeeklyEnabled)"
+          class="btn btn-primary btn-generate"
+        >
+          <span v-if="schedulerIsRunning" class="btn-content">
+            <span class="spinner"></span>
+            Running...
+          </span>
+          <span v-else>{{ schedulerMode === 'run' ? 'Run Scheduler' : 'Run Backfill' }}</span>
+        </button>
+
+        <!-- Terminal Toggle Area -->
+        <div class="terminal-toggle-area" @click="terminalExpanded = !terminalExpanded">
+          <span class="terminal-toggle">{{ terminalExpanded ? '▼' : '▲' }}</span>
+          <span class="terminal-title">Terminal</span>
+          <span v-if="isRunning || schedulerIsRunning" class="terminal-status running">
+            <span class="status-dot"></span>
+            Running...
+          </span>
+          <span v-else-if="(activeTab === 'manual' && isComplete) || (activeTab === 'scheduler' && schedulerStatusHistory.length > 0)" class="terminal-status complete">
+            Complete
+          </span>
+        </div>
+
+        <span class="terminal-spacer"></span>
+        <button
+          v-if="(activeTab === 'manual' && statusHistory.length > 0) || (activeTab === 'scheduler' && schedulerStatusHistory.length > 0)"
+          @click.stop="activeTab === 'manual' ? resetProgress() : (schedulerStatusHistory = [])"
+          class="btn btn-text btn-sm"
+        >
+          Clear
+        </button>
+      </div>
+
+      <div class="terminal-content" v-if="terminalExpanded">
+        <!-- Manual Forecast Progress -->
+        <template v-if="activeTab === 'manual'">
+          <div class="progress-section" v-if="isRunning || isComplete">
+            <div class="progress-bar-container">
+              <div
+                class="progress-bar"
+                :class="{ 'error': hasError, 'complete': isComplete && !hasError }"
+                :style="{ width: progress + '%' }"
+              ></div>
+            </div>
+            <div class="progress-text">{{ Math.round(progress) }}%</div>
+          </div>
+
+          <div class="current-status" :class="{ 'error': hasError }" v-if="currentStatus">
+            <span class="status-indicator" :class="{ 'spinning': isRunning }"></span>
+            {{ currentStatus }}
+          </div>
+
+          <div class="history-list" v-if="statusHistory.length > 0">
+            <div
+              v-for="(item, i) in statusHistory"
+              :key="i"
+              class="history-item"
+              :class="item.type"
+            >
+              <span class="history-time">{{ item.time }}</span>
+              <span class="history-message">{{ item.message }}</span>
+            </div>
+          </div>
+        </template>
+
+        <!-- Scheduler Progress -->
+        <template v-if="activeTab === 'scheduler'">
+          <div class="progress-section" v-if="schedulerIsRunning || schedulerProgress > 0">
+            <div class="progress-bar-container">
+              <div
+                class="progress-bar"
+                :class="{ 'complete': !schedulerIsRunning && schedulerProgress === 100 }"
+                :style="{ width: schedulerProgress + '%' }"
+              ></div>
+            </div>
+            <div class="progress-text">{{ Math.round(schedulerProgress) }}%</div>
+          </div>
+
+          <div class="current-status" v-if="schedulerCurrentStatus">
+            <span class="status-indicator" :class="{ 'spinning': schedulerIsRunning }"></span>
+            {{ schedulerCurrentStatus }}
+          </div>
+
+          <div class="history-list" v-if="schedulerStatusHistory.length > 0">
+            <div
+              v-for="(item, i) in schedulerStatusHistory"
+              :key="i"
+              class="history-item"
+              :class="item.type"
+            >
+              <span class="history-time">{{ item.time }}</span>
+              <span class="history-message">{{ item.message }}</span>
+            </div>
+          </div>
+        </template>
+
+        <div v-if="(activeTab === 'manual' && !isRunning && !isComplete && statusHistory.length === 0) ||
+                   (activeTab === 'scheduler' && !schedulerIsRunning && schedulerStatusHistory.length === 0)"
+             class="terminal-empty">
+          Ready. Configure options above and click the action button to begin.
+        </div>
+      </div>
+    </div>
 
   </div>
 </template>
 
 <style scoped>
+/* =====================================================
+   DARK THEME WIDESCREEN LAYOUT
+   ===================================================== */
+
+/* Base App Container - Full viewport grid */
 .app {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  grid-template-rows: 1fr auto;
   min-height: 100vh;
-  background: #f8fafc;
+  max-height: 100vh;
+  overflow: hidden;
+  background: #0f172a;
+  color: #e2e8f0;
 }
 
-.header {
-  background: linear-gradient(135deg, #1e293b 0%, #334155 100%);
-  color: white;
-  padding: 24px 32px;
+.app.dark-theme {
+  --bg-primary: #0f172a;
+  --bg-secondary: #1e293b;
+  --bg-card: #1e293b;
+  --bg-input: #0f172a;
+  --border-color: #334155;
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --accent-primary: #3b82f6;
+  --accent-hover: #2563eb;
+  --accent-success: #10b981;
+  --accent-warning: #f59e0b;
+  --accent-danger: #ef4444;
 }
 
-.header-content {
+/* =====================================================
+   LEFT SIDEBAR
+   ===================================================== */
+.sidebar {
+  grid-column: 1;
+  grid-row: 1 / -1;
+  background: linear-gradient(180deg, #1e293b 0%, #0f172a 100%);
+  border-right: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+
+.sidebar-header {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
+  padding: 20px 16px;
+  border-bottom: 1px solid var(--border-color);
 }
 
-.header-logo {
-  height: 48px;
-  width: auto;
+.sidebar-logo {
+  width: 40px;
+  height: 40px;
+  object-fit: contain;
 }
 
-.header-text {
+.sidebar-title {
   display: flex;
   flex-direction: column;
 }
 
-.header h1 {
-  font-size: 1.5rem;
-  font-weight: 600;
-  margin: 0;
+.title-text {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
 }
 
-.header .subtitle {
+.title-sub {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.sidebar-nav {
+  flex: 1;
+  padding: 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: left;
+  width: 100%;
+}
+
+.nav-item:hover:not(:disabled) {
+  background: rgba(59, 130, 246, 0.1);
+  color: var(--text-primary);
+}
+
+.nav-item.active {
+  background: var(--accent-primary);
+  color: white;
+}
+
+.nav-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.nav-icon {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.nav-text {
   font-size: 0.875rem;
-  color: #94a3b8;
-  margin-top: 4px;
+  font-weight: 500;
 }
 
-.main {
-  max-width: 900px;
-  margin: 0 auto;
+.sidebar-footer {
+  padding: 16px;
+  border-top: 1px solid var(--border-color);
+}
+
+.version-text {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+/* =====================================================
+   MAIN CONTENT AREA
+   ===================================================== */
+.main-content {
+  grid-column: 2;
+  grid-row: 1;
+  background: var(--bg-primary);
+  overflow-y: auto;
+  overflow-x: hidden;
   padding: 24px;
 }
 
+.tab-content {
+  height: 100%;
+}
+
+.content-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+  height: 100%;
+}
+
+.grid-column {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+/* =====================================================
+   CARDS (Dark Theme)
+   ===================================================== */
 .card {
-  background: white;
+  background: var(--bg-card);
   border-radius: 12px;
-  padding: 24px;
-  margin-bottom: 24px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  padding: 20px;
+  border: 1px solid var(--border-color);
 }
 
 .card h2 {
-  font-size: 1.1rem;
+  font-size: 0.875rem;
   font-weight: 600;
-  color: #1e293b;
+  color: var(--text-primary);
   margin-bottom: 16px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 
 .card h3 {
-  font-size: 0.95rem;
+  font-size: 0.8rem;
   font-weight: 600;
-  color: #334155;
+  color: var(--text-secondary);
   margin-bottom: 4px;
 }
 
+/* =====================================================
+   FORMS (Dark Theme)
+   ===================================================== */
 .source-toggle {
   display: flex;
-  gap: 24px;
+  gap: 16px;
   margin-bottom: 16px;
 }
 
@@ -1161,23 +1777,25 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
   align-items: center;
   gap: 8px;
   cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
 }
 
 .radio-label input {
-  width: 18px;
-  height: 18px;
-  accent-color: #3b82f6;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent-primary);
 }
 
 .form-group {
-  margin-bottom: 16px;
+  margin-bottom: 14px;
 }
 
 .form-group label {
   display: block;
-  font-size: 0.875rem;
+  font-size: 0.8rem;
   font-weight: 500;
-  color: #334155;
+  color: var(--text-secondary);
   margin-bottom: 6px;
 }
 
@@ -1186,19 +1804,22 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 .form-group input[type="date"] {
   width: 100%;
   padding: 10px 12px;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
   font-size: 0.875rem;
+  background: var(--bg-input);
+  color: var(--text-primary);
 }
 
 .form-group input:focus {
   outline: none;
-  border-color: #3b82f6;
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
 }
 
 .form-group input:disabled {
-  background: #f1f5f9;
+  background: var(--bg-secondary);
+  color: var(--text-muted);
   cursor: not-allowed;
 }
 
@@ -1214,70 +1835,43 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 .output-dirs {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 16px;
+  gap: 12px;
 }
 
 .output-dirs .form-group {
   margin-bottom: 0;
 }
 
-/* Naming section */
-.naming-section {
-  margin-top: 16px;
-  border-top: 1px solid #e2e8f0;
-  padding-top: 16px;
-}
-
-.naming-header {
+/* Output Naming Card */
+.output-preview {
   display: flex;
-  align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
-  cursor: pointer;
-  font-weight: 500;
-  color: #334155;
-  padding: 8px 0;
-}
-
-.naming-header:hover {
-  color: #3b82f6;
-}
-
-.naming-toggle {
-  font-size: 0.75rem;
-  color: #64748b;
-}
-
-.naming-preview {
-  margin-left: auto;
-  display: flex;
-  gap: 8px;
+  margin-bottom: 16px;
+  padding: 12px;
+  background: var(--bg-primary);
+  border-radius: 6px;
 }
 
 .preview-tag {
   font-size: 0.75rem;
   font-family: monospace;
-  background: #f1f5f9;
-  padding: 2px 8px;
+  background: rgba(59, 130, 246, 0.1);
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  padding: 4px 10px;
   border-radius: 4px;
-  color: #64748b;
-}
-
-.naming-options {
-  padding: 16px;
-  background: #f8fafc;
-  border-radius: 8px;
-  margin-top: 8px;
+  color: var(--accent-primary);
 }
 
 .naming-mode {
   display: flex;
-  gap: 24px;
+  gap: 16px;
   margin-bottom: 16px;
 }
 
 .naming-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  grid-template-columns: repeat(2, 1fr);
   gap: 12px;
 }
 
@@ -1287,15 +1881,7 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 
 .naming-grid input {
   font-family: monospace;
-  font-size: 0.875rem;
-}
-
-.custom-name-options .form-group {
-  margin-bottom: 12px;
-}
-
-.custom-name-options .form-group:last-child {
-  margin-bottom: 0;
+  font-size: 0.8rem;
 }
 
 .custom-name-options input {
@@ -1308,11 +1894,11 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 }
 
 .db-info-panel {
-  margin-top: 16px;
-  padding: 16px;
-  background: #f8fafc;
-  border-radius: 8px;
-  border: 1px solid #e2e8f0;
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--bg-primary);
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
 }
 
 .db-info-header {
@@ -1324,62 +1910,63 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 
 .db-info-header h3 {
   margin: 0;
-  font-size: 0.9rem;
+  font-size: 0.85rem;
+  color: var(--text-primary);
 }
 
 .db-info-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 12px;
+  gap: 8px;
 }
 
 .db-info-item {
-  padding: 12px;
-  background: white;
+  padding: 10px;
+  background: var(--bg-secondary);
   border-radius: 6px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--border-color);
 }
 
 .db-info-label {
   display: block;
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   font-weight: 600;
-  color: #64748b;
+  color: var(--text-muted);
   text-transform: uppercase;
   margin-bottom: 4px;
 }
 
 .db-info-value {
   display: block;
-  font-size: 1rem;
+  font-size: 0.9rem;
   font-weight: 600;
-  color: #1e293b;
+  color: var(--text-primary);
 }
 
 .db-info-range {
   display: block;
-  font-size: 0.7rem;
-  color: #94a3b8;
+  font-size: 0.65rem;
+  color: var(--text-muted);
   margin-top: 4px;
 }
 
 .db-info-regions {
   display: block;
-  font-size: 0.7rem;
-  color: #3b82f6;
+  font-size: 0.65rem;
+  color: var(--accent-primary);
   font-weight: 500;
 }
 
 .db-info-empty {
   text-align: center;
-  color: #94a3b8;
+  color: var(--text-muted);
   padding: 16px;
-  font-size: 0.875rem;
+  font-size: 0.8rem;
 }
 
 .db-update-section {
-  margin-top: 16px;
-  border-top: 1px solid #e2e8f0;
+  margin-top: 12px;
+  border-top: 1px solid var(--border-color);
   padding-top: 12px;
 }
 
@@ -1389,12 +1976,13 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
   gap: 8px;
   cursor: pointer;
   font-weight: 500;
-  color: #334155;
+  color: var(--text-secondary);
   padding: 4px 0;
+  font-size: 0.85rem;
 }
 
 .db-update-header:hover {
-  color: #3b82f6;
+  color: var(--accent-primary);
 }
 
 .db-update-panel {
@@ -1420,89 +2008,91 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 
 .btn-sm {
   padding: 6px 12px;
-  font-size: 0.8rem;
+  font-size: 0.75rem;
 }
 
 .optional {
   font-weight: 400;
-  color: #94a3b8;
-  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-size: 0.7rem;
 }
 
 .hint {
-  font-size: 0.75rem;
-  color: #64748b;
+  font-size: 0.7rem;
+  color: var(--text-muted);
   margin-top: 4px;
 }
 
 .hint-success {
-  color: #16a34a;
+  color: var(--accent-success);
 }
 
 .hint-error {
-  color: #dc2626;
+  color: var(--accent-danger);
 }
 
 /* Model Training Section */
 .training-mode-container {
-  padding: 16px;
-  background: #f8fafc;
-  border-radius: 8px;
+  padding: 12px;
+  background: var(--bg-primary);
+  border-radius: 6px;
 }
 
 .calibration-mode-row {
   display: flex;
-  gap: 24px;
-  margin-bottom: 16px;
+  gap: 16px;
+  margin-bottom: 12px;
 }
 
 .hint-inline {
-  font-size: 0.75rem;
-  color: #64748b;
+  font-size: 0.7rem;
+  color: var(--text-muted);
   margin-left: 4px;
 }
 
 .training-period-section {
-  margin-top: 16px;
-  padding-top: 16px;
-  border-top: 1px solid #e2e8f0;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color);
 }
 
 .training-period-section h3 {
-  font-size: 0.9rem;
+  font-size: 0.85rem;
   margin-bottom: 4px;
+  color: var(--text-secondary);
 }
 
 .saved-model-section {
-  margin-top: 16px;
-  padding-top: 16px;
-  border-top: 1px solid #e2e8f0;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color);
 }
 
 .saved-model-section h3 {
-  font-size: 0.9rem;
+  font-size: 0.85rem;
   margin-bottom: 8px;
+  color: var(--text-secondary);
 }
 
 .calibrator-dropdown-full {
   width: 100%;
   padding: 10px 12px;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  font-size: 0.875rem;
-  background: white;
-  color: #334155;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  font-size: 0.8rem;
+  background: var(--bg-input);
+  color: var(--text-primary);
   cursor: pointer;
 }
 
 .calibrator-dropdown-full:focus {
   outline: none;
-  border-color: #3b82f6;
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
 }
 
 .calibrator-dropdown-full:disabled {
-  background: #f1f5f9;
+  background: var(--bg-secondary);
   cursor: not-allowed;
 }
 
@@ -1515,31 +2105,31 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
   align-items: center;
   gap: 8px;
   cursor: pointer;
-  font-size: 0.875rem;
-  color: #334155;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
 }
 
 .checkbox-label input {
   width: 16px;
   height: 16px;
-  accent-color: #3b82f6;
+  accent-color: var(--accent-primary);
 }
 
 .date-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 24px;
+  gap: 16px;
 }
 
 .date-section {
-  padding: 16px;
-  background: #f8fafc;
-  border-radius: 8px;
+  padding: 12px;
+  background: var(--bg-primary);
+  border-radius: 6px;
 }
 
 .date-row {
   display: flex;
-  gap: 16px;
+  gap: 12px;
   margin-top: 12px;
 }
 
@@ -1551,19 +2141,19 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 .options-grid {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
-  gap: 24px;
+  gap: 16px;
 }
 
 .options-grid-4 {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr 1fr;
-  gap: 16px;
+  gap: 12px;
 }
 
 .toggle-group {
-  padding: 16px;
-  background: #f8fafc;
-  border-radius: 8px;
+  padding: 12px;
+  background: var(--bg-primary);
+  border-radius: 6px;
 }
 
 .toggle-group.disabled {
@@ -1571,43 +2161,43 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 }
 
 .model-select {
-  margin-top: 12px;
+  margin-top: 8px;
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
 .model-label {
-  font-size: 0.75rem;
-  color: #64748b;
+  font-size: 0.7rem;
+  color: var(--text-muted);
   font-weight: 500;
 }
 
 .model-dropdown {
   padding: 4px 8px;
-  border: 1px solid #e2e8f0;
-  border-radius: 6px;
-  font-size: 0.75rem;
-  background: white;
-  color: #334155;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  font-size: 0.7rem;
+  background: var(--bg-input);
+  color: var(--text-primary);
   cursor: pointer;
 }
 
 .model-dropdown:focus {
   outline: none;
-  border-color: #3b82f6;
-  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1);
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
 }
 
 .model-dropdown:disabled {
-  background: #f1f5f9;
+  background: var(--bg-secondary);
   cursor: not-allowed;
 }
 
 .toggle {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   cursor: pointer;
 }
 
@@ -1616,10 +2206,10 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 }
 
 .toggle-slider {
-  width: 44px;
-  height: 24px;
-  background: #cbd5e1;
-  border-radius: 12px;
+  width: 40px;
+  height: 22px;
+  background: var(--border-color);
+  border-radius: 11px;
   position: relative;
   transition: background 0.2s;
 }
@@ -1629,35 +2219,49 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 20px;
-  height: 20px;
-  background: white;
+  width: 18px;
+  height: 18px;
+  background: var(--text-secondary);
   border-radius: 50%;
   transition: transform 0.2s;
 }
 
 .toggle input:checked + .toggle-slider {
-  background: #3b82f6;
+  background: var(--accent-primary);
 }
 
 .toggle input:checked + .toggle-slider::after {
-  transform: translateX(20px);
+  transform: translateX(18px);
+  background: white;
+}
+
+/* Gateway toggle - distinctive cyan color */
+.toggle input:checked + .toggle-slider.gateway {
+  background: #00b4d8;
+}
+
+.gateway-toggle {
+  margin-left: 8px;
+  padding-left: 8px;
+  border-left: 1px solid var(--border-color);
 }
 
 .toggle-label {
   font-weight: 500;
-  color: #334155;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
 }
 
 .scaling-group {
-  padding: 16px;
-  background: #f8fafc;
-  border-radius: 8px;
+  padding: 12px;
+  background: var(--bg-primary);
+  border-radius: 6px;
 }
 
 .scaling-group label {
   font-weight: 500;
-  color: #334155;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
   margin-bottom: 8px;
   display: block;
 }
@@ -1671,87 +2275,129 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 .scaling-input input {
   width: 80px;
   padding: 8px 12px;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  font-size: 0.875rem;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  font-size: 0.8rem;
   text-align: right;
+  background: var(--bg-input);
+  color: var(--text-primary);
 }
 
 .scaling-input .percent {
   font-weight: 500;
-  color: #64748b;
+  color: var(--text-muted);
 }
 
-/* Progress Section */
-.progress-card {
-  border: 2px solid #e2e8f0;
-}
-
-.progress-header {
+/* =====================================================
+   TERMINAL PANEL (Bottom Expandable)
+   ===================================================== */
+.terminal-panel {
+  grid-column: 2;
+  grid-row: 2;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border-color);
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 16px;
-}
-
-.progress-header h2 {
-  margin-bottom: 0;
-}
-
-.progress-bar-container {
-  height: 8px;
-  background: #e2e8f0;
-  border-radius: 4px;
+  flex-direction: column;
+  max-height: 50px;
+  transition: max-height 0.3s ease;
   overflow: hidden;
 }
 
-.progress-bar {
-  height: 100%;
-  background: #3b82f6;
-  border-radius: 4px;
-  transition: width 0.3s ease;
+.terminal-panel.expanded {
+  max-height: 300px;
 }
 
-.progress-bar.complete {
-  background: #22c55e;
-}
-
-.progress-bar.error {
-  background: #ef4444;
-}
-
-.progress-text {
-  text-align: right;
-  font-size: 0.75rem;
-  color: #64748b;
-  margin-top: 4px;
-}
-
-.current-status {
+.terminal-header {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin-top: 16px;
-  padding: 12px 16px;
-  background: #f0f9ff;
-  border-radius: 8px;
+  gap: 16px;
+  padding: 8px 20px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+/* Generate Button in Terminal Bar */
+.btn-generate {
+  padding: 10px 24px;
   font-size: 0.875rem;
-  color: #0369a1;
+  font-weight: 600;
+  min-width: 160px;
+  flex-shrink: 0;
 }
 
-.current-status.error {
-  background: #fef2f2;
-  color: #dc2626;
+.btn-generate:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
-.status-indicator {
-  width: 8px;
-  height: 8px;
+/* Terminal Toggle Area (clickable) */
+.terminal-toggle-area {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  padding: 8px 12px;
+  border-radius: 6px;
+  transition: background 0.15s ease;
+}
+
+.terminal-toggle-area:hover {
+  background: rgba(59, 130, 246, 0.1);
+}
+
+.terminal-toggle {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.terminal-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.terminal-status {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.status-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 500;
+}
+
+.status-badge.running {
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--accent-primary);
+}
+
+.status-badge.complete {
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--accent-success);
+}
+
+.status-badge.error {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--accent-danger);
+}
+
+.status-dot {
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
-  background: #3b82f6;
+  background: currentColor;
 }
 
-.status-indicator.spinning {
+.status-dot.spinning {
   animation: pulse 1s infinite;
 }
 
@@ -1760,117 +2406,177 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
   50% { opacity: 0.4; }
 }
 
-.history-panel {
-  margin-top: 16px;
-  max-height: 200px;
+.btn-clear {
+  padding: 4px 10px;
+  font-size: 0.7rem;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.btn-clear:hover {
+  border-color: var(--text-secondary);
+  color: var(--text-secondary);
+}
+
+.terminal-content {
+  flex: 1;
   overflow-y: auto;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
+  padding: 12px 20px;
+}
+
+.terminal-progress {
+  margin-bottom: 12px;
+}
+
+.progress-label {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.progress-bar-container {
+  height: 6px;
+  background: var(--bg-primary);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-bar {
+  height: 100%;
+  background: var(--accent-primary);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.progress-bar.complete {
+  background: var(--accent-success);
+}
+
+.progress-bar.error {
+  background: var(--accent-danger);
+}
+
+.progress-text {
+  text-align: right;
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+.terminal-history {
+  max-height: 180px;
+  overflow-y: auto;
 }
 
 .history-item {
   display: flex;
-  gap: 12px;
-  padding: 8px 12px;
-  font-size: 0.8rem;
-  border-bottom: 1px solid #f1f5f9;
+  gap: 10px;
+  padding: 6px 0;
+  font-size: 0.75rem;
+  border-bottom: 1px solid rgba(51, 65, 85, 0.5);
 }
 
 .history-item:last-child {
   border-bottom: none;
 }
 
-.history-item.success {
-  background: #f0fdf4;
-}
-
-.history-item.error {
-  background: #fef2f2;
-}
-
 .history-time {
-  color: #64748b;
+  color: var(--text-muted);
   font-family: monospace;
+  font-size: 0.7rem;
   white-space: nowrap;
 }
 
 .history-message {
-  color: #334155;
+  color: var(--text-secondary);
+  word-break: break-word;
 }
 
 .history-item.success .history-message {
-  color: #16a34a;
+  color: var(--accent-success);
 }
 
 .history-item.error .history-message {
-  color: #dc2626;
+  color: var(--accent-danger);
 }
 
-.btn-reset {
-  margin-top: 16px;
+.terminal-empty {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  text-align: center;
+  padding: 20px;
 }
 
+/* =====================================================
+   ACTION BUTTONS
+   ===================================================== */
 .action-section {
   text-align: center;
-  margin-bottom: 24px;
 }
 
 .btn {
   padding: 10px 20px;
-  border-radius: 8px;
-  font-size: 0.875rem;
+  border-radius: 6px;
+  font-size: 0.8rem;
   font-weight: 500;
   cursor: pointer;
   border: none;
-  transition: all 0.2s;
+  transition: all 0.15s ease;
 }
 
 .btn-primary {
-  background: #3b82f6;
+  background: var(--accent-primary);
   color: white;
 }
 
 .btn-primary:hover:not(:disabled) {
-  background: #2563eb;
+  background: var(--accent-hover);
 }
 
 .btn-primary:disabled {
-  background: #94a3b8;
+  background: var(--border-color);
+  color: var(--text-muted);
   cursor: not-allowed;
 }
 
 .btn-secondary {
-  background: #e2e8f0;
-  color: #334155;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
 }
 
 .btn-secondary:hover:not(:disabled) {
-  background: #cbd5e1;
+  background: var(--border-color);
+  color: var(--text-primary);
 }
 
 .btn-secondary:disabled {
-  opacity: 0.6;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
 .btn-text {
   background: none;
-  color: #3b82f6;
+  color: var(--accent-primary);
   padding: 4px 8px;
 }
 
 .btn-text:hover {
-  background: #f0f9ff;
+  background: rgba(59, 130, 246, 0.1);
 }
 
 .btn-large {
-  padding: 14px 48px;
-  font-size: 1rem;
+  padding: 12px 32px;
+  font-size: 0.9rem;
 }
 
 .btn-content {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
 }
 
@@ -1887,15 +2593,15 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
   to { transform: rotate(360deg); }
 }
 
-/* Format notification */
+/* Format notification (Dark Theme) */
 .format-notification {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px 16px;
-  border-radius: 8px;
-  margin-bottom: 16px;
-  font-size: 0.875rem;
+  padding: 10px 14px;
+  border-radius: 6px;
+  margin-bottom: 12px;
+  font-size: 0.8rem;
   animation: slideIn 0.3s ease;
 }
 
@@ -1911,21 +2617,21 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 }
 
 .format-notification.info {
-  background: #f0f9ff;
-  border: 1px solid #bae6fd;
-  color: #0369a1;
+  background: rgba(59, 130, 246, 0.15);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  color: var(--accent-primary);
 }
 
 .format-notification.warning {
-  background: #fffbeb;
-  border: 1px solid #fde68a;
-  color: #92400e;
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  color: var(--accent-warning);
 }
 
 .format-notification.error {
-  background: #fef2f2;
-  border: 1px solid #fecaca;
-  color: #dc2626;
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: var(--accent-danger);
 }
 
 .format-icon {
@@ -1937,23 +2643,66 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
   margin-left: auto;
   background: none;
   border: none;
-  font-size: 1.25rem;
+  font-size: 1.1rem;
   cursor: pointer;
   opacity: 0.6;
   padding: 0 4px;
   line-height: 1;
+  color: currentColor;
 }
 
 .format-close:hover {
   opacity: 1;
 }
 
-@media (max-width: 768px) {
-  .date-grid,
-  .options-grid,
-  .options-grid-4,
-  .output-dirs {
+/* Responsive adjustments for widescreen */
+@media (max-width: 1400px) {
+  .content-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 1000px) {
+  .app {
+    grid-template-columns: 180px 1fr;
+  }
+
+  .content-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 768px) {
+  .app {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr auto;
+  }
+
+  .sidebar {
+    grid-row: 1;
+    flex-direction: row;
+    padding: 8px;
+    border-right: none;
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  .sidebar-nav {
+    flex-direction: row;
+    padding: 0 8px;
+  }
+
+  .nav-text {
+    display: none;
+  }
+
+  .main-content {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .terminal-panel {
+    grid-column: 1;
+    grid-row: 3;
   }
 }
 
@@ -1961,10 +2710,12 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 .btn-train {
   padding: 4px 10px;
   font-size: 0.7rem;
-  background: #10b981;
+  background: var(--accent-success);
   color: white;
+  border: none;
   border-radius: 4px;
   margin-left: 8px;
+  cursor: pointer;
 }
 
 .btn-train:hover:not(:disabled) {
@@ -1972,18 +2723,18 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 }
 
 .btn-train:disabled {
-  background: #9ca3af;
+  background: var(--border-color);
   cursor: not-allowed;
 }
 
-/* Modal styles */
+/* Modal styles (Dark Theme) */
 .modal-overlay {
   position: fixed;
   top: 0;
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(0, 0, 0, 0.5);
+  background: rgba(0, 0, 0, 0.7);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1991,42 +2742,43 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 }
 
 .modal {
-  background: white;
+  background: var(--bg-secondary);
   border-radius: 12px;
   width: 90%;
   max-width: 600px;
   max-height: 90vh;
   overflow-y: auto;
-  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--border-color);
 }
 
 .modal-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 20px 24px;
-  border-bottom: 1px solid #e2e8f0;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-color);
 }
 
 .modal-header h2 {
-  font-size: 1.25rem;
+  font-size: 1.1rem;
   font-weight: 600;
-  color: #1e293b;
+  color: var(--text-primary);
   margin: 0;
 }
 
 .modal-close {
   background: none;
   border: none;
-  font-size: 1.5rem;
-  color: #64748b;
+  font-size: 1.25rem;
+  color: var(--text-muted);
   cursor: pointer;
   padding: 0;
   line-height: 1;
 }
 
 .modal-close:hover:not(:disabled) {
-  color: #1e293b;
+  color: var(--text-primary);
 }
 
 .modal-close:disabled {
@@ -2035,13 +2787,13 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 }
 
 .modal-body {
-  padding: 24px;
+  padding: 20px;
 }
 
 .modal-body h3 {
-  font-size: 0.95rem;
+  font-size: 0.9rem;
   font-weight: 600;
-  color: #334155;
+  color: var(--text-secondary);
   margin-bottom: 4px;
   margin-top: 16px;
 }
@@ -2054,31 +2806,31 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
   display: flex;
   justify-content: flex-end;
   gap: 12px;
-  padding: 16px 24px;
-  border-top: 1px solid #e2e8f0;
-  background: #f8fafc;
+  padding: 16px 20px;
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-primary);
   border-radius: 0 0 12px 12px;
 }
 
 /* Training mode toggle */
 .training-mode-section {
-  margin-bottom: 20px;
+  margin-bottom: 16px;
 }
 
 .training-mode-toggle {
   display: flex;
-  gap: 24px;
-  padding: 12px 16px;
-  background: #f8fafc;
-  border-radius: 8px;
+  gap: 16px;
+  padding: 12px;
+  background: var(--bg-primary);
+  border-radius: 6px;
 }
 
 /* Training options */
 .training-options-section .date-row {
   display: flex;
-  gap: 16px;
+  gap: 12px;
   margin-top: 12px;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
 }
 
 .training-options-section .date-row .form-group {
@@ -2089,12 +2841,60 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 .params-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 16px;
+  gap: 12px;
   margin-top: 12px;
 }
 
 .params-grid .form-group {
   margin-bottom: 0;
+}
+
+/* Schedule times list */
+.schedule-times-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.schedule-time-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.time-input {
+  flex: 1;
+  padding: 6px 8px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.time-input:focus {
+  outline: none;
+  border-color: var(--accent-color);
+}
+
+.btn-icon {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+}
+
+.btn-danger {
+  background: #dc3545;
+  color: white;
+  border: none;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #c82333;
 }
 
 .params-grid input {
@@ -2103,13 +2903,13 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 
 /* Existing model section */
 .existing-model-section {
-  margin-top: 16px;
+  margin-top: 12px;
 }
 
 .model-list {
   margin-top: 12px;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
   overflow: hidden;
 }
 
@@ -2117,9 +2917,9 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px 16px;
+  padding: 10px 14px;
   cursor: pointer;
-  border-bottom: 1px solid #f1f5f9;
+  border-bottom: 1px solid var(--border-color);
 }
 
 .model-option:last-child {
@@ -2127,13 +2927,13 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 }
 
 .model-option:hover {
-  background: #f8fafc;
+  background: var(--bg-primary);
 }
 
 .model-option input {
-  width: 18px;
-  height: 18px;
-  accent-color: #3b82f6;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent-primary);
 }
 
 .model-info {
@@ -2144,53 +2944,54 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 
 .model-name {
   font-weight: 500;
-  color: #334155;
+  color: var(--text-primary);
 }
 
 .model-date {
-  font-size: 0.75rem;
-  color: #64748b;
+  font-size: 0.7rem;
+  color: var(--text-muted);
 }
 
 .model-mape {
-  font-size: 0.75rem;
-  color: #10b981;
+  font-size: 0.7rem;
+  color: var(--accent-success);
   font-weight: 500;
 }
 
 .no-models {
-  padding: 24px;
+  padding: 20px;
   text-align: center;
-  color: #64748b;
-  background: #f8fafc;
-  border-radius: 8px;
+  color: var(--text-muted);
+  background: var(--bg-primary);
+  border-radius: 6px;
   margin-top: 12px;
+  font-size: 0.8rem;
 }
 
 /* Training progress */
 .training-progress-section {
-  margin-top: 20px;
-  padding-top: 16px;
-  border-top: 1px solid #e2e8f0;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color);
 }
 
 .training-status {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 12px 16px;
-  background: #f0f9ff;
-  border-radius: 8px;
-  color: #0369a1;
-  font-size: 0.875rem;
+  padding: 10px 14px;
+  background: rgba(59, 130, 246, 0.15);
+  border-radius: 6px;
+  color: var(--accent-primary);
+  font-size: 0.8rem;
   margin-top: 8px;
 }
 
 .spinner-small {
   width: 14px;
   height: 14px;
-  border: 2px solid rgba(3, 105, 161, 0.3);
-  border-top-color: #0369a1;
+  border: 2px solid rgba(59, 130, 246, 0.3);
+  border-top-color: var(--accent-primary);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
@@ -2198,20 +2999,314 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 .training-logs {
   margin-top: 12px;
   padding: 12px;
-  background: #1e293b;
-  border-radius: 8px;
+  background: var(--bg-primary);
+  border-radius: 6px;
   max-height: 150px;
   overflow-y: auto;
   font-family: monospace;
-  font-size: 0.75rem;
+  font-size: 0.7rem;
 }
 
 .log-line {
-  color: #94a3b8;
+  color: var(--text-muted);
   line-height: 1.5;
 }
 
 .log-line:last-child {
-  color: #f1f5f9;
+  color: var(--text-primary);
+}
+
+/* Scheduler-specific styles */
+.model-settings-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+.checkbox-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+/* Additional utility classes */
+.text-muted {
+  color: var(--text-muted);
+}
+
+.text-primary {
+  color: var(--text-primary);
+}
+
+.text-success {
+  color: var(--accent-success);
+}
+
+.text-danger {
+  color: var(--accent-danger);
+}
+
+/* =====================================================
+   MANUAL LAYOUT - Row-based layout for Manual Forecast Tab
+   ===================================================== */
+.manual-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  height: 100%;
+}
+
+.card-full-row {
+  width: 100%;
+}
+
+.data-source-content {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.data-source-content .source-toggle {
+  margin-bottom: 0;
+  padding: 8px 16px;
+  background: var(--bg-primary);
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
+.data-source-inputs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  flex: 1;
+  min-width: 300px;
+}
+
+.data-source-inputs.csv-mode {
+  flex: 2;
+}
+
+.data-source-inputs .form-group {
+  flex: 1;
+  min-width: 200px;
+  margin-bottom: 0;
+}
+
+.output-dir-inputs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  flex: 1;
+  min-width: 300px;
+}
+
+.output-dir-inputs .form-group {
+  flex: 1;
+  min-width: 200px;
+  margin-bottom: 0;
+}
+
+.db-info-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 12px;
+  background: var(--bg-primary);
+  border-radius: 6px;
+  font-size: 0.75rem;
+}
+
+.db-info-inline .db-stat {
+  color: var(--text-secondary);
+}
+
+.db-info-inline .db-stat::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  background: var(--accent-primary);
+  border-radius: 50%;
+  margin-right: 6px;
+}
+
+/* 3-column grid for Manual Forecast tab */
+.cards-grid-3 {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 1200px) {
+  .cards-grid-3 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .cards-grid-3 .stacked-cards {
+    grid-column: span 2;
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 16px;
+  }
+}
+
+@media (max-width: 800px) {
+  .cards-grid-3 {
+    grid-template-columns: 1fr;
+  }
+
+  .cards-grid-3 .stacked-cards {
+    grid-column: span 1;
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Stacked cards container (for Forecast Period + Model Training) */
+.stacked-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* Compact card with max height constraint */
+.card-compact {
+  max-height: 380px;
+  overflow-y: auto;
+}
+
+/* Forecast Period Row (inside Forecast Options card) */
+.forecast-period-row {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.forecast-period-row .form-group {
+  flex: 1;
+}
+
+/* 2x2 Options Grid for Forecast Options */
+.options-grid-2x2 {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+
+.options-grid-2x2 .toggle-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Small dropdown for inline model selection */
+.model-dropdown-sm {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  font-size: 0.7rem;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  cursor: pointer;
+  margin-top: 8px;
+}
+
+.model-dropdown-sm:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+}
+
+.model-dropdown-sm:disabled {
+  background: var(--bg-secondary);
+  cursor: not-allowed;
+}
+
+/* Compact scaling group */
+.scaling-group-compact {
+  padding: 12px;
+  background: var(--bg-primary);
+  border-radius: 6px;
+}
+
+.scaling-group-compact label {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.scaling-group-compact .scaling-input {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.scaling-group-compact .scaling-input input {
+  width: 60px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  font-size: 0.8rem;
+  text-align: right;
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+
+.scaling-group-compact .percent {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+/* Compact form groups */
+.form-group.compact {
+  margin-bottom: 0;
+}
+
+.form-group.compact label {
+  font-size: 0.7rem;
+  margin-bottom: 4px;
+}
+
+.form-group.compact input {
+  padding: 8px 10px;
+  font-size: 0.8rem;
+}
+
+/* Button sizes */
+.btn-xs {
+  padding: 4px 8px;
+  font-size: 0.65rem;
+}
+
+/* Calibrator dropdown */
+.calibrator-dropdown {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  font-size: 0.8rem;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.calibrator-dropdown:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+}
+
+.calibrator-dropdown:disabled {
+  background: var(--bg-secondary);
+  cursor: not-allowed;
 }
 </style>
