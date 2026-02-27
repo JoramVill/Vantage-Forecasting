@@ -29,10 +29,10 @@ function createWindow() {
     minHeight: 600,
     title: 'Vantage Forecaster',
     icon: iconPath,
-    backgroundColor: '#0f172a', // Match app's dark blue theme
+    backgroundColor: '#1e293b', // Match titlebar/terminal header color
     titleBarStyle: 'hidden',
     titleBarOverlay: {
-      color: '#0f172a',
+      color: '#1e293b', // Match --bg-secondary (terminal header)
       symbolColor: '#e2e8f0',
       height: 40,
     },

@@ -1646,10 +1646,11 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 .titlebar {
   grid-column: 1 / -1;
   height: 40px;
-  background: #0f172a;
+  background: var(--bg-secondary); /* Match terminal header color */
   display: flex;
   align-items: center;
   padding-left: 12px;
+  border-bottom: 1px solid var(--border-color);
 }
 
 .titlebar-drag-region {
@@ -1785,8 +1786,12 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 }
 
 .sidebar-footer {
-  padding: 16px;
+  padding: 8px 16px; /* Match terminal header height */
   border-top: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  min-height: 40px; /* Same as titlebar height */
+  box-sizing: border-box;
 }
 
 .version-text {
