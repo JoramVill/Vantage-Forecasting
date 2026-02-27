@@ -210,7 +210,7 @@ function saveSettings() {
     schedulerCalibThreshold: schedulerCalibThreshold.value,
     schedulerMaxIterations: schedulerMaxIterations.value,
     // New scheduler settings
-    schedulerTimes: schedulerTimes.value,
+    schedulerTimes: [...schedulerTimes.value],
     schedulerAutoEnabled: schedulerAutoEnabled.value,
     schedulerDemandPrefix: schedulerDemandPrefix.value,
     schedulerDemandZonalPrefix: schedulerDemandZonalPrefix.value,
