@@ -1695,7 +1695,6 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
   grid-column: 1;
   grid-row: 2 / -1; /* Start after titlebar */
   background: linear-gradient(180deg, #1e293b 0%, #0f172a 100%);
-  border-right: 1px solid var(--border-color);
   display: flex;
   flex-direction: column;
   padding: 0;
@@ -1707,7 +1706,6 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
   align-items: center;
   gap: 12px;
   padding: 20px 16px;
-  border-bottom: 1px solid var(--border-color);
 }
 
 .sidebar-logo {
@@ -1787,7 +1785,6 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 
 .sidebar-footer {
   padding: 8px 16px; /* Match terminal header height */
-  border-top: 1px solid var(--border-color);
   display: flex;
   align-items: center;
   min-height: 40px; /* Same as titlebar height */
