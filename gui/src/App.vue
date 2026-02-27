@@ -1646,11 +1646,10 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 .titlebar {
   grid-column: 1 / -1;
   height: 40px;
-  background: var(--bg-secondary); /* Match terminal header color */
+  background: #1e293b; /* Match Electron titleBarOverlay exactly */
   display: flex;
   align-items: center;
   padding-left: 12px;
-  border-bottom: 1px solid var(--border-color);
 }
 
 .titlebar-drag-region {
