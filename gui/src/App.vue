@@ -1692,7 +1692,7 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
    ===================================================== */
 .sidebar {
   grid-column: 1;
-  grid-row: 1 / -1;
+  grid-row: 2 / -1; /* Start after titlebar */
   background: linear-gradient(180deg, #1e293b 0%, #0f172a 100%);
   border-right: 1px solid var(--border-color);
   display: flex;
@@ -1799,7 +1799,7 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
    ===================================================== */
 .main-content {
   grid-column: 2;
-  grid-row: 1;
+  grid-row: 2; /* Start after titlebar */
   background: var(--bg-primary);
   overflow-y: auto;
   overflow-x: hidden;
@@ -2380,7 +2380,7 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
    ===================================================== */
 .terminal-panel {
   grid-column: 2;
-  grid-row: 2;
+  grid-row: 3; /* After titlebar and main content */
   background: var(--bg-secondary);
   border-top: 1px solid var(--border-color);
   display: flex;
