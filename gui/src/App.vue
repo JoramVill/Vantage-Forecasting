@@ -1018,6 +1018,10 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 
 <template>
   <div class="app dark-theme">
+    <!-- Custom Titlebar for window dragging -->
+    <div class="titlebar">
+      <div class="titlebar-drag-region"></div>
+    </div>
     <!-- Left Sidebar -->
     <aside class="sidebar">
       <div class="sidebar-header">
@@ -1638,11 +1642,28 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
    DARK THEME WIDESCREEN LAYOUT
    ===================================================== */
 
+/* Custom Titlebar for Electron window dragging */
+.titlebar {
+  grid-column: 1 / -1;
+  height: 40px;
+  background: #0f172a;
+  display: flex;
+  align-items: center;
+  padding-left: 12px;
+}
+
+.titlebar-drag-region {
+  flex: 1;
+  height: 100%;
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
 /* Base App Container - Full viewport grid */
 .app {
   display: grid;
   grid-template-columns: 220px 1fr;
-  grid-template-rows: 1fr auto;
+  grid-template-rows: 40px 1fr auto; /* Added titlebar row */
   min-height: 100vh;
   max-height: 100vh;
   overflow: hidden;
