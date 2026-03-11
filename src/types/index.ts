@@ -7,6 +7,9 @@ export * from './outage.js';
 // Export interconnector types
 export * from './interconnector.js';
 
+// Export global config types
+export * from './config.js';
+
 // Weather data from CSV (raw hourly)
 export interface RawWeatherData {
   name: string;

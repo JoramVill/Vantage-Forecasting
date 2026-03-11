@@ -1,7 +1,6 @@
 import { SolarIrradianceModel } from './SolarIrradianceModel.js';
 import { CFacTrainingSample, CFacWeatherFeatures } from '../../types/capacityFactor.js';
 import MultivariateLinearRegression from 'ml-regression-multivariate-linear';
-import { WeatherCorrectionLSTM } from './WeatherCorrectionLSTM.js';
 
 /**
  * Hybrid solar capacity factor model
@@ -26,7 +25,6 @@ export class SolarHybridModel {
   private physicsOnlyMode: boolean = false;  // If true, skip ML residual and use physics directly
   private weatherConfidenceMode: boolean = false;  // If true, scale ML residual by weather confidence
   private seasonalAdaptiveMode: boolean = false;  // If true, reduce ML weight in dry season + use dry season model
-  private lstmCorrector: WeatherCorrectionLSTM | null = null;  // LSTM correction layer
 
   // Philippines seasons: Dry (Nov-Apr), Wet (May-Oct)
   private static readonly DRY_SEASON_MONTHS = [11, 12, 1, 2, 3, 4];
@@ -509,26 +507,6 @@ export class SolarHybridModel {
     const hourlyFactor = this.hourlyCorrection.get(hour) ?? 1.0;
     correctedPrediction *= hourlyFactor;
 
-    // Apply LSTM correction if available and trained
-    if (this.lstmCorrector && this.lstmCorrector.isTrained() && weatherSequence && hours && months) {
-      // Build physics prediction sequence for LSTM
-      const physicsSequence = weatherSequence.map((w, i) => {
-        const dt = new Date(datetime);
-        dt.setHours(hours[i]);
-        const raw = this.predictRaw(w, dt);
-        return raw * this.biasCorrection * (this.hourlyCorrection.get(hours[i]) ?? 1.0);
-      });
-
-      const lstmCorrection = this.lstmCorrector.predict(
-        weatherSequence,
-        hours,
-        months,
-        physicsSequence
-      );
-
-      correctedPrediction *= lstmCorrection;
-    }
-
     return Math.max(0, Math.min(1, correctedPrediction));
   }
 
@@ -561,26 +539,6 @@ export class SolarHybridModel {
     // Apply learned hourly correction (data-driven, not hardcoded)
     const hourlyFactor = this.hourlyCorrection.get(hour) ?? 1.0;
     correctedPrediction *= hourlyFactor;
-
-    // Apply LSTM correction if available and trained
-    if (this.lstmCorrector && this.lstmCorrector.isTrained() && weatherSequence && hours && months) {
-      // Build physics prediction sequence for LSTM
-      const physicsSequence = weatherSequence.map((w, i) => {
-        const dt = new Date(datetime);
-        dt.setHours(hours[i]);
-        const raw = this.predictRaw(w, dt);
-        return raw * this.biasCorrection * (this.hourlyCorrection.get(hours[i]) ?? 1.0);
-      });
-
-      const lstmCorrection = this.lstmCorrector.predict(
-        weatherSequence,
-        hours,
-        months,
-        physicsSequence
-      );
-
-      correctedPrediction *= lstmCorrection;
-    }
 
     return Math.max(0, Math.min(1, correctedPrediction));
   }
@@ -831,17 +789,4 @@ export class SolarHybridModel {
     return this.drySeasonBiasCorrection;
   }
 
-  /**
-   * Set LSTM correction layer
-   */
-  setLSTMCorrector(corrector: WeatherCorrectionLSTM | null): void {
-    this.lstmCorrector = corrector;
-  }
-
-  /**
-   * Get LSTM correction layer
-   */
-  getLSTMCorrector(): WeatherCorrectionLSTM | null {
-    return this.lstmCorrector;
-  }
 }

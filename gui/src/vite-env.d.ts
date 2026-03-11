@@ -129,6 +129,10 @@ interface Window {
       success: boolean;
       error?: string;
     }>;
+    loadGlobalConfig: () => Promise<any>;
+    saveGlobalConfig: (config: any) => Promise<void>;
+    validateGlobalConfig: (config: any) => Promise<{ valid: boolean; errors: string[] }>;
+    resetGlobalConfig: () => Promise<any>;
     testGatewayConnection: () => Promise<{
       connected: boolean;
       directories?: { path: string; accessible: boolean; error?: string }[];

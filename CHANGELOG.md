@@ -5,7 +5,59 @@ All notable changes to the Vantage Forecaster project will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 2026-03-05
+## [Unreleased] - 2026-03-11
+
+### Added
+- **Global Configuration System (Phases 1-5)**
+  - `forecast_config.json` at project root - single source of truth for all settings
+  - `config` CLI command group: `config get/set/reset/validate`
+  - ConfigService for loading/saving/validating configuration
+  - GUI Settings tab loads/saves global config via IPC
+  - Type-safe configuration with validation and defaults
+  - Settings categories: training paths, weather, output, gateway, models
+
+- **Unified Forecast Service**
+  - Single entry point for all forecast operations
+  - Reads settings from global config (forecast_config.json)
+  - Simplified CLI commands - paths/options now use config defaults
+  - Consistent configuration across CLI and GUI
+
+### Removed
+- **Legacy LSTM Components**
+  - Deleted `src/models/capacityFactor/WindLSTMModel.ts`
+  - Deleted `src/models/capacityFactor/SolarLSTMModel.ts`
+  - Deleted `src/models/capacityFactor/LSTMForecaster.ts`
+  - Deleted `src/models/capacityFactor/WeatherCorrectionLSTM.ts`
+  - Deleted `src/models/DemandCorrectionLSTM.ts`
+  - Deleted several LSTM training scripts
+  - Removed `--lstm-correction` option from demand forecast CLI
+  - Removed LSTM documentation sections from CLAUDE.md and CLI_GUIDE.md
+
+- **Deprecated CLI Commands**
+  - Removed `cfac forecast` (superseded by `cfac forecast2`)
+  - Removed `cfac forecast3` (EMA smoothing didn't provide improvement)
+  - Removed `scheduler config` (replaced by global `config` command)
+
+### Changed
+- **Documentation Updates**
+  - CLAUDE.md: Removed references to deleted commands and LSTM models
+  - CLI_GUIDE.md: Added config command section, removed LSTM training documentation
+  - QUICK_START.md: Simplified examples to use global config
+  - All guides now reference `forecast_config.json` for settings
+
+- **Model Files**
+  - Hybrid demand model is now the only production model (no LSTM correction layer)
+  - Capacity factor models unchanged (Wind 4-Tier Hybrid, Solar Physics+ML)
+
+### Technical
+- Configuration stored in `forecast_config.json` (root directory)
+- ConfigService provides type-safe access to all settings
+- GUI integrates with config via Electron IPC handlers
+- Backward-compatible: old CLI flags still work, override config values
+
+---
+
+## [Previous] - 2026-03-05
 
 ### Added
 - **Geography-Based SFTP Routing for Demand Forecasts**

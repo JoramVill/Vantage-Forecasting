@@ -14,9 +14,9 @@ import { DemandCalibrator } from './models/DemandCalibrator.js';
 import { writeForecastCsv, writeModelReport, writeMetricsSummary } from './writers/index.js';
 import { REGION_MAPPINGS, isPhilippineHoliday } from './constants/index.js';
 import { ForecastResult, TrainingSample, RawWeatherData } from './types/index.js';
-import { createWeatherService, DEFAULT_LOCATIONS, capacityFactorService, ClusterLocation } from './services/index.js';
+import { createWeatherService, DEFAULT_LOCATIONS, capacityFactorService, ClusterLocation, getConfigService } from './services/index.js';
 import { getDatabase, closeDatabase, DatabaseStats, StoredModel } from './database/index.js';
-import { ModelRouter, WindMRECModel, calibrateAllMREC, calibrateAllMRECCFBased, calibrateAllMRECMLOptimized, WindMRECHybridModel, trainAllMRECHybrid, WindWeatherHybridModel, trainAllWeatherHybrid, SolarMRECModel, calibrateAllSolarMREC, SolarHybridModel, SolarIrradianceModel, SolarMRECHybridModel, calibrateAllSolarMRECHybrid, SolarSeasonalMRECModel, calibrateAllSeasonalSolarMREC, WindShearModel, trainAllWindShear, WindCubicModel, calibrateAllCubic, WindWeibullModel, calibrateAllWeibull, WindBiasCorrectionModel, calibrateAllBiasCorrection, WindEnhancedHybridModel, trainAllEnhancedHybrid, BiasCorrector, Wind4TierHybridModel, trainAll4TierHybrid, WindPhysicsHybridModel, trainAllPhysicsHybrid, WeatherCorrectionLSTM } from './models/capacityFactor/index.js';
+import { ModelRouter, WindMRECModel, calibrateAllMREC, calibrateAllMRECCFBased, calibrateAllMRECMLOptimized, WindMRECHybridModel, trainAllMRECHybrid, WindWeatherHybridModel, trainAllWeatherHybrid, SolarMRECModel, calibrateAllSolarMREC, SolarHybridModel, SolarIrradianceModel, SolarMRECHybridModel, calibrateAllSolarMRECHybrid, SolarSeasonalMRECModel, calibrateAllSeasonalSolarMREC, WindShearModel, trainAllWindShear, WindCubicModel, calibrateAllCubic, WindWeibullModel, calibrateAllWeibull, WindBiasCorrectionModel, calibrateAllBiasCorrection, WindEnhancedHybridModel, trainAllEnhancedHybrid, BiasCorrector, Wind4TierHybridModel, trainAll4TierHybrid, WindPhysicsHybridModel, trainAllPhysicsHybrid } from './models/capacityFactor/index.js';
 import type { SolarMRECCalibrationData } from './models/capacityFactor/index.js';
 import { MRECCalibrationData, WindCFacMethodology } from './types/capacityFactor.js';
 import { CFacWeatherFeatures, StationType, getStationTypeFromCode, CFacForecastResult, CFacTrainingSample, RawCapacityFactorData } from './types/capacityFactor.js';
@@ -1791,412 +1791,6 @@ const cfacCommand = program
   .command('cfac')
   .description('Capacity factor forecasting for renewable/must-run generation');
 
-// CFAC FORECAST - Generate capacity factor forecasts
-cfacCommand
-  .command('forecast')
-  .description('Generate capacity factor forecast for renewable/must-run stations')
-  .requiredOption('-t, --training <path>', 'Training data: MRHCFac CSV file or directory')
-  .requiredOption('-s, --start <date>', 'Forecast start date (YYYY-MM-DD)')
-  .requiredOption('-e, --end <date>', 'Forecast end date (YYYY-MM-DD)')
-  .requiredOption('-o, --output <file>', 'Output forecast CSV file')
-  .option('--stations <file>', 'Stations JSON file', 'src/data/stations.json')
-  .option('--cache <dir>', 'Weather cache directory', './weather_cache')
-  .action(async (options) => {
-    try {
-      const apiKey = getApiKey();
-      const weatherService = createWeatherService(apiKey, options.cache);
-
-      console.log('\n📊 Capacity Factor Forecasting');
-      console.log('═══════════════════════════════════════════════════════════════\n');
-
-      // Load station metadata
-      console.log('🔄 Loading station metadata...');
-      await capacityFactorService.loadStations(options.stations);
-      const stations = capacityFactorService.getAllStations();
-      const clusters = capacityFactorService.getClusters();
-      console.log(`   Loaded ${stations.size} stations`);
-      console.log(`   Loaded ${clusters.length} weather clusters`);
-
-      // Parse training data (capacity factors)
-      console.log('\n🔄 Parsing capacity factor training data...');
-      const cfacData = await capacityFactorService.parseCapacityFactorDirectory(
-        options.training,
-        (msg) => console.log(`   ${msg}`)
-      );
-
-      // Get unique station codes from training data
-      const trainingStations = capacityFactorService.getStationCodes(cfacData);
-      console.log(`   Found ${trainingStations.length} stations in training data`);
-
-      // Categorize stations by type
-      const stationsByType = new Map<StationType, string[]>();
-      for (const stationType of Object.values(StationType)) {
-        stationsByType.set(stationType as StationType, []);
-      }
-      for (const code of trainingStations) {
-        const type = getStationTypeFromCode(code);
-        stationsByType.get(type)!.push(code);
-      }
-
-      console.log('\n📋 Station types in training data:');
-      for (const [type, codes] of stationsByType) {
-        if (codes.length > 0) {
-          console.log(`   ${type}: ${codes.length} stations`);
-        }
-      }
-
-      // Identify wind clusters (clusters containing wind stations)
-      // These clusters will fetch 100m hub-height wind data for better accuracy
-      const windStations = stationsByType.get(StationType.WIND) || [];
-      const windClusterIds = new Set<string>();
-      for (const stationCode of windStations) {
-        const clusterId = capacityFactorService.getClusterForStation(stationCode);
-        if (clusterId) {
-          windClusterIds.add(clusterId);
-        }
-      }
-      if (windClusterIds.size > 0) {
-        console.log(`\n🌬️  Identified ${windClusterIds.size} wind clusters for 100m hub-height data`);
-      }
-
-      // Get date range from training data
-      const sortedCfac = [...cfacData].sort((a, b) => a.datetime.getTime() - b.datetime.getTime());
-      const trainStart = DateTime.fromJSDate(sortedCfac[0].datetime).toISODate()!;
-      const trainEnd = DateTime.fromJSDate(sortedCfac[sortedCfac.length - 1].datetime).toISODate()!;
-      console.log(`\n📅 Training data range: ${trainStart} to ${trainEnd}`);
-
-      // Fetch weather data for training period using cluster-based approach
-      // Wind clusters will receive 100m hub-height wind data
-      console.log('\n🌤️  Fetching cluster weather data for training period...');
-      const clusterWeatherCsv = await weatherService.fetchAllClusters(
-        clusters,
-        trainStart,
-        trainEnd,
-        (msg) => console.log(`   ${msg}`),
-        windClusterIds  // Pass wind cluster IDs for 100m data
-      );
-
-      if (clusterWeatherCsv.size === 0) {
-        console.error('❌ Failed to fetch weather data for training');
-        process.exit(1);
-      }
-      console.log(`   Fetched weather data for ${clusterWeatherCsv.size} clusters`);
-
-      // Helper to parse CSV line properly (handles quoted fields with commas)
-      const parseCSVLine = (line: string): string[] => {
-        const result: string[] = [];
-        let current = '';
-        let inQuotes = false;
-        for (let i = 0; i < line.length; i++) {
-          const char = line[i];
-          if (char === '"') {
-            inQuotes = !inQuotes;
-          } else if (char === ',' && !inQuotes) {
-            result.push(current.trim());
-            current = '';
-          } else {
-            current += char;
-          }
-        }
-        result.push(current.trim());
-        return result;
-      };
-
-      // Parse cluster weather data into maps by clusterId -> datetime -> features
-      const clusterWeatherData = new Map<string, Map<string, CFacWeatherFeatures>>();
-      for (const [clusterId, csvData] of clusterWeatherCsv) {
-        const datetimeMap = new Map<string, CFacWeatherFeatures>();
-        const lines = csvData.split('\n').filter(l => l.trim());
-
-        if (lines.length < 2) continue;
-
-        // Parse header to get column indices (header doesn't have quoted fields)
-        const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
-        const colIdx = (name: string) => headers.indexOf(name);
-
-        for (let i = 1; i < lines.length; i++) {
-          // Use proper CSV parsing for data rows (may have quoted fields)
-          const values = parseCSVLine(lines[i]);
-          const datetimeStr = values[colIdx('datetime')];
-          if (!datetimeStr) continue;
-
-          const dt = DateTime.fromISO(datetimeStr);
-          if (!dt.isValid) continue;
-
-          // Add 1 hour to convert from hour-starting (weather API) to hour-ending (CFac format)
-          // Use simple format for datetime key to avoid timezone mismatches
-          const key = dt.plus({ hours: 1 }).toFormat('yyyy-MM-dd HH:mm');
-
-          // Parse standard weather features
-          const weatherFeatures: CFacWeatherFeatures = {
-            windSpeed: parseFloat(values[colIdx('windspeed')]) || 0,
-            windGust: parseFloat(values[colIdx('windgust')]) || 0,
-            solarRadiation: parseFloat(values[colIdx('solarradiation')]) || 0,
-            cloudCover: parseFloat(values[colIdx('cloudcover')]) || 0,
-            temperature: parseFloat(values[colIdx('temp')]) || 0,
-            precipitation: parseFloat(values[colIdx('precip')]) || 0
-          };
-
-          // Parse 100m wind data for wind clusters (if available)
-          const windSpeed100Idx = colIdx('windspeed100');
-          const windDir100Idx = colIdx('winddir100');
-          if (windSpeed100Idx >= 0 && values[windSpeed100Idx]) {
-            weatherFeatures.windSpeed100 = parseFloat(values[windSpeed100Idx]) || undefined;
-          }
-          if (windDir100Idx >= 0 && values[windDir100Idx]) {
-            weatherFeatures.windDirection100 = parseFloat(values[windDir100Idx]) || undefined;
-          }
-
-          datetimeMap.set(key, weatherFeatures);
-        }
-
-        clusterWeatherData.set(clusterId, datetimeMap);
-      }
-
-      // Build station-to-weather mapping for training
-      // Each station uses its cluster's weather data
-      const weatherMap = new Map<string, CFacWeatherFeatures>();
-      let matchedRecords = 0;
-
-      // Get all unique datetimes from training data
-      const trainDatetimes = new Set<string>();
-      for (const record of cfacData) {
-        const dt = DateTime.fromJSDate(record.datetime);
-        // Use simple format for datetime key to match weather data keys
-        trainDatetimes.add(dt.toFormat('yyyy-MM-dd HH:mm'));
-      }
-
-      // For each datetime, build station weather mappings
-      for (const datetimeKey of trainDatetimes) {
-        // Store weather keyed by datetime for the buildTrainingSamples function
-        // Use average of all cluster weather for the datetime key
-        let sumTemp = 0, sumWind = 0, sumGust = 0, sumSolar = 0, sumCloud = 0, sumPrecip = 0;
-        let count = 0;
-
-        for (const [, datetimeMap] of clusterWeatherData) {
-          const weather = datetimeMap.get(datetimeKey);
-          if (weather) {
-            sumTemp += weather.temperature;
-            sumWind += weather.windSpeed;
-            sumGust += weather.windGust;
-            sumSolar += weather.solarRadiation;
-            sumCloud += weather.cloudCover;
-            sumPrecip += weather.precipitation || 0;
-            count++;
-          }
-        }
-
-        if (count > 0) {
-          weatherMap.set(datetimeKey, {
-            windSpeed: sumWind / count,
-            windGust: sumGust / count,
-            solarRadiation: sumSolar / count,
-            cloudCover: sumCloud / count,
-            temperature: sumTemp / count,
-            precipitation: sumPrecip / count
-          });
-          matchedRecords++;
-        }
-      }
-      console.log(`   Built weather map with ${matchedRecords} hourly records from ${clusterWeatherData.size} clusters`);
-
-      // Build training samples
-      console.log('\n🔧 Building training samples...');
-      const trainingSamples = await capacityFactorService.buildTrainingSamples(
-        cfacData,
-        weatherMap,
-        (msg) => console.log(`   ${msg}`)
-      );
-
-      // Train models
-      console.log('\n🎯 Training capacity factor models...');
-      const modelRouter = new ModelRouter();
-      await modelRouter.trainAllModels(trainingSamples, (msg) => console.log(`   ${msg}`));
-
-      // Show training summary
-      const metrics = modelRouter.getMetrics();
-      console.log(`\n📈 Training Summary: ${modelRouter.getModelCount()} models trained`);
-
-      // Calculate average metrics by type
-      const metricsByType = new Map<string, { mape: number; count: number }>();
-      for (const [, m] of metrics) {
-        const key = m.stationType;
-        if (!metricsByType.has(key)) {
-          metricsByType.set(key, { mape: 0, count: 0 });
-        }
-        const stats = metricsByType.get(key)!;
-        stats.mape += m.mape;
-        stats.count++;
-      }
-
-      console.log('\n┌─────────────────┬──────────┬──────────┐');
-      console.log('│   Station Type  │ Stations │ Avg MAPE │');
-      console.log('├─────────────────┼──────────┼──────────┤');
-      for (const [type, stats] of metricsByType) {
-        const avgMape = stats.mape / stats.count;
-        console.log(`│ ${type.padEnd(15)} │ ${stats.count.toString().padStart(8)} │ ${avgMape.toFixed(2).padStart(7)}% │`);
-      }
-      console.log('└─────────────────┴──────────┴──────────┘');
-
-      // Fetch weather data for forecast period using cluster-based approach
-      // Wind clusters will receive 100m hub-height wind data
-      console.log('\n🌤️  Fetching cluster weather data for forecast period...');
-      const forecastClusterWeatherCsv = await weatherService.fetchAllClusters(
-        clusters,
-        options.start,
-        options.end,
-        (msg) => console.log(`   ${msg}`),
-        windClusterIds  // Pass wind cluster IDs for 100m data
-      );
-
-      // Parse forecast cluster weather data
-      const forecastClusterWeatherData = new Map<string, Map<string, CFacWeatherFeatures>>();
-      const forecastDatetimes: Date[] = [];
-
-      for (const [clusterId, csvData] of forecastClusterWeatherCsv) {
-        const datetimeMap = new Map<string, CFacWeatherFeatures>();
-        const lines = csvData.split('\n').filter(l => l.trim());
-
-        if (lines.length < 2) continue;
-
-        const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
-        const colIdx = (name: string) => headers.indexOf(name);
-
-        for (let i = 1; i < lines.length; i++) {
-          // Use proper CSV parsing for data rows (may have quoted fields)
-          const values = parseCSVLine(lines[i]);
-          const datetimeStr = values[colIdx('datetime')];
-          if (!datetimeStr) continue;
-
-          // Visual Crossing returns data at interval start, we need to shift by +1 hour for MRHCFac format (hour-ending)
-          const dt = DateTime.fromISO(datetimeStr).plus({ hours: 1 });
-          if (!dt.isValid) continue;
-
-          // Use simple format for datetime key to avoid timezone mismatches
-          const key = dt.toFormat('yyyy-MM-dd HH:mm');
-          const datetime = dt.toJSDate();
-
-          // Parse standard weather features
-          const weatherFeatures: CFacWeatherFeatures = {
-            windSpeed: parseFloat(values[colIdx('windspeed')]) || 0,
-            windGust: parseFloat(values[colIdx('windgust')]) || 0,
-            solarRadiation: parseFloat(values[colIdx('solarradiation')]) || 0,
-            cloudCover: parseFloat(values[colIdx('cloudcover')]) || 0,
-            temperature: parseFloat(values[colIdx('temp')]) || 0,
-            precipitation: parseFloat(values[colIdx('precip')]) || 0
-          };
-
-          // Parse 100m wind data for wind clusters (if available)
-          const windSpeed100Idx = colIdx('windspeed100');
-          const windDir100Idx = colIdx('winddir100');
-          if (windSpeed100Idx >= 0 && values[windSpeed100Idx]) {
-            weatherFeatures.windSpeed100 = parseFloat(values[windSpeed100Idx]) || undefined;
-          }
-          if (windDir100Idx >= 0 && values[windDir100Idx]) {
-            weatherFeatures.windDirection100 = parseFloat(values[windDir100Idx]) || undefined;
-          }
-
-          datetimeMap.set(key, weatherFeatures);
-          forecastDatetimes.push(datetime);
-        }
-
-        forecastClusterWeatherData.set(clusterId, datetimeMap);
-      }
-
-      // Get unique sorted datetimes
-      const uniqueDatetimes = [...new Set(forecastDatetimes.map(d => d.getTime()))]
-        .sort((a, b) => a - b)
-        .map(ts => new Date(ts));
-
-      console.log(`   Forecast period: ${uniqueDatetimes.length} hours across ${forecastClusterWeatherData.size} clusters`);
-
-      // Generate forecasts using station-specific cluster weather
-      console.log('\n🔮 Generating capacity factor forecasts...');
-      const forecasts: CFacForecastResult[] = [];
-
-      for (const datetime of uniqueDatetimes) {
-        const dt = DateTime.fromJSDate(datetime);
-        // Use simple format for datetime key to match weather data keys
-        const weatherKey = dt.toFormat('yyyy-MM-dd HH:mm');
-
-        // Build station-specific weather map using each station's cluster weather
-        const stationWeather = new Map<string, CFacWeatherFeatures>();
-        for (const code of trainingStations) {
-          const clusterId = capacityFactorService.getClusterForStation(code);
-          if (clusterId) {
-            const clusterData = forecastClusterWeatherData.get(clusterId);
-            if (clusterData) {
-              const weather = clusterData.get(weatherKey);
-              if (weather) {
-                stationWeather.set(code, weather);
-              }
-            }
-          }
-
-          // Fallback: if station has no cluster, use average of all clusters
-          if (!stationWeather.has(code)) {
-            let sumTemp = 0, sumWind = 0, sumGust = 0, sumSolar = 0, sumCloud = 0, count = 0;
-            for (const [, clusterData] of forecastClusterWeatherData) {
-              const weather = clusterData.get(weatherKey);
-              if (weather) {
-                sumTemp += weather.temperature;
-                sumWind += weather.windSpeed;
-                sumGust += weather.windGust;
-                sumSolar += weather.solarRadiation;
-                sumCloud += weather.cloudCover;
-                count++;
-              }
-            }
-            if (count > 0) {
-              stationWeather.set(code, {
-                windSpeed: sumWind / count,
-                windGust: sumGust / count,
-                solarRadiation: sumSolar / count,
-                cloudCover: sumCloud / count,
-                temperature: sumTemp / count
-              });
-            }
-          }
-        }
-
-        if (stationWeather.size === 0) {
-          continue;
-        }
-
-        // Predict for all stations with available weather
-        const predictions = modelRouter.predictAll(trainingStations, stationWeather, datetime);
-        forecasts.push(...predictions);
-      }
-
-      console.log(`   Generated ${forecasts.length} predictions`);
-
-      // Ensure output directory exists
-      const outputDir = dirname(options.output);
-      if (outputDir && !existsSync(outputDir)) {
-        mkdirSync(outputDir, { recursive: true });
-      }
-
-      // Write forecasts
-      await capacityFactorService.writeForecastCSV(
-        forecasts,
-        options.output,
-        trainingStations,
-        (msg) => console.log(`   ${msg}`)
-      );
-
-      console.log(`\n✅ Forecast written to: ${options.output}`);
-      console.log(`   📊 ${forecasts.length} predictions for ${trainingStations.length} stations`);
-      console.log(`   📅 Period: ${options.start} to ${options.end}`);
-
-    } catch (error: any) {
-      console.error(`\n❌ Error: ${error.message}`);
-      if (error.stack) {
-        console.error(error.stack);
-      }
-      process.exit(1);
-    }
-  });
-
 // CFAC FORECAST2 - Generate capacity factor forecasts using OPTIMAL models for each type
 // Wind: Weather-Only MREC Hybrid (75.8% MAPE)
 // Solar: Physics+ML Hybrid (59.6% MAPE)
@@ -2229,7 +1823,6 @@ cfacCommand
   .option('--solar-seasonal-adaptive', 'Seasonal adaptive: trains separate dry/wet models, reduces ML weight in dry season (Nov-Apr)')
   .option('--no-wind-4tier', 'Disable 4-tier MREC wind model (use legacy enhanced-hybrid instead)')
   .option('--wind-4tier', 'Use 4-tier MREC for wind - DEFAULT (LOW/RAMP/RATED/HIGH regions, ~50% MAPE)')
-  .option('--lstm-correction', 'Enable LSTM correction layer for wind and solar (learns temporal weather patterns)')
   .option('--use-db', 'Load CFAC training data from database instead of CSV files')
   .option('--db <path>', 'Database path when using --use-db (default: ./forecast.db)')
   .option('--push', 'Push generated forecast to Vantage-Gateway server')
@@ -2253,7 +1846,6 @@ cfacCommand
       const solarSeasonalAdaptive = options.solarSeasonalAdaptive || false;
       // 4-Tier wind model is now the default (50% MAPE vs 107% for enhanced-hybrid)
       const wind4Tier = options.noWind4tier !== true && options.no_wind_4tier !== true;
-      const lstmCorrection = options.lstmCorrection || false;
       const weatherRefreshMode = options.weatherRefreshMode || 'refresh';
 
       // Parse scale factors (manual overrides)
@@ -2328,9 +1920,6 @@ cfacCommand
       }
       if (asymmetricLoss) {
         console.log('   ASYMMETRIC LOSS: Under-predictions penalized 2x                               ');
-      }
-      if (lstmCorrection) {
-        console.log('   LSTM CORRECTION: Enabled (learns temporal weather patterns)                   ');
       }
       if (autoCalibrate) {
         console.log(`   AUTO-CALIBRATE: ${calibrationDays} days (${calibrationStartDate.toISODate()} to ${calibrationEndDate.toISODate()})`);
@@ -3073,103 +2662,6 @@ cfacCommand
 
         // Print detailed bias summary
         biasCorrector.printSummary((msg) => console.log(msg));
-      }
-
-      // ═══════════════════════════════════════════════════════════════════════════
-      // TRAIN LSTM CORRECTION LAYERS (if enabled)
-      // ═══════════════════════════════════════════════════════════════════════════
-
-      if (lstmCorrection) {
-        console.log('\n🧠 Training LSTM correction layers...');
-
-        // Train LSTM correctors for wind stations
-        if (wind4Tier && wind4TierModels) {
-          console.log('   Training Wind LSTM correctors...');
-          for (const [stationCode, model] of wind4TierModels) {
-            const stationSamples = windTrainingSamples.filter(s => s.stationCode === stationCode);
-            if (stationSamples.length < 100) {
-              console.log(`      ⚠️  ${stationCode}: Insufficient samples (${stationSamples.length}), skipping LSTM`);
-              continue;
-            }
-
-            try {
-              const lstmCorrector = new WeatherCorrectionLSTM(stationCode, 'wind');
-              const metrics = lstmCorrector.train(
-                stationSamples,
-                (sample) => model.predict(sample.weather, sample.datetime),
-                { log: false, epochs: 50 }
-              );
-
-              if (metrics.improvementOverHybrid > 0) {
-                model.setLSTMCorrector(lstmCorrector);
-                console.log(`      ✅ ${stationCode}: MAPE ${metrics.validationMAPE.toFixed(1)}% (${metrics.improvementOverHybrid >= 0 ? '+' : ''}${metrics.improvementOverHybrid.toFixed(1)}% improvement)`);
-              } else {
-                console.log(`      ⚠️  ${stationCode}: LSTM degraded performance (${metrics.improvementOverHybrid.toFixed(1)}%), skipping`);
-              }
-            } catch (error: any) {
-              console.log(`      ❌ ${stationCode}: LSTM training failed - ${error.message}`);
-            }
-          }
-        } else if (windHybridModels) {
-          console.log('   Training Wind LSTM correctors...');
-          for (const [stationCode, model] of windHybridModels) {
-            const stationSamples = windTrainingSamples.filter(s => s.stationCode === stationCode);
-            if (stationSamples.length < 100) {
-              console.log(`      ⚠️  ${stationCode}: Insufficient samples (${stationSamples.length}), skipping LSTM`);
-              continue;
-            }
-
-            try {
-              const lstmCorrector = new WeatherCorrectionLSTM(stationCode, 'wind');
-              const metrics = lstmCorrector.train(
-                stationSamples,
-                (sample) => model.predict(sample.weather, sample.datetime),
-                { log: false, epochs: 50 }
-              );
-
-              if (metrics.improvementOverHybrid > 0) {
-                model.setLSTMCorrector(lstmCorrector);
-                console.log(`      ✅ ${stationCode}: MAPE ${metrics.validationMAPE.toFixed(1)}% (${metrics.improvementOverHybrid >= 0 ? '+' : ''}${metrics.improvementOverHybrid.toFixed(1)}% improvement)`);
-              } else {
-                console.log(`      ⚠️  ${stationCode}: LSTM degraded performance (${metrics.improvementOverHybrid.toFixed(1)}%), skipping`);
-              }
-            } catch (error: any) {
-              console.log(`      ❌ ${stationCode}: LSTM training failed - ${error.message}`);
-            }
-          }
-        }
-
-        // Train LSTM correctors for solar stations
-        if (solarHybridModels.size > 0) {
-          console.log('   Training Solar LSTM correctors...');
-          for (const [stationCode, model] of solarHybridModels) {
-            const stationSamples = allSolarSamples.filter(s => s.stationCode === stationCode);
-            if (stationSamples.length < 100) {
-              console.log(`      ⚠️  ${stationCode}: Insufficient samples (${stationSamples.length}), skipping LSTM`);
-              continue;
-            }
-
-            try {
-              const lstmCorrector = new WeatherCorrectionLSTM(stationCode, 'solar');
-              const metrics = lstmCorrector.train(
-                stationSamples,
-                (sample) => model.predict(sample.weather, sample.datetime),
-                { log: false, epochs: 50 }
-              );
-
-              if (metrics.improvementOverHybrid > 0) {
-                model.setLSTMCorrector(lstmCorrector);
-                console.log(`      ✅ ${stationCode}: MAPE ${metrics.validationMAPE.toFixed(1)}% (${metrics.improvementOverHybrid >= 0 ? '+' : ''}${metrics.improvementOverHybrid.toFixed(1)}% improvement)`);
-              } else {
-                console.log(`      ⚠️  ${stationCode}: LSTM degraded performance (${metrics.improvementOverHybrid.toFixed(1)}%), skipping`);
-              }
-            } catch (error: any) {
-              console.log(`      ❌ ${stationCode}: LSTM training failed - ${error.message}`);
-            }
-          }
-        }
-
-        console.log('   ✅ LSTM correction training complete');
       }
 
       // ═══════════════════════════════════════════════════════════════════════════
@@ -8436,459 +7928,6 @@ interconnectorCmd
     }
   });
 
-// CFAC FORECAST3 - Optimal forecasting with Enhanced Hybrid for wind
-cfacCommand
-  .command('forecast3')
-  .description('Generate CFac forecasts using Enhanced Hybrid for wind (best shape + boost)')
-  .requiredOption('-t, --training <path>', 'Training data: MRHCFac CSV file or directory')
-  .requiredOption('-s, --start <date>', 'Forecast start date (YYYY-MM-DD)')
-  .requiredOption('-e, --end <date>', 'Forecast end date (YYYY-MM-DD)')
-  .requiredOption('-o, --output <file>', 'Output forecast CSV file')
-  .option('--stations <file>', 'Stations JSON file', 'src/data/stations.json')
-  .option('--cache <dir>', 'Weather cache directory', './weather_cache')
-  .option('--smooth <factor>', 'Wind smoothing factor 0-1 (0=none, 0.5=moderate, 0.8=heavy)', '0')
-  .action(async (options) => {
-    try {
-      const apiKey = getApiKey();
-      const weatherService = createWeatherService(apiKey, options.cache);
-      const smoothFactor = Math.max(0, Math.min(1, parseFloat(options.smooth) || 0));
-
-      console.log('\n═══════════════════════════════════════════════════════════════════════════════');
-      console.log('          OPTIMAL CAPACITY FACTOR FORECASTING (v3)                              ');
-      console.log('   Wind: Enhanced Hybrid | Solar: Physics+ML | Others: Profile-based           ');
-      console.log('═══════════════════════════════════════════════════════════════════════════════\n');
-
-      // Ensure output directory exists
-      const outputDir = dirname(options.output);
-      if (outputDir && !existsSync(outputDir)) {
-        mkdirSync(outputDir, { recursive: true });
-      }
-
-      // Load station metadata
-      console.log('📍 Loading station metadata...');
-      await capacityFactorService.loadStations(options.stations);
-      const stations = capacityFactorService.getAllStations();
-      const clusters = capacityFactorService.getClusters();
-      console.log(`   Loaded ${stations.size} stations in ${clusters.length} weather clusters`);
-
-      // Parse training data
-      console.log('\n📚 Parsing capacity factor training data...');
-      const cfacData = await capacityFactorService.parseCapacityFactorDirectory(
-        options.training,
-        (msg) => console.log(`   ${msg}`)
-      );
-
-      // Categorize stations
-      const trainingStations = capacityFactorService.getStationCodes(cfacData);
-      const stationsByType = new Map<StationType, string[]>();
-      for (const stationType of Object.values(StationType)) {
-        stationsByType.set(stationType as StationType, []);
-      }
-      for (const code of trainingStations) {
-        const type = getStationTypeFromCode(code);
-        stationsByType.get(type)!.push(code);
-      }
-
-      const windStations = stationsByType.get(StationType.WIND) || [];
-      const solarStations = stationsByType.get(StationType.SOLAR) || [];
-
-      console.log('\n📋 Station types:');
-      console.log(`   🌬️  Wind:           ${windStations.length} stations → Enhanced Hybrid (multiplicative boost)`);
-      console.log(`   ☀️  Solar:          ${solarStations.length} stations → Physics+ML Hybrid`);
-      console.log(`   📊 Others:          ${trainingStations.length - windStations.length - solarStations.length} stations → Profile-based`);
-
-      // Identify wind clusters
-      const windClusterIds = new Set<string>();
-      for (const code of windStations) {
-        const clusterId = capacityFactorService.getClusterForStation(code);
-        if (clusterId) windClusterIds.add(clusterId);
-      }
-
-      // Helper: CSV parsing
-      const parseCSVLine = (line: string): string[] => {
-        const result: string[] = [];
-        let current = '';
-        let inQuotes = false;
-        for (let i = 0; i < line.length; i++) {
-          const char = line[i];
-          if (char === '"') {
-            inQuotes = !inQuotes;
-          } else if (char === ',' && !inQuotes) {
-            result.push(current.trim());
-            current = '';
-          } else {
-            current += char;
-          }
-        }
-        result.push(current.trim());
-        return result;
-      };
-
-      // Date ranges
-      const sortedCfac = [...cfacData].sort((a, b) => a.datetime.getTime() - b.datetime.getTime());
-      const trainStart = DateTime.fromJSDate(sortedCfac[0].datetime).toISODate()!;
-      const trainEnd = DateTime.fromJSDate(sortedCfac[sortedCfac.length - 1].datetime).toISODate()!;
-      console.log(`\n📅 Training data: ${trainStart} to ${trainEnd}`);
-      console.log(`📅 Forecast period: ${options.start} to ${options.end}`);
-
-      // Fetch training weather
-      console.log('\n🌤️  Fetching weather data for training period...');
-      const trainClusterWeatherCsv = await weatherService.fetchAllClusters(
-        clusters,
-        trainStart,
-        trainEnd,
-        (msg) => console.log(`   ${msg}`),
-        windClusterIds
-      );
-
-      // Parse training weather
-      const trainClusterWeather = new Map<string, Map<number, CFacWeatherFeatures>>();
-      for (const [clusterId, csvData] of trainClusterWeatherCsv) {
-        const weatherMap = new Map<number, CFacWeatherFeatures>();
-        const lines = csvData.split('\n').filter(l => l.trim());
-        if (lines.length < 2) continue;
-
-        const headers = parseCSVLine(lines[0]).map(h => h.toLowerCase());
-        const colIdx = (name: string) => headers.indexOf(name);
-
-        for (let i = 1; i < lines.length; i++) {
-          const values = parseCSVLine(lines[i]);
-          const datetimeStr = values[colIdx('datetime')];
-          if (!datetimeStr) continue;
-
-          const dt = DateTime.fromISO(datetimeStr);
-          if (!dt.isValid) continue;
-
-          const ts = dt.plus({ hours: 1 }).toMillis();
-          const weather: CFacWeatherFeatures = {
-            temperature: parseFloat(values[colIdx('temp')]) || 25,
-            windSpeed: parseFloat(values[colIdx('windspeed')]) || 0,
-            windSpeed100: colIdx('windspeed100') >= 0 ? parseFloat(values[colIdx('windspeed100')]) || undefined : undefined,
-            windSpeed80: colIdx('windspeed80') >= 0 ? parseFloat(values[colIdx('windspeed80')]) || undefined : undefined,
-            windSpeed50: colIdx('windspeed50') >= 0 ? parseFloat(values[colIdx('windspeed50')]) || undefined : undefined,
-            windGust: parseFloat(values[colIdx('windgust')]) || 0,
-            cloudCover: parseFloat(values[colIdx('cloudcover')]) || 50,
-            solarRadiation: parseFloat(values[colIdx('solarradiation')]) || 0,
-            precipitation: parseFloat(values[colIdx('precip')]) || 0,
-          };
-          weatherMap.set(ts, weather);
-        }
-        trainClusterWeather.set(clusterId, weatherMap);
-      }
-      console.log(`   Loaded weather for ${trainClusterWeather.size} clusters`);
-
-      // Build training samples
-      const mrecCalibrationData: MRECCalibrationData[] = [];
-      const windTrainingSamples: CFacTrainingSample[] = [];
-      const solarTrainingSamples: CFacTrainingSample[] = [];
-      const allTrainingSamples: CFacTrainingSample[] = [];
-
-      for (const record of cfacData) {
-        const clusterId = capacityFactorService.getClusterForStation(record.stationCode);
-        if (!clusterId) continue;
-
-        const weatherMap = trainClusterWeather.get(clusterId);
-        if (!weatherMap) continue;
-
-        const ts = record.datetime.getTime();
-        const weather = weatherMap.get(ts);
-        if (!weather) continue;
-
-        const dt = record.datetime;
-        const stationType = getStationTypeFromCode(record.stationCode);
-
-        const sample: CFacTrainingSample = {
-          stationCode: record.stationCode,
-          datetime: record.datetime,
-          stationType,
-          actualCFac: record.capacityFactor,
-          weather,
-          hour: dt.getHours(),
-          dayOfWeek: dt.getDay(),
-          month: dt.getMonth() + 1,
-          isWeekend: dt.getDay() === 0 || dt.getDay() === 6
-        };
-
-        allTrainingSamples.push(sample);
-
-        if (stationType === StationType.WIND) {
-          mrecCalibrationData.push({
-            datetime: record.datetime,
-            stationCode: record.stationCode,
-            capacityFactor: record.capacityFactor,
-            windSpeed: weather.windSpeed100 ?? weather.windSpeed
-          });
-          windTrainingSamples.push(sample);
-        } else if (stationType === StationType.SOLAR) {
-          solarTrainingSamples.push(sample);
-        }
-      }
-
-      console.log(`\n📊 Training samples: ${allTrainingSamples.length} total`);
-
-      // ═══════════════════════════════════════════════════════════════════════════
-      // TRAIN OPTIMAL MODELS
-      // ═══════════════════════════════════════════════════════════════════════════
-
-      console.log('\n🔧 Training optimal models for each station type...\n');
-
-      // 1. WIND: Enhanced Hybrid (MREC base + multiplicative correction)
-      console.log('   [1/3] 🌬️  WIND: Calibrating Enhanced Hybrid...');
-      const mrecModels = await calibrateAllMREC(mrecCalibrationData, (msg: string) => console.log(`      ${msg}`));
-      const mrecFactorsList: import('./types/capacityFactor.js').MRECFactors[] = [];
-      for (const [, model] of mrecModels) {
-        const factors = model.getFactors();
-        if (factors && factors.calibrated) {
-          mrecFactorsList.push(factors);
-        }
-      }
-
-      const windEnhancedModels = await trainAllEnhancedHybrid(
-        mrecFactorsList,
-        windTrainingSamples,
-        false,  // asymmetricLoss
-        (msg: string) => console.log(`      ${msg}`)
-      );
-      console.log(`      ✅ Trained ${windEnhancedModels.size} Wind Enhanced Hybrid models`);
-
-      // 2. SOLAR: Physics+ML Hybrid
-      console.log('\n   [2/3] ☀️  SOLAR: Training Physics+ML Hybrid...');
-      const solarHybridModels = new Map<string, SolarHybridModel>();
-      const uniqueSolarStations = [...new Set(solarTrainingSamples.map(s => s.stationCode))];
-
-      for (const stationCode of uniqueSolarStations) {
-        const stationSamples = solarTrainingSamples.filter(s => s.stationCode === stationCode);
-        if (stationSamples.length < 50) continue;
-
-        const model = new SolarHybridModel(stationCode);
-        model.train(stationSamples);
-        solarHybridModels.set(stationCode, model);
-      }
-      console.log(`      ✅ Trained ${solarHybridModels.size} Solar Physics+ML Hybrid models`);
-
-      // 3. OTHER TYPES: Profile-based
-      console.log('\n   [3/3] 📊 Other types: Training profile-based models...');
-      const modelRouter = new ModelRouter();
-      const otherSamples = allTrainingSamples.filter(s =>
-        s.stationType !== StationType.WIND && s.stationType !== StationType.SOLAR
-      );
-      await modelRouter.trainAllModels(otherSamples, (msg: string) => console.log(`      ${msg}`));
-      console.log(`      ✅ Trained ${modelRouter.getModelCount()} profile-based models`);
-
-      // ═══════════════════════════════════════════════════════════════════════════
-      // FETCH FORECAST WEATHER
-      // ═══════════════════════════════════════════════════════════════════════════
-
-      console.log('\n🌤️  Fetching weather data for forecast period...');
-      const forecastClusterWeatherCsv = await weatherService.fetchAllClusters(
-        clusters,
-        options.start,
-        options.end,
-        (msg) => console.log(`   ${msg}`),
-        windClusterIds
-      );
-
-      // Parse forecast weather
-      const forecastClusterWeather = new Map<string, Map<number, CFacWeatherFeatures>>();
-      const forecastTimestamps = new Set<number>();
-
-      for (const [clusterId, csvData] of forecastClusterWeatherCsv) {
-        const weatherMap = new Map<number, CFacWeatherFeatures>();
-        const lines = csvData.split('\n').filter(l => l.trim());
-        if (lines.length < 2) continue;
-
-        const headers = parseCSVLine(lines[0]).map(h => h.toLowerCase());
-        const colIdx = (name: string) => headers.indexOf(name);
-
-        for (let i = 1; i < lines.length; i++) {
-          const values = parseCSVLine(lines[i]);
-          const datetimeStr = values[colIdx('datetime')];
-          if (!datetimeStr) continue;
-
-          const dt = DateTime.fromISO(datetimeStr);
-          if (!dt.isValid) continue;
-
-          const ts = dt.plus({ hours: 1 }).toMillis();
-          forecastTimestamps.add(ts);
-
-          const weather: CFacWeatherFeatures = {
-            temperature: parseFloat(values[colIdx('temp')]) || 25,
-            windSpeed: parseFloat(values[colIdx('windspeed')]) || 0,
-            windSpeed100: colIdx('windspeed100') >= 0 ? parseFloat(values[colIdx('windspeed100')]) || undefined : undefined,
-            windSpeed80: colIdx('windspeed80') >= 0 ? parseFloat(values[colIdx('windspeed80')]) || undefined : undefined,
-            windSpeed50: colIdx('windspeed50') >= 0 ? parseFloat(values[colIdx('windspeed50')]) || undefined : undefined,
-            windGust: parseFloat(values[colIdx('windgust')]) || 0,
-            cloudCover: parseFloat(values[colIdx('cloudcover')]) || 50,
-            solarRadiation: parseFloat(values[colIdx('solarradiation')]) || 0,
-            precipitation: parseFloat(values[colIdx('precip')]) || 0,
-          };
-          weatherMap.set(ts, weather);
-        }
-        forecastClusterWeather.set(clusterId, weatherMap);
-      }
-
-      const sortedTimestamps = [...forecastTimestamps].sort((a, b) => a - b);
-      console.log(`   Loaded ${sortedTimestamps.length} forecast hours across ${forecastClusterWeather.size} clusters`);
-
-      // ═══════════════════════════════════════════════════════════════════════════
-      // GENERATE FORECASTS
-      // ═══════════════════════════════════════════════════════════════════════════
-
-      console.log('\n🔮 Generating capacity factor forecasts...');
-
-      const forecasts: CFacForecastResult[] = [];
-      let windCount = 0, solarCount = 0, otherCount = 0;
-
-      for (const ts of sortedTimestamps) {
-        const datetime = new Date(ts);
-
-        for (const stationCode of trainingStations) {
-          const clusterId = capacityFactorService.getClusterForStation(stationCode);
-          if (!clusterId) continue;
-
-          const clusterWeather = forecastClusterWeather.get(clusterId);
-          if (!clusterWeather) continue;
-
-          const weather = clusterWeather.get(ts);
-          if (!weather) continue;
-
-          const stationType = getStationTypeFromCode(stationCode);
-          let predictedCFac = 0;
-          let modelType = 'unknown';
-
-          if (stationType === StationType.WIND) {
-            // Use Enhanced Hybrid for wind
-            const model = windEnhancedModels.get(stationCode);
-            if (model) {
-              predictedCFac = model.predict(weather, datetime);
-              modelType = 'enhanced-hybrid';
-              windCount++;
-            }
-          } else if (stationType === StationType.SOLAR) {
-            // Use Physics+ML Hybrid for solar
-            const model = solarHybridModels.get(stationCode);
-            if (model) {
-              predictedCFac = model.predict(weather, datetime);
-              modelType = 'solar-hybrid';
-              solarCount++;
-            }
-          } else {
-            // Use profile-based for others via ModelRouter
-            const routerPred = modelRouter.predict(stationCode, weather, datetime);
-            if (routerPred !== null) {
-              predictedCFac = routerPred;
-              modelType = 'profile-based';
-              otherCount++;
-            }
-          }
-
-          forecasts.push({
-            datetime,
-            stationCode,
-            predictedCFac: Math.max(0, Math.min(1, predictedCFac)),
-            modelType
-          });
-        }
-      }
-
-      console.log(`   Generated ${forecasts.length} total predictions:`);
-      console.log(`      🌬️  Wind:  ${windCount} predictions (Enhanced Hybrid)`);
-      console.log(`      ☀️  Solar: ${solarCount} predictions (Physics+ML Hybrid)`);
-      console.log(`      📊 Other: ${otherCount} predictions (Profile-based)`);
-
-      // ═══════════════════════════════════════════════════════════════════════════
-      // APPLY WIND SMOOTHING (if enabled)
-      // ═══════════════════════════════════════════════════════════════════════════
-
-      if (smoothFactor > 0) {
-        console.log(`\n🌊 Applying wind smoothing (factor: ${smoothFactor.toFixed(2)})...`);
-
-        // Group wind forecasts by station, sorted by time
-        const windForecastsByStation = new Map<string, CFacForecastResult[]>();
-        for (const f of forecasts) {
-          if (f.modelType === 'enhanced-hybrid') {
-            if (!windForecastsByStation.has(f.stationCode)) {
-              windForecastsByStation.set(f.stationCode, []);
-            }
-            windForecastsByStation.get(f.stationCode)!.push(f);
-          }
-        }
-
-        // Apply exponential moving average to each wind station
-        // Formula: smoothed[t] = (1-alpha) * prediction[t] + alpha * smoothed[t-1]
-        const alpha = smoothFactor;
-        let totalSmoothed = 0;
-
-        for (const [stationCode, stationForecasts] of windForecastsByStation) {
-          // Sort by datetime
-          stationForecasts.sort((a, b) => a.datetime.getTime() - b.datetime.getTime());
-
-          // Apply EMA smoothing
-          let prevSmoothed = stationForecasts[0].predictedCFac;
-          for (let i = 0; i < stationForecasts.length; i++) {
-            const original = stationForecasts[i].predictedCFac;
-            const smoothed = (1 - alpha) * original + alpha * prevSmoothed;
-            stationForecasts[i].predictedCFac = Math.max(0, Math.min(1, smoothed));
-            prevSmoothed = smoothed;
-            totalSmoothed++;
-          }
-        }
-
-        console.log(`   Smoothed ${totalSmoothed} wind predictions across ${windForecastsByStation.size} stations`);
-      }
-
-      // ═══════════════════════════════════════════════════════════════════════════
-      // WRITE OUTPUT
-      // ═══════════════════════════════════════════════════════════════════════════
-
-      console.log('\n📝 Writing forecast results...');
-
-      // Group by datetime
-      const byDatetime = new Map<string, Map<string, number>>();
-      for (const f of forecasts) {
-        const dtKey = DateTime.fromJSDate(f.datetime).toFormat('yyyy-MM-dd HH:mm');
-        if (!byDatetime.has(dtKey)) {
-          byDatetime.set(dtKey, new Map());
-        }
-        byDatetime.get(dtKey)!.set(f.stationCode, f.predictedCFac);
-      }
-
-      // Build CSV
-      const sortedDatetimes = [...byDatetime.keys()].sort();
-      const header = ['datetime', ...trainingStations].join(',');
-      const rows = sortedDatetimes.map(dt => {
-        const stationValues = byDatetime.get(dt)!;
-        const values = trainingStations.map(s => {
-          const val = stationValues.get(s);
-          return val !== undefined ? val.toFixed(4) : '';
-        });
-        return [dt, ...values].join(',');
-      });
-
-      const csv = [header, ...rows].join('\n');
-      writeFileSync(options.output, csv);
-      console.log(`   Wrote ${sortedDatetimes.length} forecast rows for ${trainingStations.length} stations`);
-
-      console.log('\n═══════════════════════════════════════════════════════════════════════════════');
-      console.log('                              FORECAST COMPLETE                                 ');
-      console.log('═══════════════════════════════════════════════════════════════════════════════');
-      console.log(`\n   📁 Output: ${options.output}`);
-      console.log(`   📊 Predictions: ${forecasts.length} for ${trainingStations.length} stations`);
-      console.log(`   📅 Period: ${options.start} to ${options.end}`);
-      console.log('\n   Models used:');
-      console.log(`   ├─ Wind:  Enhanced Hybrid (MREC + multiplicative boost)${smoothFactor > 0 ? ` + EMA smoothing (${smoothFactor.toFixed(2)})` : ''}`);
-      console.log('   ├─ Solar: Physics+ML Hybrid');
-      console.log('   └─ Other: Profile-based models');
-
-    } catch (error: any) {
-      console.error(`\n❌ Error: ${error.message}`);
-      if (error.stack) {
-        console.error(error.stack);
-      }
-      process.exit(1);
-    }
-  });
-
 // CFAC WIND-COMPARE - Compare different wind models for capacity factor forecasting
 cfacCommand
   .command('wind-compare')
@@ -9816,108 +8855,6 @@ scheduler
     }
   });
 
-// scheduler config - View or set scheduler configuration
-scheduler
-  .command('config')
-  .description('View or set scheduler configuration')
-  .option('--show', 'Show current configuration')
-  .option('--set-times <times>', 'Set run times (comma-separated, e.g., "06:00,18:00")')
-  .option('--set-days <days>', 'Set run days (1-7, comma-separated, e.g., "1,2,3,4,5")')
-  .option('--weather-max-age <hours>', 'Set weather cache max age in hours')
-  .option('--archive-retention <days>', 'Set archive retention in days')
-  .option('--enable', 'Enable scheduler')
-  .option('--disable', 'Disable scheduler')
-  .option('--db <path>', 'Scheduler database path', './forecast.db')
-  .action(async (options) => {
-    try {
-      const service = new ForecastSchedulerService({
-        demandDataPath: 'Data Samples/Demand',
-        cfacDataPath: 'Data Samples/Capacity Factor',
-        outputDir: './output',
-        dbPath: options.db
-      });
-
-      // If --show flag or no modification flags, display current config
-      const isModifying = options.setTimes || options.setDays || options.weatherMaxAge ||
-                         options.archiveRetention || options.enable || options.disable;
-
-      if (options.show || !isModifying) {
-        const config = service.loadSchedulerConfig();
-
-        console.log('\n═══════════════════════════════════════════════════════');
-        console.log('         Scheduler Configuration');
-        console.log('═══════════════════════════════════════════════════════');
-        console.log('');
-
-        if (config) {
-          console.log(`Status:              ${config.enabled ? '✓ Enabled' : '✗ Disabled'}`);
-          console.log(`Morning run time:    ${config.run_time_morning}`);
-          console.log(`Evening run time:    ${config.run_time_evening || 'Not set'}`);
-          console.log(`Run days:            ${config.run_days}`);
-          console.log(`Forecast types:      ${config.forecast_types}`);
-          console.log(`Horizons:            ${config.horizons}`);
-          console.log(`Weather max age:     ${config.weather_max_age_hours} hours`);
-          console.log(`Auto-push gateway:   ${config.auto_push_gateway ? 'Yes' : 'No'}`);
-          console.log(`Archive retention:   ${config.archive_retention_days} days`);
-          console.log(`Last updated:        ${config.updated_at}`);
-        } else {
-          console.log('No configuration found. Using defaults.');
-        }
-
-        console.log('═══════════════════════════════════════════════════════');
-      }
-
-      // Apply modifications if provided
-      if (isModifying) {
-        const updates: any = {};
-
-        if (options.setTimes) {
-          const times = options.setTimes.split(',').map((t: string) => t.trim());
-          if (times.length > 0) updates.run_time_morning = times[0];
-          if (times.length > 1) updates.run_time_evening = times[1];
-        }
-
-        if (options.setDays) {
-          updates.run_days = options.setDays;
-        }
-
-        if (options.weatherMaxAge) {
-          updates.weather_max_age_hours = parseInt(options.weatherMaxAge);
-        }
-
-        if (options.archiveRetention) {
-          updates.archive_retention_days = parseInt(options.archiveRetention);
-        }
-
-        if (options.enable !== undefined) {
-          updates.enabled = options.enable;
-        }
-
-        if (options.disable !== undefined) {
-          updates.enabled = !options.disable;
-        }
-
-        service.saveSchedulerConfig(updates);
-        console.log('\n✅ Configuration updated successfully');
-
-        // Show updated config
-        const updated = service.loadSchedulerConfig();
-        if (updated) {
-          console.log('\nUpdated settings:');
-          Object.keys(updates).forEach((key: string) => {
-            const displayKey = key.replace(/_/g, ' ');
-            console.log(`  ${displayKey}: ${(updated as any)[key]}`);
-          });
-        }
-      }
-
-      service.close();
-    } catch (error: any) {
-      console.error(`\n❌ Error: ${error.message}`);
-      process.exit(1);
-    }
-  });
-
 // scheduler service - Run as background service
 scheduler
   .command('service')
@@ -10584,6 +9521,145 @@ gatewayCmd
       writeFileSync(configPath, JSON.stringify(config, null, 2));
       console.log('\n✅ Auto-push disabled in config.json');
       console.log('   Use --push flag to manually push forecasts.');
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+// ============================================================================
+// CONFIG COMMAND - Global forecast configuration management
+// ============================================================================
+
+const configCommand = program
+  .command('config')
+  .description('Manage global forecast configuration (forecast_config.json)');
+
+// config get - View current configuration
+configCommand
+  .command('get')
+  .description('View current configuration')
+  .argument('[section]', 'Config section to view (paths, databases, calibration, cfac, demand, weather, output, gateway, scheduler)')
+  .action((section?: string) => {
+    try {
+      const configService = getConfigService();
+      const config = configService.get();
+
+      console.log('\n⚙️  Global Forecast Configuration\n');
+      console.log('═══════════════════════════════════════════════════════════════');
+
+      if (section) {
+        // Show specific section
+        if (!(section in config)) {
+          console.error(`\n❌ Unknown section: ${section}`);
+          console.error('   Valid sections: paths, databases, calibration, cfac, demand, weather, output, gateway, scheduler');
+          process.exit(1);
+        }
+
+        console.log(`\n📋 Section: ${section}\n`);
+        console.log(JSON.stringify((config as any)[section], null, 2));
+      } else {
+        // Show all config
+        console.log(JSON.stringify(config, null, 2));
+      }
+
+      console.log('\n═══════════════════════════════════════════════════════════════');
+      console.log(`📄 Config file: ${configService.getConfigPath()}`);
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+// config set - Update configuration value
+configCommand
+  .command('set')
+  .description('Set configuration value using dot notation')
+  .argument('<key>', 'Config key (e.g., "calibration.days", "cfac.useXgboost")')
+  .argument('<value>', 'New value (parsed as JSON)')
+  .action((key: string, valueStr: string) => {
+    try {
+      const configService = getConfigService();
+
+      // Parse value (supports numbers, booleans, strings, arrays)
+      let value: any;
+      try {
+        value = JSON.parse(valueStr);
+      } catch {
+        // If JSON parse fails, treat as string
+        value = valueStr;
+      }
+
+      console.log(`\n⚙️  Setting ${key} = ${JSON.stringify(value)}`);
+
+      configService.set(key, value);
+
+      console.log('✅ Configuration updated successfully');
+      console.log(`📄 Saved to: ${configService.getConfigPath()}`);
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+// config reset - Reset to defaults
+configCommand
+  .command('reset')
+  .description('Reset configuration to default values')
+  .option('-y, --yes', 'Skip confirmation prompt')
+  .action((options) => {
+    try {
+      if (!options.yes) {
+        console.log('\n⚠️  WARNING: This will reset all configuration to defaults!');
+        console.log('   Use --yes flag to confirm: node dist/index.js config reset --yes');
+        process.exit(0);
+      }
+
+      const configService = getConfigService();
+      configService.reset();
+
+      console.log('\n✅ Configuration reset to defaults');
+      console.log(`📄 Saved to: ${configService.getConfigPath()}`);
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+// config validate - Validate configuration
+configCommand
+  .command('validate')
+  .description('Validate configuration structure and values')
+  .action(() => {
+    try {
+      const configService = getConfigService();
+      const result = configService.validate();
+
+      console.log('\n🔍 Validating configuration...\n');
+      console.log('═══════════════════════════════════════════════════════════════');
+
+      if (result.valid) {
+        console.log('\n✅ Configuration is valid');
+      } else {
+        console.log('\n❌ Configuration has errors:\n');
+        for (const error of result.errors) {
+          console.log(`   • ${error}`);
+        }
+      }
+
+      if (result.warnings.length > 0) {
+        console.log('\n⚠️  Warnings:\n');
+        for (const warning of result.warnings) {
+          console.log(`   • ${warning}`);
+        }
+      }
+
+      console.log('\n═══════════════════════════════════════════════════════════════');
+      console.log(`📄 Config file: ${configService.getConfigPath()}`);
+
+      if (!result.valid) {
+        process.exit(1);
+      }
     } catch (error: any) {
       console.error(`\n❌ Error: ${error.message}`);
       process.exit(1);

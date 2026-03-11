@@ -145,7 +145,6 @@ See `Documents/DEPLOYMENT_GUIDE.md` for full deployment documentation.
 | Command | Description |
 |---------|-------------|
 | `cfac forecast2` | **RECOMMENDED** - Hybrid model (physics + ML correction) with auto-calibration |
-| `cfac forecast3` | Enhanced Hybrid with EMA wind smoothing (`--smooth 0.5`) |
 | `cfac evaluate` | Evaluate forecast accuracy vs actual |
 | `cfac mrec compare3` | Compare wind model variants |
 
@@ -165,6 +164,14 @@ See `Documents/DEPLOYMENT_GUIDE.md` for full deployment documentation.
 |---------|-------------|
 | `python scripts/train_demand_lstm.py` | Train enhanced LSTM correction models for zonal demand |
 
+### Configuration Management
+| Command | Description |
+|---------|-------------|
+| `config get [key]` | View all settings or specific setting |
+| `config set <key> <value>` | Update configuration value |
+| `config reset [key]` | Reset to default (all or specific) |
+| `config validate` | Validate configuration |
+
 ### Scheduler (Background Service)
 | Command | Description |
 |---------|-------------|
@@ -173,7 +180,6 @@ See `Documents/DEPLOYMENT_GUIDE.md` for full deployment documentation.
 | `scheduler evaluate` | Evaluate pending forecasts against actuals |
 | `scheduler status` | Show run history and metrics |
 | `scheduler service` | Run as background service (daily at 6 AM) |
-| `scheduler config get/set/reset` | Manage scheduler configuration |
 
 ### Gateway Integration
 | Command | Description |
@@ -212,7 +218,6 @@ node dist/index.js cfac forecast2 \
 | `--use-xgboost` | Use XGBoost instead of linear regression for ML layer (better for solar) |
 | `--asymmetric-loss` | Penalize under-predictions 2x (reduces under-forecasting bias) |
 | `--bias-correction` | Apply learned station-specific bias correction |
-| `--smooth 0.5` | EMA smoothing for wind (0=none, 0.7=heavy) - forecast3 only |
 
 ### Best Configuration by Station Type
 | Type | Recommended Flags | Notes |
@@ -264,7 +269,7 @@ Default: Last 14 days of training data. Override with `--no-auto-calibrate` to d
 
 **Hybrid is the recommended model for all station types.** Use `cfac forecast2` (default command).
 
-**Note on LSTM:** LSTM models are experimental and currently underperform hybrid models. The LSTM code remains in the codebase (`src/models/capacityFactor/WindLSTMModel.ts`, `SolarLSTMModel.ts`) for future development as a weather-to-CFAC correction layer.
+**Note on LSTM:** Legacy LSTM models for capacity factor forecasting have been removed. Hybrid models (physics + ML) provide superior performance for all station types.
 
 ### Weekend Correction Factors
 The demand hybrid model applies learned correction factors to fix systematic weekend over-forecasting:
@@ -279,7 +284,6 @@ These factors reduced weekend MAE from 500 MW to ~250 MW.
 ### Key Model Files
 **Demand:**
 - `src/models/hybridModel.ts` - Region-aware hybrid with statistical profiles + weekend correction
-- `src/models/DemandCorrectionLSTM.ts` - LSTM correction layer (optional, enabled with --lstm-correction flag)
 
 **Capacity Factor (Production - RECOMMENDED):**
 - `src/models/capacityFactor/WindEnhancedHybridModel.ts` - **BEST** Wind 4-Tier Hybrid (MREC + ML) ~73% MAPE
@@ -288,11 +292,6 @@ These factors reduced weekend MAE from 500 MW to ~250 MW.
 - `src/models/capacityFactor/SolarIrradianceModel.ts` - Solar physics base model
 - `src/models/capacityFactor/CFacXGBoostRegressor.ts` - XGBoost for ML layer (legacy option)
 - `src/models/capacityFactor/BiasCorrector.ts` - Station-specific bias correction
-
-**Capacity Factor (Experimental - NOT RECOMMENDED):**
-- `src/models/capacityFactor/WindLSTMModel.ts` - Wind LSTM (experimental, underperforms hybrid)
-- `src/models/capacityFactor/SolarLSTMModel.ts` - Solar LSTM (experimental, underperforms hybrid)
-- `scripts/cfac_forecast_lstm.cjs` - LSTM forecasting script (experimental)
 
 ---
 
@@ -355,23 +354,6 @@ node dist/index.js forecast \
   --model hybrid
 ```
 
-**With LSTM correction layer (improved morning ramp dynamics):**
-```bash
-node dist/index.js forecast \
-  -d "Data Samples/Demand" \
-  -s 2025-12-01 \
-  -e 2025-12-31 \
-  -o output/demand_december.csv \
-  --model hybrid \
-  --lstm-correction
-```
-
-The LSTM correction layer improves temporal dynamics, particularly:
-- Morning ramp (6-9 AM) correlation
-- Evening ramp (5-7 PM) patterns
-- Peak timing accuracy
-- Day-type transitions (Friday→Saturday patterns)
-
 **With manual weather files:**
 ```bash
 node dist/index.js forecast \
@@ -390,7 +372,6 @@ node dist/index.js forecast \
 | `-e, --end <date>` | Forecast end date (required with auto-fetch) |
 | `-o, --output <file>` | Output CSV file (required) |
 | `--model <type>` | Model type: `xgboost`, `regression`, `hybrid` (default: hybrid) |
-| `--lstm-correction` | Enable LSTM correction layer for hybrid model (improves morning ramp) |
 | `--zonal` | Use 14-zone sub-region mode instead of 3 regions (Luzon: 01NLUZ, 02METRO, 03SLUZ; Visayas: 04LEYTE, 05CEBU, 06NEGROS, 07BOHOL, 08PANAY; Mindanao: 09NWMIN, 10LANAO, 11NCMIN, 12NEMIN, 13SEMIN, 14SWMIN) |
 | `--weather-hist <files...>` | Historical weather CSV files |
 | `--weather-forecast <files...>` | Forecast weather CSV files |
@@ -495,18 +476,18 @@ node dist/index.js scheduler backfill \
 node dist/index.js scheduler status
 ```
 
-**Manage configuration:**
+**Manage global configuration:**
 ```bash
 # View current configuration
-node dist/index.js scheduler config get
+node dist/index.js config get
 
 # Set configuration values
-node dist/index.js scheduler config set demand_training_path "Data Samples/Demand"
-node dist/index.js scheduler config set cfac_training_path "Data Samples/Capacity Factor"
-node dist/index.js scheduler config set auto_push_gateway true
+node dist/index.js config set demand_training_path "Data Samples/Demand"
+node dist/index.js config set cfac_training_path "Data Samples/Capacity Factor"
+node dist/index.js config set auto_push_gateway true
 
 # Reset to defaults
-node dist/index.js scheduler config reset
+node dist/index.js config reset
 ```
 
 **All scheduler run flags:**
@@ -535,15 +516,28 @@ node dist/index.js scheduler config reset
 | `--overwrite` | Regenerate existing forecasts |
 | `--suffix <text>` | Append custom suffix to archived filenames |
 
-**Scheduler configuration keys:**
-| Key | Description | Default |
-|-----|-------------|---------|
-| `demand_training_path` | Path to demand training data | `Data Samples/Demand` |
-| `cfac_training_path` | Path to capacity factor training data | `Data Samples/Capacity Factor` |
-| `weather_cache_dir` | Weather cache directory | `./weather_cache` |
-| `auto_push_gateway` | Auto-push to Vantage Gateway | `false` |
-| `archive_forecasts` | Enable forecast archiving | `true` |
-| `archive_path` | Archive directory path | `./output/archive` |
+**Global configuration keys:**
+
+Settings are stored in `forecast_config.json` at project root. All paths and options configured through `config` CLI commands or GUI Settings tab.
+
+| Category | Key | Description | Default |
+|----------|-----|-------------|---------|
+| **Training Data** | `demandTrainingPath` | Demand training data path | `Data Samples/Demand` |
+| | `cfacTrainingPath` | CFAC training data path | `Data Samples/Capacity Factor` |
+| **Weather** | `weatherCacheDir` | Weather cache directory | `weather_cache` |
+| | `weatherApiKey` | Visual Crossing API key | (built-in) |
+| **Output** | `outputDir` | Forecast output directory | `output` |
+| | `archiveDir` | Forecast archive directory | `output/archive` |
+| **Gateway** | `autoPushGateway` | Auto-push to Gateway | `false` |
+| | `sftpHost` | Gateway SFTP host | (empty) |
+| | `sftpPort` | Gateway SFTP port | `22` |
+| | `sftpUser` | Gateway SFTP username | (empty) |
+| | `sftpPassword` | Gateway SFTP password | (empty) |
+| | `sftpRemoteDir` | Gateway remote directory | `/forecasts` |
+| **Models** | `demandModel` | Demand model type | `hybrid` |
+| | `cfacUseXGBoost` | Use XGBoost for CFAC | `false` |
+| | `cfacAsymmetricLoss` | Asymmetric loss for CFAC | `false` |
+| | `cfacBiasCorrection` | Bias correction for CFAC | `false` |
 
 **Output Structure:**
 ```
@@ -558,95 +552,6 @@ output/archive/
 ```
 
 ---
-
-## LSTM Demand Correction Training (Python)
-
-### Overview
-The LSTM V2 trainer learns temporal patterns and multi-city weather correlations to improve demand forecasts, particularly for morning ramp dynamics (6-9 AM) and peak timing accuracy.
-
-### Prerequisites
-```bash
-pip install tensorflow pandas holidays
-```
-
-### Training Command
-```bash
-# Train LSTM for a specific zone
-python scripts/train_demand_lstm.py \
-  --zone 01NLUZ \
-  --output models/lstm
-
-# Train all 14 zones
-python scripts/train_demand_lstm.py \
-  --all \
-  --output models/lstm \
-  --epochs 100
-```
-
-### Command Flags
-| Flag | Description | Required |
-|------|-------------|----------|
-| `--zone <code>` | Zone code to train (e.g., 01NLUZ, 02METRO) | Yes (unless --all) |
-| `--all` | Train all 14 zones sequentially | No |
-| `--config <path>` | Configuration file path | No (default: `config/lstm_config.json`) |
-| `--output <dir>` | Output directory for models | No (default: from config) |
-| `--epochs <n>` | Training epochs | No (default: from config, typically 100) |
-
-### Configuration Files
-
-**`config/lstm_config.json`** - LSTM training configuration
-- **Training parameters**: sequence_length (48 hours), batch_size (64), learning_rate (0.0005)
-- **Model architecture**: LSTM(64) → LSTM(32) → Dense(32) → Dense(16) → Output
-- **Feature groups**: 98 features (6-city zones) or 74 features (3-city zones)
-- **Normalization**: Weather (temp, humidity, solar), demand (10000 MW scale)
-- **Correction range**: 0.85-1.15 (±15% adjustment to hybrid model base forecast)
-
-**`src/data/zones.json`** - Zone and city configuration
-- **14 zones**: Each with 3-6 cities for weather learning
-- **Per-zone LSTM config**: Enabled/disabled flag, priority cities, performance notes
-- **City metadata**: Coordinates, location IDs for weather fetching
-
-### Feature Engineering
-The LSTM trainer extracts 74-98 features per timestep:
-
-| Feature Group | Count | Description |
-|---------------|-------|-------------|
-| **Per-city weather** | 48 (6×8) | Temperature, humidity, cloudcover, solar radiation (×6 cities, padded) |
-| **Aggregated weather** | 8 | Mean/max/spread temperature, city coverage metrics |
-| **Demand features** | 10 | Current demand, lags (1h/24h/168h), rolling averages, ramp rate |
-| **Temporal features** | 18 | Hour/day/month cyclical encoding, weekend/holiday flags, time periods |
-| **Calendar features** | 8 | Holiday detection, days until/since holiday, special periods |
-| **Seasonal features** | 6 | Wet/dry season (Philippines), El Niño/La Niña flags |
-
-### Output
-The trainer exports:
-- **Model weights** (JSON): `models/lstm/lstm_<ZONE>_v2.json`
-- **Training summary**: Validation/test metrics, epochs trained, sample counts
-- **Summary report**: `models/lstm/training_summary_v2.json` with all zone results
-
-### Using LSTM Correction in Forecasting
-```bash
-# Enable LSTM correction for demand forecast
-node dist/index.js forecast \
-  -d "Data Samples/Demand" \
-  -s 2025-12-01 \
-  -e 2025-12-31 \
-  -o output/demand_forecast.csv \
-  --model hybrid \
-  --lstm-correction
-```
-
-**Impact:**
-- **Morning ramp (6-9 AM)**: Improved correlation from negative to positive
-- **Peak timing**: Reduced error from 3-5 hours to <1 hour
-- **Day transitions**: Better Friday→Saturday, weekend→workday patterns
-
-### Zone Codes Reference
-| Region | Zones |
-|--------|-------|
-| **Luzon** | 01NLUZ (Northern), 02METRO (Manila), 03SLUZ (Southern) |
-| **Visayas** | 04LEYTE, 05CEBU, 06NEGROS, 07BOHOL, 08PANAY |
-| **Mindanao** | 09NWMIN (Northwest), 10LANAO, 11NCMIN (North Central), 12NEMIN (Northeast), 13SEMIN (Southeast), 14SWMIN (Southwest) |
 
 ---
 
@@ -673,14 +578,13 @@ node dist/index.js forecast \
   -o output/zonal_demand_forecast.csv \
   --zonal
 
-# With LSTM correction
+# With zonal mode (14 sub-regions)
 node dist/index.js forecast \
   -d "Data Samples/Demand" \
   -s 2025-12-01 \
   -e 2025-12-31 \
   -o output/zonal_demand_forecast.csv \
-  --zonal \
-  --lstm-correction
+  --zonal
 ```
 
 ### Database Import for Zonal Mode
@@ -730,15 +634,13 @@ CSV Parsers → Data Merger (timestamp alignment) → Feature Engineering → ML
 |-----------|---------|
 | `src/parsers/` | CSV parsing (demand: hour-ending M/D/YYYY, weather: ISO 8601 hour-starting) |
 | `src/features/` | Feature engineering (50+ features) |
-| `src/models/` | Demand models (Regression, XGBoost, Hybrid, LSTM inference) |
+| `src/models/` | Demand models (Regression, XGBoost, Hybrid) |
 | `src/models/capacityFactor/` | Wind/Solar/Profile capacity factor models |
-| `src/services/` | Weather API (Visual Crossing), capacityFactorService |
-| `src/database/` | SQLite persistence via better-sqlite3 (iload.db, iload_zonal.db) |
+| `src/services/` | Weather API (Visual Crossing), unified forecast service, config service |
+| `src/database/` | SQLite persistence via better-sqlite3 (forecast.db) |
 | `src/data/stations.json` | Station metadata, coordinates, weather clusters |
 | `src/data/zones.json` | Zonal configuration (14 zones, 42 cities) |
-| `config/lstm_config.json` | LSTM training configuration |
-| `scripts/train_demand_lstm.py` | Python LSTM trainer (requires TensorFlow) |
-| `models/lstm/` | Trained LSTM weights (exported as JSON) |
+| `forecast_config.json` | Global configuration file (root directory) |
 
 ### Weather Timestamp Alignment
 Weather uses hour-starting, demand uses hour-ending. The merger adds 1 hour to weather timestamps.

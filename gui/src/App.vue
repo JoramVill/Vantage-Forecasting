@@ -210,6 +210,12 @@ const schedulerRefreshWeather = ref(false); // Force weather cache refresh
 const schedulerOverwrite = ref(false); // Overwrite existing forecasts (backfill mode)
 const schedulerSuffix = ref(''); // Custom suffix for backfill filenames
 
+// ============ GLOBAL CONFIG (forecast_config.json) ============
+// Global config from forecast_config.json
+const globalConfig = ref<any>(null);
+const configLoading = ref(false);
+const configSaveStatus = ref<'idle' | 'saving' | 'saved' | 'error'>('idle');
+
 // Saved calibrations (for 'reuse' mode - skip recalibration)
 interface SavedCalibration {
   id: number;
@@ -545,6 +551,9 @@ onMounted(async () => {
   loadGatewayConfig();
   loadRecentRuns();
   loadSavedCalibrations();
+
+  // Load global config from forecast_config.json
+  await loadGlobalConfig();
 
   // Set up real-time output listener - routes to appropriate terminal
   window.electronAPI.onCommandOutput((data) => {
@@ -927,6 +936,51 @@ async function checkSchedulerDbStatus() {
     addSchedulerStatus(`Scheduler Database: ${info.message}`, info.success ? 'success' : 'error');
   } catch (error: any) {
     addSchedulerStatus(`Error checking database: ${error.message}`, 'error');
+  }
+}
+
+// ============ Global Config Functions ============
+// Load global config from forecast_config.json
+async function loadGlobalConfig() {
+  configLoading.value = true;
+  try {
+    globalConfig.value = await window.electronAPI.loadGlobalConfig();
+    addSchedulerStatus('Global config loaded successfully', 'success');
+  } catch (e: any) {
+    console.error('Failed to load global config:', e);
+    addSchedulerStatus(`Error loading config: ${e.message}`, 'error');
+  } finally {
+    configLoading.value = false;
+  }
+}
+
+// Save global config to forecast_config.json
+async function saveGlobalConfig() {
+  if (!globalConfig.value) return;
+  configSaveStatus.value = 'saving';
+  try {
+    await window.electronAPI.saveGlobalConfig(globalConfig.value);
+    configSaveStatus.value = 'saved';
+    addSchedulerStatus('Global config saved successfully', 'success');
+    setTimeout(() => configSaveStatus.value = 'idle', 2000);
+  } catch (e: any) {
+    console.error('Failed to save global config:', e);
+    configSaveStatus.value = 'error';
+    addSchedulerStatus(`Error saving config: ${e.message}`, 'error');
+  }
+}
+
+// Reset global config to defaults
+async function resetGlobalConfig() {
+  if (!confirm('Reset all global settings to defaults? This will overwrite your current configuration.')) return;
+  try {
+    globalConfig.value = await window.electronAPI.resetGlobalConfig();
+    configSaveStatus.value = 'saved';
+    addSchedulerStatus('Global config reset to defaults', 'success');
+    setTimeout(() => configSaveStatus.value = 'idle', 2000);
+  } catch (e: any) {
+    console.error('Failed to reset global config:', e);
+    addSchedulerStatus(`Error resetting config: ${e.message}`, 'error');
   }
 }
 
@@ -2848,6 +2902,55 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
                 <p class="db-path">{{ globalSchedulerDb }}</p>
                 <button @click="checkSchedulerDbStatus" class="btn btn-sm btn-outline">Check Status</button>
               </div>
+            </div>
+          </section>
+
+          <!-- Global Config Section (forecast_config.json) -->
+          <section class="card settings-section full-width">
+            <h2>Global Forecast Configuration</h2>
+            <p class="section-description">Edit global config from forecast_config.json</p>
+
+            <div v-if="configLoading" class="config-loading">
+              <span class="spinner"></span>
+              Loading configuration...
+            </div>
+
+            <div v-else-if="globalConfig" class="config-editor">
+              <!-- Calibration Settings -->
+              <div class="form-group">
+                <label>Calibration Days</label>
+                <p class="field-hint">Number of days used for calibration (default: 14)</p>
+                <input type="number" v-model.number="globalConfig.calibration.days" min="7" max="60" class="path-input" />
+              </div>
+
+              <div class="form-group">
+                <label>Calibration Threshold (%)</label>
+                <p class="field-hint">MAPE threshold for calibration convergence (default: 5%)</p>
+                <input type="number" v-model.number="globalConfig.calibration.threshold" min="1" max="20" step="0.1" class="path-input" />
+              </div>
+
+              <div class="form-group">
+                <label>Max Calibration Iterations</label>
+                <p class="field-hint">Maximum iterations for calibration (default: 5)</p>
+                <input type="number" v-model.number="globalConfig.calibration.maxIterations" min="1" max="10" class="path-input" />
+              </div>
+
+              <!-- Save/Reset Buttons -->
+              <div class="config-actions">
+                <button @click="saveGlobalConfig" class="btn btn-primary" :disabled="configSaveStatus === 'saving'">
+                  <span v-if="configSaveStatus === 'saving'" class="btn-content">
+                    <span class="spinner"></span>
+                    Saving...
+                  </span>
+                  <span v-else-if="configSaveStatus === 'saved'">Saved!</span>
+                  <span v-else>Save Config</span>
+                </button>
+                <button @click="resetGlobalConfig" class="btn btn-outline">Reset to Defaults</button>
+              </div>
+            </div>
+
+            <div v-else class="config-error">
+              Failed to load global config. Check console for errors.
             </div>
           </section>
         </div>
@@ -5647,5 +5750,39 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
   .automation-grid {
     grid-template-columns: repeat(2, 1fr);
   }
+}
+
+/* Global Config Editor */
+.config-loading,
+.config-error {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.config-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.config-error {
+  color: #ef4444;
+}
+
+.config-editor {
+  display: grid;
+  gap: 20px;
+}
+
+.config-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.config-actions .btn {
+  min-width: 150px;
 }
 </style>

@@ -22,9 +22,27 @@ npm run build
 
 ## Most Common Commands
 
-### 1. Capacity Factor Forecast (Primary Use Case)
+### 1. Configuration Management
 
-**Basic forecast:**
+**View all settings:**
+```bash
+node dist/index.js config get
+```
+
+**Update training paths:**
+```bash
+node dist/index.js config set demandTrainingPath "Data Samples/Demand"
+node dist/index.js config set cfacTrainingPath "Data Samples/Capacity Factor"
+```
+
+**Reset to defaults:**
+```bash
+node dist/index.js config reset
+```
+
+### 2. Capacity Factor Forecast (Primary Use Case)
+
+**Basic forecast (uses global config):**
 ```bash
 node dist/index.js cfac forecast2 \
   -t "Data Samples/Capacity Factor" \
@@ -32,35 +50,25 @@ node dist/index.js cfac forecast2 \
   -o output/cfac_january.csv
 ```
 
-**Optimal for solar stations:**
+**Override config with flags:**
 ```bash
 node dist/index.js cfac forecast2 \
   -t "Data Samples/Capacity Factor" \
   -s 2026-01-01 -e 2026-01-31 \
   -o output/cfac_january.csv \
-  --use-xgboost --asymmetric-loss
+  --use-xgboost --asymmetric-loss --bias-correction
 ```
 
-**Bias correction for wind:**
-```bash
-node dist/index.js cfac forecast2 \
-  -t "Data Samples/Capacity Factor" \
-  -s 2026-01-01 -e 2026-01-31 \
-  -o output/cfac_january.csv \
-  --bias-correction
-```
-
-### 2. Demand Forecast
+### 3. Demand Forecast
 
 ```bash
 node dist/index.js forecast \
   -d "Data Samples/Demand" \
   -s 2026-01-01 -e 2026-01-31 \
-  -o output/demand_january.csv \
-  --model hybrid
+  -o output/demand_january.csv
 ```
 
-### 3. Evaluate Forecast Accuracy
+### 4. Evaluate Forecast Accuracy
 
 **Capacity factor evaluation:**
 ```bash
@@ -77,7 +85,7 @@ node dist/index.js evaluate \
   -a "Data Samples/Demand/actual.csv"
 ```
 
-### 4. Scheduler (Automated Daily Forecasts)
+### 5. Scheduler (Automated Daily Forecasts)
 
 **Run today's forecasts:**
 ```bash
@@ -94,7 +102,7 @@ node dist/index.js scheduler backfill -s 2026-01-01 -e 2026-01-31
 node dist/index.js scheduler status
 ```
 
-### 5. Database Management
+### 6. Database Management
 
 **Check database status:**
 ```bash
@@ -136,8 +144,13 @@ node dist/index.js db import -d "Data Samples/Demand" -c "Data Samples/Capacity 
 - Reduces systematic bias in predictions
 - Automatically enabled (use `--no-auto-calibrate` to disable)
 
+### Global Configuration
+- Configuration file: `forecast_config.json` at project root
+- Settings managed via `config` CLI commands or GUI Settings tab
+- Stores training paths, model options, gateway settings
+
 ### Data Storage
-- SQLite database: `data/iload.db` or `forecast.db`
+- SQLite database: `forecast.db`
 - Stores historical data, forecasts, and model metadata
 - View with SQLite browser or CLI
 
@@ -217,24 +230,30 @@ Check CSV format matches expected schema (see CLI_GUIDE.md).
 
 ## Example Workflow
 
-1. **Import historical data:**
+1. **Configure paths:**
+   ```bash
+   node dist/index.js config set demandTrainingPath "Data Samples/Demand"
+   node dist/index.js config set cfacTrainingPath "Data Samples/Capacity Factor"
+   ```
+
+2. **Import historical data:**
    ```bash
    node dist/index.js db import -d "Data Samples/Demand" -c "Data Samples/Capacity Factor"
    ```
 
-2. **Generate capacity factor forecast:**
+3. **Generate capacity factor forecast:**
    ```bash
-   node dist/index.js cfac forecast2 -t "Data Samples/Capacity Factor" -s 2026-02-01 -e 2026-02-28 -o output/cfac_feb.csv --use-xgboost --asymmetric-loss
+   node dist/index.js cfac forecast2 -t "Data Samples/Capacity Factor" -s 2026-02-01 -e 2026-02-28 -o output/cfac_feb.csv
    ```
 
-3. **Generate demand forecast:**
+4. **Generate demand forecast:**
    ```bash
-   node dist/index.js forecast -d "Data Samples/Demand" -s 2026-02-01 -e 2026-02-28 -o output/demand_feb.csv --model hybrid
+   node dist/index.js forecast -s 2026-02-01 -e 2026-02-28 -o output/demand_feb.csv
    ```
 
-4. **Evaluate when actuals arrive:**
+5. **Evaluate when actuals arrive:**
    ```bash
-   node dist/index.js cfac evaluate -f output/cfac_feb.csv -a "Data Samples/Capacity Factor/actuals_feb.csv" -o output/feb_eval.txt
+   node dist/index.js cfac evaluate -f output/cfac_feb.csv -a "Data Samples/Capacity Factor/actuals_feb.csv"
    ```
 
 ---

@@ -1275,6 +1275,40 @@ ipcMain.handle('test-gateway-connection', async () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// GLOBAL CONFIG IPC HANDLERS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Load global config
+ipcMain.handle('load-global-config', async () => {
+  const { ConfigService } = await import('../../dist/services/configService.js');
+  const configService = new ConfigService();
+  return configService.load();
+});
+
+// Save global config
+ipcMain.handle('save-global-config', async (_event, config) => {
+  const { ConfigService } = await import('../../dist/services/configService.js');
+  const configService = new ConfigService();
+  configService.save(config);
+  return { success: true };
+});
+
+// Validate config
+ipcMain.handle('validate-global-config', async (_event, config) => {
+  const { ConfigService } = await import('../../dist/services/configService.js');
+  const configService = new ConfigService();
+  return configService.validate(config);
+});
+
+// Reset config to defaults
+ipcMain.handle('reset-global-config', async () => {
+  const { ConfigService } = await import('../../dist/services/configService.js');
+  const configService = new ConfigService();
+  configService.reset();
+  return configService.load();
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // GATEWAY STORAGE MANAGEMENT IPC HANDLERS
 // ═══════════════════════════════════════════════════════════════════════════════
 

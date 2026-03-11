@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "paths": {
+    "demandTraining": "Data Samples/Demand",
+    "cfacTraining": "Data Samples/Capacity Factor",
+    "output": "./output",
+    "archive": "./output/archive",
+    "weatherCache": "./weather_cache"
+  },
+  "databases": {
+    "scheduler": "./forecast.db",
+    "regionalDemand": "./data/iload.db",
+    "zonalDemand": "./data/iload_zonal.db"
+  },
+  "calibration": {
+    "enabled": true,
+    "days": 7,
+    "threshold": 5,
+    "maxIterations": 10
+  },
+  "cfac": {
+    "useXgboost": false,
+    "asymmetricLoss": false,
+    "biasCorrection": false
+  },
+  "demand": {
+    "model": "hybrid",
+    "geography": "regional",
+    "growthRate": 0
+  },
+  "weather": {
+    "maxAgeHours": 6,
+    "refreshMode": "auto"
+  },
+  "output": {
+    "archiveEnabled": true,
+    "retentionDays": 90,
+    "naming": "gateway"
+  },
+  "gateway": {
+    "enabled": false,
+    "autoPush": false
+  },
+  "scheduler": {
+    "enabled": false,
+    "runTimes": [
+      "06:00"
+    ],
+    "runDays": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "forecastTypes": [
+      "demand",
+      "cfac"
+    ],
+    "horizons": [
+      "daily",
+      "weekly"
+    ]
+  }
+}

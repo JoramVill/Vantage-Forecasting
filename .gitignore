@@ -69,3 +69,5 @@ portable-build-*/
 
 # Claude Code settings
 .claude/
+*.db-shm
+*.db-wal

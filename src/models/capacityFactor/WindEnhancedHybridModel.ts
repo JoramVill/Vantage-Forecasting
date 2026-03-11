@@ -21,7 +21,6 @@ import {
   CFacTrainingSample,
 } from '../../types/capacityFactor.js';
 import { WindMRECModel } from './WindMRECModel.js';
-import { WeatherCorrectionLSTM } from './WeatherCorrectionLSTM.js';
 
 export interface EnhancedHybridFactors {
   stationCode: string;
@@ -53,7 +52,6 @@ export class WindEnhancedHybridModel {
   private mrecModel: WindMRECModel;
   private residualModel: MultivariateLinearRegression | null = null;
   private factors: EnhancedHybridFactors | null = null;
-  private lstmCorrector: WeatherCorrectionLSTM | null = null;
 
   // Feature names for ML correction
   private static readonly FEATURE_NAMES = [
@@ -358,26 +356,6 @@ export class WindEnhancedHybridModel {
       prediction *= clampedCorrection;
     }
 
-    // Step 4.5: Apply LSTM correction if available and trained
-    if (this.lstmCorrector && this.lstmCorrector.isTrained() && weatherSequence && hours && months) {
-      // Build physics prediction sequence for LSTM
-      const physicsSequence = weatherSequence.map(w => {
-        const ws = this.getWindSpeed(w);
-        const mrec = this.mrecModel.predict(ws);
-        const boost = this.applyPhysicsBoost(mrec, ws);
-        return boost * this.factors!.baseMultiplier;
-      });
-
-      const lstmCorrection = this.lstmCorrector.predict(
-        weatherSequence,
-        hours,
-        months,
-        physicsSequence
-      );
-
-      prediction *= lstmCorrection;
-    }
-
     // Step 5: Smooth high-wind handling (instead of hard cutout)
     // Gradually reduce CF as it approaches unrealistic values
     // Raised threshold from 0.95 to 0.98 to allow more peak expression
@@ -411,19 +389,6 @@ export class WindEnhancedHybridModel {
     return this.mrecModel.isCalibrated();
   }
 
-  /**
-   * Set LSTM correction layer
-   */
-  setLSTMCorrector(corrector: WeatherCorrectionLSTM | null): void {
-    this.lstmCorrector = corrector;
-  }
-
-  /**
-   * Get LSTM correction layer
-   */
-  getLSTMCorrector(): WeatherCorrectionLSTM | null {
-    return this.lstmCorrector;
-  }
 
   /**
    * Calculate percentile of array

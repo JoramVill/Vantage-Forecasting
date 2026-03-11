@@ -118,6 +118,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   clearGatewayFiles: (options: { olderThanDays: number; confirm: string }) =>
     ipcRenderer.invoke('clear-gateway-files', options),
+
+  // Global config management
+  loadGlobalConfig: () =>
+    ipcRenderer.invoke('load-global-config'),
+
+  saveGlobalConfig: (config: any) =>
+    ipcRenderer.invoke('save-global-config', config),
+
+  validateGlobalConfig: (config: any) =>
+    ipcRenderer.invoke('validate-global-config', config),
+
+  resetGlobalConfig: () =>
+    ipcRenderer.invoke('reset-global-config'),
 });
 
 // Type declaration for window.electronAPI
@@ -287,6 +300,10 @@ declare global {
           errors: string[];
         };
       }>;
+      loadGlobalConfig: () => Promise<any>;
+      saveGlobalConfig: (config: any) => Promise<{ success: boolean }>;
+      validateGlobalConfig: (config: any) => Promise<{ valid: boolean; errors: string[] }>;
+      resetGlobalConfig: () => Promise<any>;
     };
   }
 }

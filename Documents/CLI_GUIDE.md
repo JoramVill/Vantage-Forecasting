@@ -21,7 +21,64 @@ npm run dev -- <command> [options]
 
 ## Command Reference
 
-### 1. train - Train Demand Models
+### 1. config - Global Configuration Management
+
+Manage global configuration stored in `forecast_config.json` at project root.
+
+**Usage:**
+```bash
+# View all configuration
+node dist/index.js config get
+
+# View specific setting
+node dist/index.js config get demandTrainingPath
+
+# Set configuration value
+node dist/index.js config set demandTrainingPath "Data Samples/Demand"
+node dist/index.js config set autoPushGateway true
+
+# Reset to defaults (all)
+node dist/index.js config reset
+
+# Reset specific setting
+node dist/index.js config reset weatherCacheDir
+
+# Validate configuration
+node dist/index.js config validate
+```
+
+**Subcommands:**
+| Command | Description |
+|---------|-------------|
+| `get [key]` | View all settings or specific setting |
+| `set <key> <value>` | Update configuration value |
+| `reset [key]` | Reset to default (all or specific) |
+| `validate` | Validate configuration |
+
+**Configuration Keys:**
+
+| Category | Key | Type | Description | Default |
+|----------|-----|------|-------------|---------|
+| **Training Data** | `demandTrainingPath` | string | Demand training data path | `Data Samples/Demand` |
+| | `cfacTrainingPath` | string | CFAC training data path | `Data Samples/Capacity Factor` |
+| **Weather** | `weatherCacheDir` | string | Weather cache directory | `weather_cache` |
+| | `weatherApiKey` | string | Visual Crossing API key | (built-in) |
+| **Output** | `outputDir` | string | Forecast output directory | `output` |
+| | `archiveDir` | string | Forecast archive directory | `output/archive` |
+| **Gateway** | `autoPushGateway` | boolean | Auto-push to Gateway | `false` |
+| | `sftpHost` | string | Gateway SFTP host | (empty) |
+| | `sftpPort` | number | Gateway SFTP port | `22` |
+| | `sftpUser` | string | Gateway SFTP username | (empty) |
+| | `sftpPassword` | string | Gateway SFTP password | (empty) |
+| | `sftpRemoteDir` | string | Gateway remote directory | `/forecasts` |
+| **Models** | `demandModel` | string | Demand model type | `hybrid` |
+| | `cfacUseXGBoost` | boolean | Use XGBoost for CFAC | `false` |
+| | `cfacAsymmetricLoss` | boolean | Asymmetric loss for CFAC | `false` |
+| | `cfacBiasCorrection` | boolean | Bias correction for CFAC | `false` |
+
+---
+
+### 2. train - Train Demand Models
 
 Train machine learning models on historical demand and weather data.
 
@@ -49,7 +106,7 @@ node dist/index.js train \
 
 ---
 
-### 2. forecast - Generate Demand Forecast
+### 3. forecast - Generate Demand Forecast
 
 Generate demand forecasts with automatic weather fetching. Supports both regional (3 regions) and zonal (14 sub-regions) modes.
 
@@ -69,14 +126,6 @@ node dist/index.js forecast \
   -e 2025-12-31 \
   -o output/zonal_demand_forecast.csv \
   --zonal
-
-# With LSTM correction (improves morning ramp dynamics)
-node dist/index.js forecast \
-  -s 2025-12-01 \
-  -e 2025-12-31 \
-  -o output/demand_forecast.csv \
-  --model hybrid \
-  --lstm-correction
 
 # With scaling adjustments
 node dist/index.js forecast \
@@ -98,7 +147,6 @@ node dist/index.js forecast \
 | `-d, --demand <file>` | Historical demand CSV file | No |
 | `--model <type>` | Model: `regression`, `xgboost`, `hybrid` | No (default: `regression`) |
 | `--zonal` | Use 14-zone mode (01NLUZ, 02METRO, etc.) | No |
-| `--lstm-correction` | Enable LSTM correction layer (requires trained models) | No |
 | `--use-saved` | Use saved model from database | No |
 | `--scale <percent>` | Scale all forecasts (e.g., `5` for +5%) | No |
 | `--scale-workday <percent>` | Scale workdays only | No |
@@ -123,12 +171,11 @@ node dist/index.js forecast \
 |--------|-------------------|----------------------|
 | **Output regions** | 3 (CLUZ, CVIS, CMIN) | 14 (01NLUZ, 02METRO, 03SLUZ, ...) |
 | **Weather cities** | 3 (Manila, Cebu, Davao) | 42 (3 per zone) |
-| **Database** | `iload.db` | `iload_zonal.db` |
-| **LSTM support** | Yes | Yes (requires zone-specific models) |
+| **Database** | `forecast.db` | `forecast.db` |
 
 ---
 
-### 3. evaluate - Evaluate Demand Forecast
+### 4. evaluate - Evaluate Demand Forecast
 
 Compare forecast accuracy against actual demand data.
 
@@ -155,7 +202,7 @@ node dist/index.js evaluate \
 
 ---
 
-### 4. info - Show Data Information
+### 5. info - Show Data Information
 
 Display metadata about demand and weather files.
 
@@ -174,18 +221,18 @@ node dist/index.js info \
 
 ---
 
-### 5. db - Database Management
+### 6. db - Database Management
 
 Manage SQLite database for models and data storage.
 
-#### 5.1 db status
+#### 6.1 db status
 Show database statistics and contents.
 
 ```bash
 node dist/index.js db status
 ```
 
-#### 5.2 db import
+#### 6.2 db import
 Import demand or weather data into database.
 
 ```bash
@@ -210,7 +257,7 @@ node dist/index.js db import \
 | `-l, --location <name>` | Location name (for weather only) | Conditional |
 | `--forecast` | Mark as forecast data | No |
 
-#### 5.3 db models
+#### 6.3 db models
 List and manage saved models.
 
 ```bash
@@ -226,7 +273,7 @@ node dist/index.js db models -a 5
 |------|-------------|----------|
 | `-a, --activate <id>` | Activate model by ID | No |
 
-#### 5.4 db clear
+#### 6.4 db clear
 Clear all database data.
 
 ```bash
@@ -240,11 +287,11 @@ node dist/index.js db clear --confirm
 
 ---
 
-### 6. cfac - Capacity Factor Forecasting
+### 7. cfac - Capacity Factor Forecasting
 
 Generate capacity factor forecasts for wind, solar, and other renewable stations.
 
-#### 6.1 cfac forecast2 (RECOMMENDED)
+#### 7.1 cfac forecast2 (RECOMMENDED)
 
 Optimal model selection per station type with per-station weather fetching.
 
@@ -308,21 +355,7 @@ node dist/index.js cfac forecast2 \
 - **Wind:** Enhanced Hybrid MREC+ML (best with `--bias-correction`)
 - **Hydro/Geothermal/Biomass/Battery:** Profile-based models
 
-#### 6.2 cfac forecast (legacy)
-
-Original cluster-based weather fetching (superseded by forecast2).
-
-```bash
-node dist/index.js cfac forecast \
-  -t "Data Samples/Capacity Factor" \
-  -s 2025-12-01 \
-  -e 2025-12-31 \
-  -o output/cfac_forecast.csv
-```
-
-**Same flags as cfac forecast2**
-
-#### 6.3 cfac evaluate
+#### 7.2 cfac evaluate
 
 Evaluate capacity factor forecast accuracy.
 
@@ -340,7 +373,7 @@ node dist/index.js cfac evaluate \
 | `-a, --actual <file>` | Actual capacity factor CSV | Yes |
 | `-o, --output <file>` | Output report file | No |
 
-#### 6.4 cfac info
+#### 7.3 cfac info
 
 Show capacity factor data information and station statistics.
 
@@ -356,7 +389,7 @@ node dist/index.js cfac info \
 | `-d, --data <path>` | Capacity factor data path | Yes |
 | `--stations <file>` | Stations JSON path | No |
 
-#### 6.5 cfac weather
+#### 7.4 cfac weather
 
 Fetch per-station weather data for capacity factor modeling.
 
@@ -384,7 +417,7 @@ node dist/index.js cfac weather \
 | `--types <types>` | Comma-separated: `wind,solar,hydro,all` | No (default: `all`) |
 | `--only <codes>` | Comma-separated station codes | No |
 
-#### 6.6 cfac forecast-all
+#### 7.5 cfac forecast-all
 
 Generate both demand and capacity factor forecasts together.
 
@@ -409,7 +442,7 @@ node dist/index.js cfac forecast-all \
 | `--model <type>` | Demand model type | No (default: `hybrid`) |
 | `--use-xgboost` | Use XGBoost for CFAC | No |
 
-#### 6.7 cfac solar
+#### 7.6 cfac solar
 
 Compare solar model variants and evaluate performance.
 
@@ -427,11 +460,11 @@ node dist/index.js cfac solar \
 
 ---
 
-### 7. cfac mrec - Wind MREC Model Commands
+### 8. cfac mrec - Wind MREC Model Commands
 
 MREC (iPool three-tier wind algorithm) specific commands.
 
-#### 7.1 cfac mrec calibrate
+#### 8.1 cfac mrec calibrate
 
 Calibrate MREC factors for wind stations.
 
@@ -450,7 +483,7 @@ node dist/index.js cfac mrec calibrate \
 | `--cache <dir>` | Weather cache directory | No |
 | `--save` | Save factors to database | No |
 
-#### 7.2 cfac mrec status
+#### 8.2 cfac mrec status
 
 Show calibrated MREC factors for all wind stations.
 
@@ -458,7 +491,7 @@ Show calibrated MREC factors for all wind stations.
 node dist/index.js cfac mrec status
 ```
 
-#### 7.3 cfac mrec predict
+#### 8.3 cfac mrec predict
 
 Predict capacity factor for a specific wind speed.
 
@@ -474,7 +507,7 @@ node dist/index.js cfac mrec predict \
 | `-s, --station <code>` | Station code | Yes |
 | `-w, --windspeed <value>` | Wind speed in m/s | Yes |
 
-#### 7.4 cfac mrec clear
+#### 8.4 cfac mrec clear
 
 Clear all calibrated MREC factors from database.
 
@@ -482,7 +515,7 @@ Clear all calibrated MREC factors from database.
 node dist/index.js cfac mrec clear
 ```
 
-#### 7.5 cfac mrec forecast
+#### 8.5 cfac mrec forecast
 
 Generate wind forecast using MREC model only.
 
@@ -503,7 +536,7 @@ node dist/index.js cfac mrec forecast \
 | `-o, --output <file>` | Output CSV file | Yes |
 | `--cache <dir>` | Weather cache directory | No |
 
-#### 7.6 cfac mrec hybrid
+#### 8.6 cfac mrec hybrid
 
 Generate wind forecast using MREC + ML hybrid.
 
@@ -521,7 +554,7 @@ node dist/index.js cfac mrec hybrid \
 | `--use-xgboost` | Use XGBoost for ML layer |
 | `--asymmetric-loss` | Penalize under-predictions 2x |
 
-#### 7.7 cfac mrec evaluate
+#### 8.7 cfac mrec evaluate
 
 Evaluate MREC forecast accuracy.
 
@@ -537,7 +570,7 @@ node dist/index.js cfac mrec evaluate \
 | `-f, --forecast <file>` | Forecast CSV | Yes |
 | `-a, --actual <file>` | Actual CSV | Yes |
 
-#### 7.8 cfac mrec compare3
+#### 8.8 cfac mrec compare3
 
 Compare three wind model variants: MREC, Enhanced Hybrid, Basic Hybrid.
 
@@ -555,11 +588,11 @@ node dist/index.js cfac mrec compare3 \
 
 ---
 
-### 8. outage - Outage Analysis
+### 9. outage - Outage Analysis
 
 Analyze and manage power plant outage data.
 
-#### 8.1 outage analyze
+#### 9.1 outage analyze
 
 Analyze outage patterns and impacts.
 
@@ -579,7 +612,7 @@ node dist/index.js outage analyze \
 | `--severity <level>` | Filter: `CRITICAL`, `HIGH`, `MEDIUM`, `LOW` | No |
 | `--region <region>` | Filter: `LUZON`, `VISAYAS`, `MINDANAO` | No |
 
-#### 8.2 outage summary
+#### 9.2 outage summary
 
 Generate outage summary statistics.
 
@@ -593,7 +626,7 @@ node dist/index.js outage summary \
 |------|-------------|----------|
 | `-d, --data <path>` | Outage data path | Yes |
 
-#### 8.3 outage weather-forecast
+#### 9.3 outage weather-forecast
 
 Correlate outages with weather forecasts.
 
@@ -611,7 +644,7 @@ node dist/index.js outage weather-forecast \
 | `-w, --weather <file>` | Weather forecast file | Yes |
 | `-o, --output <file>` | Output file | Yes |
 
-#### 8.4 outage duration-stats
+#### 9.4 outage duration-stats
 
 Calculate outage duration statistics.
 
@@ -627,11 +660,11 @@ node dist/index.js outage duration-stats \
 
 ---
 
-### 9. interconnector - Interconnector Forecasting
+### 10. interconnector - Interconnector Forecasting
 
 Manage and forecast interconnector flows and constraints.
 
-#### 9.1 interconnector import
+#### 10.1 interconnector import
 
 Import RTDHS interconnector data into database.
 
@@ -647,7 +680,7 @@ node dist/index.js interconnector import \
 | `-d, --data <path>` | RTDHS data path | Yes |
 | `--db <path>` | Database path | No (default: `./forecast.db`) |
 
-#### 9.2 interconnector stats
+#### 10.2 interconnector stats
 
 Show interconnector data statistics.
 
@@ -661,7 +694,7 @@ node dist/index.js interconnector stats \
 |------|-------------|----------|
 | `--db <path>` | Database path | No |
 
-#### 9.3 interconnector train
+#### 10.3 interconnector train
 
 Train interconnector constraint prediction model.
 
@@ -679,7 +712,7 @@ node dist/index.js interconnector train \
 | `--end <date>` | Training end date | Yes |
 | `--model <type>` | Model: `xgboost` or `regression` | No (default: `xgboost`) |
 
-#### 9.4 interconnector detect-constraints
+#### 10.4 interconnector detect-constraints
 
 Detect constraint patterns in interconnector data.
 
@@ -693,7 +726,7 @@ node dist/index.js interconnector detect-constraints \
 |------|-------------|----------|
 | `-d, --data <path>` | Interconnector data path | Yes |
 
-#### 9.5 interconnector forecast
+#### 10.5 interconnector forecast
 
 Generate interconnector flow forecasts.
 
@@ -713,11 +746,11 @@ node dist/index.js interconnector forecast \
 
 ---
 
-### 10. scheduler - Automated Forecast Scheduling
+### 11. scheduler - Automated Forecast Scheduling
 
 Run automated daily/weekly forecasts with calibration.
 
-#### 10.1 scheduler run
+#### 11.1 scheduler run
 
 Execute scheduled forecasts for a specific date.
 
@@ -770,7 +803,7 @@ output/forecasts/
     └── cfac_weekly.csv
 ```
 
-#### 10.2 scheduler backfill
+#### 11.2 scheduler backfill
 
 Generate forecasts for a historical date range.
 
@@ -795,7 +828,7 @@ node dist/index.js scheduler backfill \
 
 **All flags from `scheduler run` are also supported.**
 
-#### 10.3 scheduler history / status
+#### 11.3 scheduler history / status
 
 View scheduler run history and performance metrics.
 
@@ -813,7 +846,7 @@ node dist/index.js scheduler history -n 25
 | `--db <path>` | Database path | No |
 | `-n, --limit <number>` | Number of records to show | No (default: `10`) |
 
-#### 10.4 scheduler service
+#### 11.4 scheduler service
 
 Run scheduler as a background service.
 
@@ -834,208 +867,6 @@ node dist/index.js scheduler service \
 | `--interval <minutes>` | Check interval in minutes | No (default: `60`) |
 
 **All flags from `scheduler run` are also supported.**
-
----
-
-### 11. LSTM Training (Python) - Demand Correction Models
-
-Train enhanced LSTM models for zonal demand correction. Improves morning ramp dynamics, peak timing, and day-type transitions.
-
-#### Prerequisites
-
-**Install Python dependencies:**
-```bash
-pip install tensorflow pandas holidays
-```
-
-**Required:**
-- Python 3.8+
-- TensorFlow 2.x
-- Pandas
-- holidays library (for Philippines holiday detection)
-
-#### 11.1 Train Single Zone
-
-Train LSTM for a specific zone.
-
-```bash
-python scripts/train_demand_lstm.py \
-  --zone 01NLUZ \
-  --output models/lstm
-```
-
-**Flags:**
-| Flag | Description | Required |
-|------|-------------|----------|
-| `--zone <code>` | Zone code (e.g., 01NLUZ, 02METRO, 03SLUZ) | Yes |
-| `--output <dir>` | Output directory for model files | No (default: from config) |
-| `--config <path>` | Configuration file path | No (default: `config/lstm_config.json`) |
-| `--epochs <n>` | Training epochs | No (default: 100 from config) |
-
-**Output:**
-- Model weights: `models/lstm/lstm_01NLUZ_v2.json`
-- Training metrics in console
-
-#### 11.2 Train All Zones
-
-Train LSTM models for all 14 zones sequentially.
-
-```bash
-python scripts/train_demand_lstm.py \
-  --all \
-  --output models/lstm \
-  --epochs 100
-```
-
-**Flags:**
-| Flag | Description | Required |
-|------|-------------|----------|
-| `--all` | Train all 14 zones | Yes |
-| `--output <dir>` | Output directory | No |
-| `--config <path>` | Configuration file | No |
-| `--epochs <n>` | Training epochs | No |
-
-**Output:**
-- 14 model files: `models/lstm/lstm_<ZONE>_v2.json`
-- Training summary: `models/lstm/training_summary_v2.json`
-
-#### 11.3 Configuration Files
-
-**config/lstm_config.json** - LSTM training configuration
-```json
-{
-  "version": "2.0",
-  "training": {
-    "sequence_length": 48,
-    "batch_size": 64,
-    "epochs": 100,
-    "learning_rate": 0.0005
-  },
-  "model": {
-    "lstm_layers": [64, 32],
-    "dense_layers": [32, 16],
-    "correction_range": [0.85, 1.15]
-  },
-  "paths": {
-    "demand_data": "Data Samples/Demand",
-    "weather_cache": "weather_cache",
-    "output_models": "models/lstm"
-  }
-}
-```
-
-**src/data/zones.json** - Zone and city configuration
-```json
-{
-  "zones": [
-    {
-      "code": "01NLUZ",
-      "name": "Northern Luzon",
-      "cities": [
-        {"id": "01nluz_sanfernando", "name": "San Fernando", ...},
-        {"id": "01nluz_baguio", "name": "Baguio", ...},
-        ...
-      ],
-      "lstm_config": {
-        "enabled": true,
-        "notes": "Large geographic spread requires all 6 cities"
-      }
-    }
-  ]
-}
-```
-
-#### 11.4 Feature Engineering
-
-The LSTM trainer extracts 74-98 features per timestep:
-
-| Feature Group | Count | Description |
-|---------------|-------|-------------|
-| **Per-city weather** | 48 (6×8) | Temperature, humidity, cloudcover, solar radiation (×6 cities, zero-padded) |
-| **Aggregated weather** | 8 | Mean/max/spread temperature across cities, city coverage |
-| **Demand features** | 10 | Current demand, lags (1h/24h/168h), rolling averages, ramp rate |
-| **Temporal features** | 18 | Hour/day/month cyclical encoding, weekend/holiday/workday flags |
-| **Calendar features** | 8 | Philippines holidays, days until/since holiday, special periods |
-| **Seasonal features** | 6 | Wet/dry season (Jun-Nov/Mar-May/Dec-Feb), El Niño/La Niña |
-
-**Total features:**
-- 6-city zones (e.g., 01NLUZ): 98 features
-- 3-city zones (e.g., 02METRO): 74 features (with zero-padding to 6)
-
-#### 11.5 Model Architecture
-
-```
-LSTM(64, return_sequences=True)
-  ↓
-LSTM(32)
-  ↓
-Dense(32, relu) + Dropout(0.2)
-  ↓
-Dense(16, relu) + Dropout(0.1)
-  ↓
-Dense(1, sigmoid) → correction factor [0.85, 1.15]
-```
-
-**Training splits:**
-- Training: 70%
-- Validation: 20%
-- Test: 10%
-
-**Output:** Correction factor (0.85-1.15) to multiply against hybrid model base forecast.
-
-#### 11.6 Using Trained LSTM Models
-
-After training, use LSTM correction in demand forecasts:
-
-```bash
-# Regional forecast with LSTM
-node dist/index.js forecast \
-  -s 2025-12-01 \
-  -e 2025-12-31 \
-  -o output/demand_forecast.csv \
-  --model hybrid \
-  --lstm-correction
-
-# Zonal forecast with LSTM
-node dist/index.js forecast \
-  -s 2025-12-01 \
-  -e 2025-12-31 \
-  -o output/zonal_forecast.csv \
-  --zonal \
-  --lstm-correction
-```
-
-**LSTM correction requires:**
-- Trained model files in `models/lstm/lstm_<ZONE>_v2.json`
-- Multi-city weather data for the forecast period
-- Enabled via `--lstm-correction` flag
-
-#### 11.7 Zone Codes Reference
-
-| Region | Zone Code | Name | Cities |
-|--------|-----------|------|--------|
-| **Luzon** | 01NLUZ | Northern Luzon | 6 cities (San Fernando, Baguio, Tuguegarao, Laoag, Dagupan, Angeles) |
-| | 02METRO | Metro Manila | 3 cities (Manila, Quezon City, Makati) |
-| | 03SLUZ | Southern Luzon | 3 cities (Batangas, Lucena, Legazpi) |
-| **Visayas** | 04LEYTE | Leyte/Eastern Visayas | 3 cities (Tacloban, Ormoc, Catbalogan) |
-| | 05CEBU | Cebu | 3 cities (Cebu City, Mandaue, Lapu-Lapu) |
-| | 06NEGROS | Negros | 3 cities (Bacolod, Dumaguete, Kabankalan) |
-| | 07BOHOL | Bohol | 3 cities (Tagbilaran, Ubay, Talibon) |
-| | 08PANAY | Panay/Western Visayas | 3 cities (Iloilo, Roxas, Kalibo) |
-| **Mindanao** | 09NWMIN | Northwest Mindanao | 3 cities (Zamboanga, Pagadian, Dipolog) |
-| | 10LANAO | Lanao | 3 cities (Iligan, Marawi, Ozamiz) |
-| | 11NCMIN | North Central Mindanao | 3 cities (Cagayan de Oro, Malaybalay, Valencia) |
-| | 12NEMIN | Northeast Mindanao | 3 cities (Butuan, Surigao, Bislig) |
-| | 13SEMIN | Southeast Mindanao | 3 cities (Davao, Tagum, Panabo) |
-| | 14SWMIN | Southwest Mindanao | 3 cities (General Santos, Koronadal, Cotabato) |
-
-#### 11.8 Performance Metrics
-
-The LSTM correction layer improves:
-- **Morning ramp (6-9 AM)**: Correlation improvement from negative to positive
-- **Peak timing**: Reduced error from 3-5 hours to <1 hour
-- **Day transitions**: Better Friday→Saturday, weekend→workday patterns
-- **Overall MAPE**: Reduction depends on zone (typically 0.5-2% improvement)
 
 ---
 
@@ -1193,29 +1024,23 @@ node dist/index.js cfac evaluate \
   -a "Data Samples/Capacity Factor/actual.csv"
 ```
 
-### Zonal Forecast with LSTM Pipeline
+### Zonal Forecast Pipeline
 ```bash
-# 1. Train LSTM models for all zones (one-time setup)
-pip install tensorflow pandas holidays
-python scripts/train_demand_lstm.py --all --epochs 100
-
-# 2. Import zonal demand data to database
+# 1. Import zonal demand data to database
 node dist/index.js db import \
   -t demand \
-  -f "Data Samples/Demand" \
-  --db iload_zonal.db
+  -f "Data Samples/Demand"
 
-# 3. Generate zonal forecast with LSTM correction
+# 2. Generate zonal forecast (14 sub-regions)
 node dist/index.js forecast \
   -s 2025-12-01 -e 2025-12-31 \
-  -o output/zonal_lstm_forecast.csv \
+  -o output/zonal_forecast.csv \
   --zonal \
-  --lstm-correction \
   --use-db
 
-# 4. Evaluate against actuals
+# 3. Evaluate against actuals
 node dist/index.js evaluate \
-  -f output/zonal_lstm_forecast.csv \
+  -f output/zonal_forecast.csv \
   -a "Data Samples/Demand/zonal_actual.csv"
 ```
 
