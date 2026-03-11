@@ -5,7 +5,34 @@ All notable changes to the Vantage Forecaster project will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 2026-02-27
+## [Unreleased] - 2026-03-05
+
+### Added
+- **Geography-Based SFTP Routing for Demand Forecasts**
+  - Demand files now route to geography subdirectories based on filename detection
+  - Regional demand files (`FC_DEM_*`, `DA_DEM_*`, `WA_DEM_*`) → `/demand/regional/`
+  - Zonal demand files (`FC_ZDEM_*`, `DA_ZDEM_*`, `WA_ZDEM_*`) → `/demand/zonal/`
+  - MHCF paths unchanged (no geography split needed)
+  - New `isZonalDemandFile()` helper function for pattern detection
+
+- **Demand Mode Configuration (Scheduler)**
+  - Added `demandGeography` configuration option: `'regional'` | `'zonal'` | `'both'`
+  - Database migration adds `demand_geography` column to `scheduler_config` table
+  - Backward compatible with legacy `schedulerZonalEnabled` boolean settings
+
+- **GUI Demand Mode Dropdown**
+  - Converted boolean zonal toggle to dropdown in Automation Settings
+  - Options: "Regional (3)", "Zonal (14)", "Both"
+  - Only visible when Demand forecasting is enabled
+
+### Changed
+- **SFTP Push Service**
+  - `getRemoteDirectory()` now routes demand files to geography subdirectories
+  - Updated `testGatewayConnection()` to verify new directory structure
+
+- **Scheduler Service**
+  - Added `demand_geography` field to `SchedulerConfigDB` interface
+  - Config methods handle new geography setting with `'regional'` default
 
 ### Added
 - **Scheduler Configuration Management**

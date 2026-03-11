@@ -73,8 +73,48 @@ export class DatabaseService {
     const stmt = this.db.prepare('INSERT OR IGNORE INTO schema_info (key, value) VALUES (?, ?)');
     stmt.run('version', String(SCHEMA_VERSION));
 
+    // Run migrations for existing databases
+    this.runMigrations();
+
     // Initialize interconnector metadata
     this.initializeInterconnectorMetadata();
+  }
+
+  /**
+   * Run migrations to add missing columns to existing tables.
+   * This handles cases where the database was created with an older schema.
+   */
+  private runMigrations(): void {
+    // Migration: Add 'location' column to weather_records if missing
+    // (older schema used 'region' as the unique key, newer uses 'location' for zonal support)
+    try {
+      const weatherColumns = this.db.prepare("PRAGMA table_info(weather_records)").all() as { name: string }[];
+      const weatherColNames = weatherColumns.map(c => c.name);
+
+      if (!weatherColNames.includes('location')) {
+        // Add location column - default to region value for existing records
+        this.db.exec('ALTER TABLE weather_records ADD COLUMN location TEXT');
+        // Update existing records to use region as location
+        this.db.exec('UPDATE weather_records SET location = region WHERE location IS NULL');
+      }
+    } catch (e) {
+      // Table may not exist yet (will be created by CREATE_TABLES_SQL)
+    }
+
+    // Migration: Add 'source' column to weather_records if missing
+    try {
+      const weatherColumns = this.db.prepare("PRAGMA table_info(weather_records)").all() as { name: string }[];
+      const weatherColNames = weatherColumns.map(c => c.name);
+
+      if (!weatherColNames.includes('source')) {
+        this.db.exec('ALTER TABLE weather_records ADD COLUMN source TEXT');
+      }
+      if (!weatherColNames.includes('imported_at')) {
+        this.db.exec('ALTER TABLE weather_records ADD COLUMN imported_at TEXT DEFAULT CURRENT_TIMESTAMP');
+      }
+    } catch (e) {
+      // Ignore errors
+    }
   }
 
   // ============ DEMAND RECORDS ============
@@ -83,7 +123,7 @@ export class DatabaseService {
     const insertStmt = this.db.prepare(`
       INSERT INTO demand_records (datetime, region, demand, source_file)
       VALUES (?, ?, ?, ?)
-      ON CONFLICT(datetime, location) DO UPDATE SET
+      ON CONFLICT(datetime, region) DO UPDATE SET
         demand = excluded.demand,
         source_file = excluded.source_file,
         imported_at = CURRENT_TIMESTAMP

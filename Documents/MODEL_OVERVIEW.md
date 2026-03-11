@@ -603,5 +603,4 @@ node dist/index.js cfac forecast2 -t "Data Samples/Capacity Factor" \
   --use-xgboost --asymmetric-loss --bias-correction
 ```
 
-For detailed command reference, see `CLI_REFERENCE.md`.
-For methodology explanation, see `METHODOLOGY_REPORT.md`.
+For detailed command reference, see `CLI_GUIDE.md`.

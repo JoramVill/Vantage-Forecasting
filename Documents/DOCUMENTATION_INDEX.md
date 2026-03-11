@@ -1,126 +1,80 @@
 # Vantage Forecaster - Documentation Index
 
-This index provides an overview of all documentation for Vantage Forecaster.
+**For AI Agents:** Start with `../CLAUDE.md` for quick reference, then use this index.
 
 ---
 
-## Getting Started
+## Quick Navigation
 
-| Document | Description |
-|----------|-------------|
-| [QUICK_START.md](QUICK_START.md) | 5-minute guide to running your first forecast |
-| [GUI_GUIDE.md](GUI_GUIDE.md) | Desktop GUI user manual with CLI command mappings |
-| [CLI_GUIDE.md](CLI_GUIDE.md) | Complete CLI reference for all commands |
-
----
-
-## Core Documentation
-
-| Document | Description |
-|----------|-------------|
-| [USER_GUIDE.md](USER_GUIDE.md) | Comprehensive workflows, examples, and best practices |
-| [MODEL_OVERVIEW.md](MODEL_OVERVIEW.md) | Forecasting model descriptions and performance metrics |
-| [TECHNICAL_OVERVIEW.md](TECHNICAL_OVERVIEW.md) | Architecture, data flow, and implementation details |
+| I want to... | Start here |
+|--------------|------------|
+| Run my first forecast | [QUICK_START.md](QUICK_START.md) |
+| Use the desktop GUI | [GUI_GUIDE.md](GUI_GUIDE.md) |
+| Use CLI commands | [CLI_GUIDE.md](CLI_GUIDE.md) or [../CLAUDE.md](../CLAUDE.md) |
+| Deploy to users | [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) |
+| Understand the models | [MODEL_OVERVIEW.md](MODEL_OVERVIEW.md) |
+| Work on the codebase | [AI_AGENT_GUIDE.md](AI_AGENT_GUIDE.md) |
 
 ---
 
-## Reference
+## All Documents
 
 | Document | Description |
 |----------|-------------|
-| [AI_AGENT_GUIDE.md](AI_AGENT_GUIDE.md) | Guide for AI assistants working with this codebase |
-| [../CLAUDE.md](../CLAUDE.md) | Project instructions and quick reference for Claude Code |
-
----
-
-## Specialized Topics
-
-### Interconnector Analysis
-| Document | Description |
-|----------|-------------|
-| [interconnector_analysis/INTERCONNECTOR_FINAL_SUMMARY.md](interconnector_analysis/INTERCONNECTOR_FINAL_SUMMARY.md) | Final report on interconnector constraint prediction |
-| [interconnector_analysis/MODEL_COMPARISON_REPORT.md](interconnector_analysis/MODEL_COMPARISON_REPORT.md) | Comparison of interconnector prediction models |
-| [interconnector_analysis/VISLUZ1_EXECUTIVE_SUMMARY.md](interconnector_analysis/VISLUZ1_EXECUTIVE_SUMMARY.md) | VISLUZ1 interconnector analysis summary |
-
-### Planning Documents
-| Document | Description |
-|----------|-------------|
-| [planning/context.md](planning/context.md) | Current development context and progress |
-| [planning/MREC_ML_HYBRID_DESIGN.md](planning/MREC_ML_HYBRID_DESIGN.md) | MREC + ML hybrid model design |
-| [planning/IPOOL_WIND_MREC_ANALYSIS.md](planning/IPOOL_WIND_MREC_ANALYSIS.md) | Wind MREC algorithm analysis |
-
-### Future Development
-| Document | Description |
-|----------|-------------|
-| [DEEP_TRAINING_SPECIFICATION.md](DEEP_TRAINING_SPECIFICATION.md) | **[PROPOSAL]** Deep Training system - automated algorithm generation and optimization per station/zone |
-
----
-
-## Document Purposes by Use Case
-
-### "I want to run a forecast quickly"
-1. [QUICK_START.md](QUICK_START.md) - Minimal setup instructions
-2. [GUI_GUIDE.md](GUI_GUIDE.md) - Use the desktop GUI (easiest)
-
-### "I need to understand CLI commands"
-1. [CLI_GUIDE.md](CLI_GUIDE.md) - Complete command reference
-2. [GUI_GUIDE.md](GUI_GUIDE.md) - See "CLI Command Mapping" section
-
-### "I want to understand the forecasting models"
-1. [MODEL_OVERVIEW.md](MODEL_OVERVIEW.md) - Model descriptions and performance
-2. [TECHNICAL_OVERVIEW.md](TECHNICAL_OVERVIEW.md) - Implementation details
-
-### "I need to integrate this with other systems"
-1. [TECHNICAL_OVERVIEW.md](TECHNICAL_OVERVIEW.md) - Architecture and data formats
-2. [CLI_GUIDE.md](CLI_GUIDE.md) - Command-line automation
-
-### "I'm developing or maintaining this codebase"
-1. [AI_AGENT_GUIDE.md](AI_AGENT_GUIDE.md) - Code structure and conventions
-2. [TECHNICAL_OVERVIEW.md](TECHNICAL_OVERVIEW.md) - Architecture deep-dive
-3. [../CLAUDE.md](../CLAUDE.md) - Quick reference for common operations
-
----
-
-## GUI vs CLI Quick Reference
-
-| Task | GUI | CLI |
-|------|-----|-----|
-| Demand forecast (regional) | Enable Demand, disable Zonal | `forecast -d <path> -s <date> -e <date> -o <file>` |
-| Demand forecast (zonal) | Enable Demand + Zonal | `forecast -d <path> --zonal -s <date> -e <date> -o <file>` |
-| Capacity factor forecast | Enable CFAC | `cfac forecast2 -t <path> -s <date> -e <date> -o <file>` |
-| View database info | Select database, view info panel | `db status --db <path>` |
-| Import to database | Update Database → select type | `db import -t <type> -f <path> --db <path>` |
+| [QUICK_START.md](QUICK_START.md) | 5-minute getting started guide |
+| [CLI_GUIDE.md](CLI_GUIDE.md) | Complete CLI command reference |
+| [GUI_GUIDE.md](GUI_GUIDE.md) | Desktop GUI user manual |
+| [MODEL_OVERVIEW.md](MODEL_OVERVIEW.md) | Forecasting models and performance |
+| [TECHNICAL_OVERVIEW.md](TECHNICAL_OVERVIEW.md) | Architecture and code structure |
+| [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) | Building portable Windows distributions |
+| [AI_AGENT_GUIDE.md](AI_AGENT_GUIDE.md) | Onboarding guide for AI agents |
+| [GATEWAY_FILE_SPECIFICATION.md](GATEWAY_FILE_SPECIFICATION.md) | Gateway file format and naming |
+| [FORECAST_FILE_API_SPEC.md](FORECAST_FILE_API_SPEC.md) | Forecast file API specification |
+| [../CLAUDE.md](../CLAUDE.md) | **Primary reference** - Commands, models, architecture |
 
 ---
 
 ## Key Concepts
 
-### Data Modes
-
-| Mode | Database | CSV |
-|------|----------|-----|
-| **Regional** | `iload.db` with 3 regions (CLUZ, CVIS, CMIN) | CSVs with regional columns |
-| **Zonal** | `iload_zonal.db` with 14 zones | CSVs with zone columns (01NLUZ, 02METRO, etc.) |
-
 ### Forecast Types
 
-| Type | Purpose | Model |
-|------|---------|-------|
-| **Demand** | Electricity load prediction | Hybrid (XGBoost + statistical profiles) |
-| **CFAC** | Capacity factor for renewables | Wind: 4-Tier Hybrid, Solar: Physics+ML |
+| Type | Model | Typical Accuracy |
+|------|-------|------------------|
+| Demand | Hybrid (XGBoost + profiles) | 2-4% MAPE |
+| Wind CFAC | 4-Tier Hybrid | ~73% MAPE |
+| Solar CFAC | Physics+ML | ~16% MAPE |
 
-### Output Files
+### Data Modes
 
-| Type | Default Prefix | Example |
-|------|----------------|---------|
-| Regional demand | `FC_DEM_` | `FC_DEM_2025-12-01_2025-12-31.csv` |
-| Zonal demand | `FC_ZDEM_` | `FC_ZDEM_2025-12-01_2025-12-31.csv` |
-| Capacity factor | `FC_CF_` | `FC_CF_2025-12-01_2025-12-31.csv` |
+| Mode | Regions | Database |
+|------|---------|----------|
+| Regional | 3 (CLUZ, CVIS, CMIN) | `iload.db` |
+| Zonal | 14 sub-regions | `iload_zonal.db` |
 
 ---
 
-## Version Information
+## Common Commands
 
-- **CLI Version**: 1.0.0
-- **GUI Version**: 2.0.0
-- **Last Updated**: February 2026
+```bash
+# Demand forecast
+node dist/index.js forecast -d "Data Samples/Demand" -s 2026-01-01 -e 2026-01-31 -o output/demand.csv
+
+# Capacity factor forecast
+node dist/index.js cfac forecast2 -t "Data Samples/Capacity Factor" -s 2026-01-01 -e 2026-01-31 -o output/cfac.csv
+
+# Scheduler
+node dist/index.js scheduler run
+
+# Build portable distribution
+node scripts/build-portable.cjs --zip --clean
+```
+
+---
+
+## Archived Documents
+
+Historical planning documents, analysis reports, and outdated guides are in `Documents/archive/`.
+
+---
+
+**Last Updated:** March 2026

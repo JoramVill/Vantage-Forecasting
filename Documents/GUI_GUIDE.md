@@ -100,8 +100,20 @@ Click "Update Database" to import new data:
 | **Enable Demand Forecast** | Generate demand predictions | Enabled |
 | **Enable CFAC Forecast** | Generate capacity factor predictions | Enabled |
 | **CFAC Model** | Select forecasting model (Hybrid or Legacy XGBoost) | Hybrid |
-| **Enable Zonal Mode** | Use 14-zone instead of 3-region format | Disabled (auto-detected) |
+| **Demand Mode** | Select geography mode (Regional, Zonal, or Both) | Regional |
 | **Scaling Percentage** | Scale output values (for growth scenarios) | 100% |
+
+### Demand Mode Selection
+
+When Demand forecast is enabled, you can choose between three modes:
+
+| Mode | Description | Output Files |
+|------|-------------|--------------|
+| **Regional (3)** | 3-region format (CLUZ, CVIS, CMIN) | `FC_DEM_*.csv` |
+| **Zonal (14)** | 14-zone format (01NLUZ through 14SWMIN) | `FC_ZDEM_*.csv` |
+| **Both** | Generate both regional and zonal forecasts | Both file types |
+
+**Note:** When "Both" is selected, the scheduler generates two forecast files per run - one regional and one zonal. This is useful when different downstream systems require different granularities.
 
 ### CFAC Model Selection
 
@@ -116,6 +128,19 @@ When CFAC forecast is enabled, you can choose between three models:
 **Hybrid is recommended** for most use cases as it combines physics-based predictions with machine learning correction for best accuracy.
 
 **Hybrid + LSTM Correction** adds an optional LSTM neural network layer that learns to correct hybrid predictions based on weather sequences. This can improve temporal dynamics like morning ramp patterns, though it increases training time.
+
+### SFTP Gateway Routing
+
+Demand files are automatically routed to geography-specific directories when pushed to the gateway:
+
+| File Pattern | Gateway Path |
+|--------------|--------------|
+| `FC_DEM_*`, `DA_DEM_*` | `/day-ahead/demand/regional/` |
+| `FC_ZDEM_*`, `DA_ZDEM_*` | `/day-ahead/demand/zonal/` |
+| `WA_DEM_*` | `/week-ahead/demand/regional/` |
+| `WA_ZDEM_*` | `/week-ahead/demand/zonal/` |
+
+MHCF (capacity factor) files are not split by geography and go directly to `/day-ahead/mhcf/` or `/week-ahead/mhcf/`.
 
 ### Date Range
 

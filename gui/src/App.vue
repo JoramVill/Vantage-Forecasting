@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch, toRaw } from 'vue';
 
 // Data source
 const dataSource = ref<'database' | 'csv'>('csv');
@@ -30,16 +30,21 @@ const forecastStart = ref('');
 const forecastEnd = ref('');
 
 // Tab navigation
-const activeTab = ref<'manual' | 'scheduler'>('manual');
+const activeTab = ref<'manual' | 'scheduler' | 'gateway' | 'settings'>('manual');
 
 // Forecast options
 const enableDemand = ref(true);
 const enableCfac = ref(true);
 const enableZonal = ref(false);
 const scalingPercent = ref(100);
+const scalingWind = ref(100); // Per-type scaling for wind
+const scalingSolar = ref(100); // Per-type scaling for solar
+const usePerTypeScaling = ref(false); // Enable per-type scaling mode
 const cfacModel = ref<'hybrid' | 'hybrid-lstm' | 'legacy'>('hybrid'); // Hybrid (physics + ML) is the best performer
 const demandModel = ref<'hybrid' | 'hybrid-calibrated'>('hybrid-calibrated'); // Hybrid + XGBoost calibration is best (4.77% MAPE)
 const pushToGateway = ref(false); // Push forecasts to Vantage-Gateway server
+const demandGrowthRate = ref(0); // Daily demand growth rate (e.g., 0.001 = 0.1%)
+const trainingEndDate = ref(''); // Optional training data cutoff date
 
 // Scheduler state - OLD (legacy, not used by new scheduler tab)
 // const schedulerMode = ref<'run' | 'backfill'>('run');
@@ -50,18 +55,46 @@ const schedulerDailyEnabled = ref(true);
 const schedulerWeeklyEnabled = ref(true);
 const schedulerDemandEnabled = ref(true);
 const schedulerCfacEnabled = ref(true);
-const schedulerZonalEnabled = ref(false);
-const schedulerDemandPath = ref('Data Samples/Demand');
-const schedulerCfacPath = ref('Data Samples/Capacity Factor');
+const schedulerDemandGeography = ref<'regional' | 'zonal' | 'both'>('regional');
 const schedulerOutputDir = ref('output/forecasts');
-const schedulerDbPath = ref('./forecast.db');
+// Scheduler data source removed - now uses global settings
+
+// ============ GLOBAL SETTINGS (Settings Tab) ============
+// Database paths (global - used by all tabs)
+const globalRegionalDemandDb = ref('data/iload.db');
+const globalZonalDemandDb = ref('data/iload_zonal.db');
+const globalSchedulerDb = ref('./forecast.db');
+// CSV source directories (global - used for auto-import and manual import)
+const globalDemandCsvPath = ref('Data Samples/Demand');
+const globalCfacCsvPath = ref('Data Samples/Capacity Factor');
+// Cache directories
+const globalWeatherCacheDir = ref('./weather_cache');
+// Output directory override for scheduler
+const globalSchedulerOutputDir = ref('./output/forecasts');
+// Auto-import settings
+const autoImportBeforeRun = ref(true);
+const autoFetchWeather = ref(true);
 const schedulerDemandModel = ref<'hybrid' | 'regression' | 'xgboost'>('hybrid');
-const schedulerUseXgboost = ref(false);
-const schedulerAsymmetricLoss = ref(false);
-const schedulerBiasCorrection = ref(false);
+// CFAC Model Settings - per station type (Wind and Solar have different optimal settings)
+// Wind defaults: OFF (4-Tier Hybrid achieves ~73% MAPE with defaults)
+const windUseXgboost = ref(false);
+const windAsymmetricLoss = ref(false);
+const windBiasCorrection = ref(false);
+// Solar defaults: XGBoost + Asymmetric ON (43% bias reduction, ~16% MAPE)
+const solarUseXgboost = ref(true);
+const solarAsymmetricLoss = ref(true);
+const solarBiasCorrection = ref(false);
+// Legacy global settings (kept for backward compatibility, now computed from per-type)
+const schedulerUseXgboost = computed(() => windUseXgboost.value || solarUseXgboost.value);
+const schedulerAsymmetricLoss = computed(() => windAsymmetricLoss.value || solarAsymmetricLoss.value);
+const schedulerBiasCorrection = computed(() => windBiasCorrection.value || solarBiasCorrection.value);
 const schedulerCalibDays = ref(7);
 const schedulerCalibThreshold = ref(5);
 const schedulerMaxIterations = ref(3);
+// Calibration settings (0 = no calibration, 1-10 = iterations)
+const calibrationIterations = ref(3);
+// Data source toggle: 'database' or 'csv'
+const schedulerDataSource = ref<'database' | 'csv'>('database');
 const schedulerIsRunning = ref(false);
 const schedulerProgress = ref(0);
 const schedulerStatusHistory = ref<Array<{ time: string; message: string; type: 'info' | 'success' | 'error' }>>([]);
@@ -77,10 +110,6 @@ const schedulerDemandZonalPrefix = ref('FC_ZDEM_');
 const schedulerCfacPrefix = ref('FC_CF_');
 const schedulerOutputSuffix = ref('');
 
-// Scheduler training mode
-const schedulerTrainingMode = ref<'auto' | 'saved'>('auto'); // auto = train on-the-fly, saved = use pre-trained model
-const schedulerSelectedCalibrator = ref<string>('');
-
 // Scheduler configuration (for service automation)
 interface SchedulerConfig {
   enabled: boolean;
@@ -92,6 +121,7 @@ interface SchedulerConfig {
   forecastCfac: boolean;
   horizonDaily: boolean;
   horizonWeekly: boolean;
+  demandGeography: 'regional' | 'zonal' | 'both';  // Geography mode for demand forecasts
   weatherMaxAge: number;
   autoPushGateway: boolean;
   archiveRetention: number;
@@ -105,7 +135,52 @@ interface ForecastRun {
   status: string;
   records_generated: number;
   pushed_to_gateway: boolean;
+  created_at: string;
 }
+
+// Gateway configuration (for SFTP push to vantage-gateway server)
+interface GatewayConfig {
+  host: string;
+  port: number;
+  username: string;
+  password: string;
+}
+
+const gatewayConfig = ref<GatewayConfig>({
+  host: '100.115.9.94',
+  port: 22,
+  username: 'vantage-upload',
+  password: ''
+});
+const gatewayTestStatus = ref<'idle' | 'testing' | 'success' | 'error'>('idle');
+const gatewayTestMessage = ref('');
+
+// Gateway Storage Management
+interface StorageCategory {
+  files: number;
+  size: number;
+  sizeFormatted: string;
+  oldest: string;
+  newest: string;
+}
+interface StorageStats {
+  categories: Record<string, StorageCategory>;
+  totalFiles: number;
+  totalSize: number;
+  totalSizeFormatted: string;
+  oldestFile: string;
+  newestFile: string;
+}
+const gatewayStorageStats = ref<StorageStats | null>(null);
+const gatewayStorageLoading = ref(false);
+const gatewayStorageError = ref('');
+const gatewayArchiveDays = ref(30);
+const gatewayArchiveLoading = ref(false);
+const gatewayClearDays = ref(90);
+const gatewayClearLoading = ref(false);
+const gatewayClearConfirm = ref(false);
+const gatewayActionMessage = ref('');
+const gatewayActionType = ref<'success' | 'error' | ''>('');
 
 const schedulerConfig = ref<SchedulerConfig>({
   enabled: false,
@@ -117,14 +192,46 @@ const schedulerConfig = ref<SchedulerConfig>({
   forecastCfac: true,
   horizonDaily: true,
   horizonWeekly: true,
+  demandGeography: 'regional',
   weatherMaxAge: 6,
   autoPushGateway: false,
   archiveRetention: 90
 });
 const recentRuns = ref<ForecastRun[]>([]);
 const manualRunDate = ref('');
+const manualRunEndDate = ref(''); // Optional end date for backfill range
 const manualRunType = ref<'both' | 'demand' | 'cfac'>('both');
 const manualRunHorizon = ref<'both' | 'daily' | 'weekly'>('both');
+const schedulerCalibrationMode = ref<'auto' | 'saved' | 'reuse'>('auto'); // auto = calibrate on-the-fly, saved = use saved model, reuse = use saved calibration
+const schedulerSelectedCalibrator = ref<string>('');
+const schedulerCalibrationPeriod = ref<'14days' | '1month' | '2months' | '3months'>('1month'); // How much data to use for calibration
+const schedulerVerboseOutput = ref(true); // Show detailed progress in terminal (default: true)
+const schedulerRefreshWeather = ref(false); // Force weather cache refresh
+const schedulerOverwrite = ref(false); // Overwrite existing forecasts (backfill mode)
+const schedulerSuffix = ref(''); // Custom suffix for backfill filenames
+
+// Saved calibrations (for 'reuse' mode - skip recalibration)
+interface SavedCalibration {
+  id: number;
+  date: string;
+  periodStart: string;
+  periodEnd: string;
+  windScale: number;
+  solarScale: number;
+  windDeviation: number;
+  solarDeviation: number;
+  demandMape: number;
+  demandPeakScale: number;
+  demandOffpeakScale: number;
+  converged: boolean;
+  iterations: number;
+  createdAt: string;
+}
+const savedCalibrations = ref<SavedCalibration[]>([]);
+const selectedCalibrationId = ref<number | null>(null);
+
+// Terminal panel tabs (for scheduler tab - switch between terminal output and recent runs)
+const terminalPanelTab = ref<'terminal' | 'runs'>('terminal');
 
 // Calibration settings (for hybrid-calibrated mode)
 const calibrationMode = ref<'auto' | 'saved'>('auto'); // auto = train on-the-fly, saved = use saved model
@@ -159,6 +266,35 @@ const statusHistory = ref<Array<{ time: string; message: string; type: 'info' | 
 
 // Terminal panel state
 const terminalExpanded = ref(false);
+const terminalHeight = ref(300); // Default expanded height in pixels
+const isResizing = ref(false);
+const minTerminalHeight = 100;
+const maxTerminalHeight = 600;
+
+// Terminal resize handlers
+function startTerminalResize(e: MouseEvent) {
+  e.preventDefault();
+  isResizing.value = true;
+  document.addEventListener('mousemove', handleTerminalResize);
+  document.addEventListener('mouseup', stopTerminalResize);
+}
+
+function handleTerminalResize(e: MouseEvent) {
+  if (!isResizing.value) return;
+  const windowHeight = window.innerHeight;
+  const newHeight = windowHeight - e.clientY;
+  terminalHeight.value = Math.max(minTerminalHeight, Math.min(maxTerminalHeight, newHeight));
+  // Auto-expand if user is resizing
+  if (!terminalExpanded.value && terminalHeight.value > 60) {
+    terminalExpanded.value = true;
+  }
+}
+
+function stopTerminalResize() {
+  isResizing.value = false;
+  document.removeEventListener('mousemove', handleTerminalResize);
+  document.removeEventListener('mouseup', stopTerminalResize);
+}
 
 // Save settings to persistent storage
 function saveSettings() {
@@ -197,18 +333,29 @@ function saveSettings() {
     schedulerWeeklyEnabled: schedulerWeeklyEnabled.value,
     schedulerDemandEnabled: schedulerDemandEnabled.value,
     schedulerCfacEnabled: schedulerCfacEnabled.value,
-    schedulerZonalEnabled: schedulerZonalEnabled.value,
-    schedulerDemandPath: schedulerDemandPath.value,
-    schedulerCfacPath: schedulerCfacPath.value,
+    schedulerDemandGeography: schedulerDemandGeography.value,
     schedulerOutputDir: schedulerOutputDir.value,
-    schedulerDbPath: schedulerDbPath.value,
+    // Global settings
+    globalRegionalDemandDb: globalRegionalDemandDb.value,
+    globalZonalDemandDb: globalZonalDemandDb.value,
+    globalSchedulerDb: globalSchedulerDb.value,
+    globalDemandCsvPath: globalDemandCsvPath.value,
+    globalCfacCsvPath: globalCfacCsvPath.value,
+    autoImportBeforeRun: autoImportBeforeRun.value,
+    autoFetchWeather: autoFetchWeather.value,
     schedulerDemandModel: schedulerDemandModel.value,
-    schedulerUseXgboost: schedulerUseXgboost.value,
-    schedulerAsymmetricLoss: schedulerAsymmetricLoss.value,
-    schedulerBiasCorrection: schedulerBiasCorrection.value,
+    // Per-type CFAC settings (Wind and Solar have different optimal configurations)
+    windUseXgboost: windUseXgboost.value,
+    windAsymmetricLoss: windAsymmetricLoss.value,
+    windBiasCorrection: windBiasCorrection.value,
+    solarUseXgboost: solarUseXgboost.value,
+    solarAsymmetricLoss: solarAsymmetricLoss.value,
+    solarBiasCorrection: solarBiasCorrection.value,
     schedulerCalibDays: schedulerCalibDays.value,
     schedulerCalibThreshold: schedulerCalibThreshold.value,
     schedulerMaxIterations: schedulerMaxIterations.value,
+    calibrationIterations: calibrationIterations.value,
+    schedulerDataSource: schedulerDataSource.value,
     // New scheduler settings
     schedulerTimes: [...schedulerTimes.value],
     schedulerAutoEnabled: schedulerAutoEnabled.value,
@@ -216,13 +363,29 @@ function saveSettings() {
     schedulerDemandZonalPrefix: schedulerDemandZonalPrefix.value,
     schedulerCfacPrefix: schedulerCfacPrefix.value,
     schedulerOutputSuffix: schedulerOutputSuffix.value,
-    schedulerTrainingMode: schedulerTrainingMode.value,
     schedulerSelectedCalibrator: schedulerSelectedCalibrator.value,
+    // Auto calibration settings
+    schedulerCalibrationMode: schedulerCalibrationMode.value,
+    schedulerCalibrationPeriod: schedulerCalibrationPeriod.value,
+    selectedCalibrationId: selectedCalibrationId.value,
+    // New global settings
+    globalWeatherCacheDir: globalWeatherCacheDir.value,
+    globalSchedulerOutputDir: globalSchedulerOutputDir.value,
+    // Scheduler backfill options
+    schedulerRefreshWeather: schedulerRefreshWeather.value,
+    schedulerOverwrite: schedulerOverwrite.value,
+    schedulerSuffix: schedulerSuffix.value,
+    // Manual forecast advanced options
+    scalingWind: scalingWind.value,
+    scalingSolar: scalingSolar.value,
+    usePerTypeScaling: usePerTypeScaling.value,
+    demandGrowthRate: demandGrowthRate.value,
+    trainingEndDate: trainingEndDate.value,
   });
 }
 
-// Watch for settings changes and persist them (schedulerMode removed - legacy)
-watch([dataSource, databasePath, demandDataDir, cfacDataDir, weatherDataDir, demandOutputDir, cfacOutputDir, enableDemand, enableCfac, enableZonal, scalingPercent, cfacModel, demandModel, pushToGateway, calibrationMode, selectedCalibrator, saveCalibrator, demandPrefix, demandZonalPrefix, cfacPrefix, outputSuffix, useCustomName, customDemandName, customCfacName, activeTab, schedulerDailyEnabled, schedulerWeeklyEnabled, schedulerDemandEnabled, schedulerCfacEnabled, schedulerZonalEnabled, schedulerDemandPath, schedulerCfacPath, schedulerOutputDir, schedulerDbPath, schedulerDemandModel, schedulerUseXgboost, schedulerAsymmetricLoss, schedulerBiasCorrection, schedulerCalibDays, schedulerCalibThreshold, schedulerMaxIterations], () => {
+// Watch for settings changes and persist them
+watch([dataSource, databasePath, demandDataDir, cfacDataDir, weatherDataDir, demandOutputDir, cfacOutputDir, enableDemand, enableCfac, enableZonal, scalingPercent, scalingWind, scalingSolar, usePerTypeScaling, cfacModel, demandModel, pushToGateway, demandGrowthRate, trainingEndDate, calibrationMode, selectedCalibrator, saveCalibrator, demandPrefix, demandZonalPrefix, cfacPrefix, outputSuffix, useCustomName, customDemandName, customCfacName, activeTab, schedulerDailyEnabled, schedulerWeeklyEnabled, schedulerDemandEnabled, schedulerCfacEnabled, schedulerDemandGeography, schedulerOutputDir, schedulerDemandModel, windUseXgboost, windAsymmetricLoss, windBiasCorrection, solarUseXgboost, solarAsymmetricLoss, solarBiasCorrection, schedulerCalibDays, schedulerCalibThreshold, schedulerMaxIterations, schedulerCalibrationMode, schedulerCalibrationPeriod, schedulerRefreshWeather, schedulerOverwrite, schedulerSuffix, globalRegionalDemandDb, globalZonalDemandDb, globalSchedulerDb, globalDemandCsvPath, globalCfacCsvPath, globalWeatherCacheDir, globalSchedulerOutputDir, autoImportBeforeRun, autoFetchWeather], () => {
   saveSettings();
 });
 
@@ -274,25 +437,67 @@ onMounted(async () => {
     if (settings.customDemandName) customDemandName.value = settings.customDemandName;
     if (settings.customCfacName) customCfacName.value = settings.customCfacName;
     // Tab state
-    if (settings.activeTab === 'manual' || settings.activeTab === 'scheduler') activeTab.value = settings.activeTab;
+    if (settings.activeTab === 'manual' || settings.activeTab === 'scheduler' || settings.activeTab === 'gateway' || settings.activeTab === 'settings') activeTab.value = settings.activeTab;
     // Scheduler settings (schedulerMode removed - legacy)
     // if (settings.schedulerMode === 'run' || settings.schedulerMode === 'backfill') schedulerMode.value = settings.schedulerMode;
     if (typeof settings.schedulerDailyEnabled === 'boolean') schedulerDailyEnabled.value = settings.schedulerDailyEnabled;
     if (typeof settings.schedulerWeeklyEnabled === 'boolean') schedulerWeeklyEnabled.value = settings.schedulerWeeklyEnabled;
     if (typeof settings.schedulerDemandEnabled === 'boolean') schedulerDemandEnabled.value = settings.schedulerDemandEnabled;
     if (typeof settings.schedulerCfacEnabled === 'boolean') schedulerCfacEnabled.value = settings.schedulerCfacEnabled;
-    if (typeof settings.schedulerZonalEnabled === 'boolean') schedulerZonalEnabled.value = settings.schedulerZonalEnabled;
-    if (settings.schedulerDemandPath) schedulerDemandPath.value = settings.schedulerDemandPath;
-    if (settings.schedulerCfacPath) schedulerCfacPath.value = settings.schedulerCfacPath;
+    // Load demandGeography with backward compatibility from schedulerZonalEnabled
+    if (settings.schedulerDemandGeography === 'regional' || settings.schedulerDemandGeography === 'zonal' || settings.schedulerDemandGeography === 'both') {
+      schedulerDemandGeography.value = settings.schedulerDemandGeography;
+    } else if (typeof settings.schedulerZonalEnabled === 'boolean') {
+      // Backward compatibility: convert old boolean to new value
+      schedulerDemandGeography.value = settings.schedulerZonalEnabled ? 'zonal' : 'regional';
+    }
     if (settings.schedulerOutputDir) schedulerOutputDir.value = settings.schedulerOutputDir;
-    if (settings.schedulerDbPath) schedulerDbPath.value = settings.schedulerDbPath;
+    // Global settings
+    if (settings.globalRegionalDemandDb) globalRegionalDemandDb.value = settings.globalRegionalDemandDb;
+    if (settings.globalZonalDemandDb) globalZonalDemandDb.value = settings.globalZonalDemandDb;
+    if (settings.globalSchedulerDb) globalSchedulerDb.value = settings.globalSchedulerDb;
+    if (settings.globalDemandCsvPath) globalDemandCsvPath.value = settings.globalDemandCsvPath;
+    if (settings.globalCfacCsvPath) globalCfacCsvPath.value = settings.globalCfacCsvPath;
+    if (typeof settings.autoImportBeforeRun === 'boolean') autoImportBeforeRun.value = settings.autoImportBeforeRun;
+    if (typeof settings.autoFetchWeather === 'boolean') autoFetchWeather.value = settings.autoFetchWeather;
+    // Backwards compatibility: migrate old scheduler paths to global
+    if (!settings.globalDemandCsvPath && settings.schedulerDemandPath) {
+      globalDemandCsvPath.value = settings.schedulerDemandPath;
+    }
+    if (!settings.globalCfacCsvPath && settings.schedulerCfacPath) {
+      globalCfacCsvPath.value = settings.schedulerCfacPath;
+    }
+    if (!settings.globalSchedulerDb && settings.schedulerDbPath) {
+      globalSchedulerDb.value = settings.schedulerDbPath;
+    }
     if (settings.schedulerDemandModel) schedulerDemandModel.value = settings.schedulerDemandModel;
-    if (typeof settings.schedulerUseXgboost === 'boolean') schedulerUseXgboost.value = settings.schedulerUseXgboost;
-    if (typeof settings.schedulerAsymmetricLoss === 'boolean') schedulerAsymmetricLoss.value = settings.schedulerAsymmetricLoss;
-    if (typeof settings.schedulerBiasCorrection === 'boolean') schedulerBiasCorrection.value = settings.schedulerBiasCorrection;
+    // Load per-type CFAC settings (Wind and Solar)
+    if (typeof settings.windUseXgboost === 'boolean') windUseXgboost.value = settings.windUseXgboost;
+    if (typeof settings.windAsymmetricLoss === 'boolean') windAsymmetricLoss.value = settings.windAsymmetricLoss;
+    if (typeof settings.windBiasCorrection === 'boolean') windBiasCorrection.value = settings.windBiasCorrection;
+    if (typeof settings.solarUseXgboost === 'boolean') solarUseXgboost.value = settings.solarUseXgboost;
+    if (typeof settings.solarAsymmetricLoss === 'boolean') solarAsymmetricLoss.value = settings.solarAsymmetricLoss;
+    if (typeof settings.solarBiasCorrection === 'boolean') solarBiasCorrection.value = settings.solarBiasCorrection;
+    // Backward compatibility: migrate old global settings to per-type settings
+    // If no per-type settings exist but old global settings do, apply them as defaults
+    if (settings.windUseXgboost === undefined && typeof settings.schedulerUseXgboost === 'boolean') {
+      // Old global settings exist - wind defaults to OFF, solar gets the old setting
+      windUseXgboost.value = false;
+      solarUseXgboost.value = settings.schedulerUseXgboost;
+    }
+    if (settings.windAsymmetricLoss === undefined && typeof settings.schedulerAsymmetricLoss === 'boolean') {
+      windAsymmetricLoss.value = false;
+      solarAsymmetricLoss.value = settings.schedulerAsymmetricLoss;
+    }
+    if (settings.windBiasCorrection === undefined && typeof settings.schedulerBiasCorrection === 'boolean') {
+      windBiasCorrection.value = settings.schedulerBiasCorrection;
+      solarBiasCorrection.value = settings.schedulerBiasCorrection;
+    }
     if (typeof settings.schedulerCalibDays === 'number') schedulerCalibDays.value = settings.schedulerCalibDays;
     if (typeof settings.schedulerCalibThreshold === 'number') schedulerCalibThreshold.value = settings.schedulerCalibThreshold;
     if (typeof settings.schedulerMaxIterations === 'number') schedulerMaxIterations.value = settings.schedulerMaxIterations;
+    if (typeof settings.calibrationIterations === 'number') calibrationIterations.value = settings.calibrationIterations;
+    if (settings.schedulerDataSource === 'database' || settings.schedulerDataSource === 'csv') schedulerDataSource.value = settings.schedulerDataSource;
     // New scheduler settings
     if (Array.isArray(settings.schedulerTimes) && settings.schedulerTimes.length > 0) schedulerTimes.value = settings.schedulerTimes;
     if (typeof settings.schedulerAutoEnabled === 'boolean') schedulerAutoEnabled.value = settings.schedulerAutoEnabled;
@@ -300,8 +505,29 @@ onMounted(async () => {
     if (settings.schedulerDemandZonalPrefix) schedulerDemandZonalPrefix.value = settings.schedulerDemandZonalPrefix;
     if (settings.schedulerCfacPrefix) schedulerCfacPrefix.value = settings.schedulerCfacPrefix;
     if (settings.schedulerOutputSuffix) schedulerOutputSuffix.value = settings.schedulerOutputSuffix;
-    if (settings.schedulerTrainingMode === 'auto' || settings.schedulerTrainingMode === 'saved') schedulerTrainingMode.value = settings.schedulerTrainingMode;
     if (settings.schedulerSelectedCalibrator) schedulerSelectedCalibrator.value = settings.schedulerSelectedCalibrator;
+    // Auto calibration settings (also support legacy schedulerTrainingMode for backwards compatibility)
+    if (settings.schedulerCalibrationMode === 'auto' || settings.schedulerCalibrationMode === 'saved' || settings.schedulerCalibrationMode === 'reuse') {
+      schedulerCalibrationMode.value = settings.schedulerCalibrationMode;
+    } else if (settings.schedulerTrainingMode === 'auto' || settings.schedulerTrainingMode === 'saved') {
+      schedulerCalibrationMode.value = settings.schedulerTrainingMode;
+    }
+    if (settings.schedulerCalibrationPeriod) schedulerCalibrationPeriod.value = settings.schedulerCalibrationPeriod;
+    if (typeof settings.selectedCalibrationId === 'number') selectedCalibrationId.value = settings.selectedCalibrationId;
+
+    // New global settings
+    if (settings.globalWeatherCacheDir) globalWeatherCacheDir.value = settings.globalWeatherCacheDir;
+    if (settings.globalSchedulerOutputDir) globalSchedulerOutputDir.value = settings.globalSchedulerOutputDir;
+    // Scheduler backfill options
+    if (typeof settings.schedulerRefreshWeather === 'boolean') schedulerRefreshWeather.value = settings.schedulerRefreshWeather;
+    if (typeof settings.schedulerOverwrite === 'boolean') schedulerOverwrite.value = settings.schedulerOverwrite;
+    if (settings.schedulerSuffix !== undefined) schedulerSuffix.value = settings.schedulerSuffix;
+    // Manual forecast advanced options
+    if (typeof settings.scalingWind === 'number') scalingWind.value = settings.scalingWind;
+    if (typeof settings.scalingSolar === 'number') scalingSolar.value = settings.scalingSolar;
+    if (typeof settings.usePerTypeScaling === 'boolean') usePerTypeScaling.value = settings.usePerTypeScaling;
+    if (typeof settings.demandGrowthRate === 'number') demandGrowthRate.value = settings.demandGrowthRate;
+    if (settings.trainingEndDate) trainingEndDate.value = settings.trainingEndDate;
 
     // Load database info if in database mode
     if (dataSource.value === 'database' && databasePath.value) {
@@ -314,13 +540,19 @@ onMounted(async () => {
   // Load available calibrator models
   loadCalibratorModels();
 
-  // Load scheduler configuration and recent runs
+  // Load scheduler configuration, gateway config, recent runs, and saved calibrations
   loadSchedulerConfig();
+  loadGatewayConfig();
   loadRecentRuns();
+  loadSavedCalibrations();
 
-  // Set up real-time output listener
+  // Set up real-time output listener - routes to appropriate terminal
   window.electronAPI.onCommandOutput((data) => {
-    parseOutput(data.data, data.type === 'stderr');
+    if (schedulerIsRunning.value) {
+      parseSchedulerOutput(data.data, data.type === 'stderr');
+    } else {
+      parseOutput(data.data, data.type === 'stderr');
+    }
   });
 });
 
@@ -382,6 +614,112 @@ function parseOutput(text: string, isError: boolean) {
   }
 }
 
+// Parse scheduler command output and route to scheduler terminal
+function parseSchedulerOutput(text: string, isError: boolean) {
+  const lines = text.split('\n').filter(line => line.trim());
+
+  for (const line of lines) {
+    // Skip empty lines and dividers
+    if (!line.trim() || line.match(/^[=\-─═]+$/)) continue;
+
+    // Skip Electron/Chrome console noise
+    if (line.includes('ERROR:CONSOLE') || line.includes('DevTools')) continue;
+
+    // Clean line for display (remove emoji prefixes for cleaner look)
+    const cleanLine = line.trim();
+
+    // === DETAILED CALIBRATION INFO (show these!) ===
+    // Calibration iteration progress
+    if (line.includes('Iteration') && (line.includes('CFAC') || line.includes('Demand'))) {
+      addSchedulerStatus(cleanLine);
+      schedulerProgress.value = 40;
+    }
+    // Wind/Solar deviation and scale info
+    else if (line.includes('deviation') || line.includes('Wind scale') || line.includes('Solar scale')) {
+      addSchedulerStatus(cleanLine);
+    }
+    // Calibration period info
+    else if (line.includes('calibration:') || line.includes('data ends:')) {
+      addSchedulerStatus(cleanLine);
+      schedulerProgress.value = 15;
+    }
+    // Calibration converged messages
+    else if (line.includes('converged')) {
+      addSchedulerStatus(cleanLine, 'success');
+      schedulerProgress.value = 50;
+    }
+    // Station training progress
+    else if (line.includes('Trained') && line.includes('MAPE')) {
+      addSchedulerStatus(cleanLine);
+      schedulerProgress.value = 60;
+    }
+    // Training complete summary
+    else if (line.includes('Training complete:') || line.includes('stations trained')) {
+      addSchedulerStatus(cleanLine, 'success');
+      schedulerProgress.value = 65;
+    }
+    // Model type info (Wind/Solar model being used)
+    else if (line.includes('Wind:') && (line.includes('Hybrid') || line.includes('MREC'))) {
+      addSchedulerStatus(cleanLine);
+    }
+    else if (line.includes('Solar:') && (line.includes('Hybrid') || line.includes('Physics'))) {
+      addSchedulerStatus(cleanLine);
+    }
+    // Forecast file info
+    else if (line.includes('forecast:') && line.includes('records')) {
+      addSchedulerStatus(cleanLine, 'success');
+      schedulerProgress.value = 80;
+    }
+    // === STANDARD STATUS MESSAGES ===
+    else if (line.includes('Running scheduler') || line.includes('Starting scheduler')) {
+      addSchedulerStatus('Starting scheduler run...');
+      schedulerProgress.value = 10;
+    } else if (line.includes('Loading training data') || line.includes('Loading demand data') || line.includes('Parsing capacity')) {
+      addSchedulerStatus('Loading training data...');
+      schedulerProgress.value = 20;
+    } else if (line.includes('Fetching weather')) {
+      addSchedulerStatus('Fetching weather data...');
+      schedulerProgress.value = 30;
+    } else if (line.includes('Training') && line.includes('model')) {
+      addSchedulerStatus('Training models...');
+      schedulerProgress.value = 50;
+    } else if (line.includes('Generating forecast') || line.includes('generating')) {
+      addSchedulerStatus('Generating forecast...');
+      schedulerProgress.value = 60;
+    } else if (line.includes('stations processed') || line.includes('Processing station')) {
+      const match = line.match(/(\d+)/);
+      if (match) addSchedulerStatus(`Processing stations... (${match[1]})`);
+      schedulerProgress.value = 70;
+    } else if (line.includes('Calibrating') || line.includes('AUTO-CALIBRATE')) {
+      addSchedulerStatus('Calibrating models...');
+      schedulerProgress.value = 35;
+    } else if (line.includes('Writing output') || line.includes('Saved to') || line.includes('Output saved')) {
+      addSchedulerStatus('Writing output file...');
+      schedulerProgress.value = 85;
+    } else if (line.includes('Archiving') || line.includes('archived') || line.includes('Archived:')) {
+      addSchedulerStatus(cleanLine);
+      schedulerProgress.value = 90;
+    } else if (line.includes('Pushing') || line.includes('gateway') || line.includes('Gateway')) {
+      addSchedulerStatus(cleanLine);
+      schedulerProgress.value = 95;
+    } else if (line.includes('MAPE') || line.includes('accuracy') || line.includes('R²')) {
+      addSchedulerStatus(cleanLine, 'success');
+    } else if (line.includes('completed') || line.includes('COMPLETE') || line.includes('success')) {
+      addSchedulerStatus(cleanLine, 'success');
+      schedulerProgress.value = 100;
+    } else if (line.includes('Daily forecast:') || line.includes('Weekly forecast:')) {
+      addSchedulerStatus(cleanLine);
+      schedulerProgress.value = 55;
+    } else if (isError && !line.includes('warning') && (line.toLowerCase().includes('error') || line.toLowerCase().includes('failed'))) {
+      addSchedulerStatus(cleanLine, 'error');
+    }
+    // Show warnings
+    else if (line.includes('⚠️') || line.includes('warning') || line.includes('Warning')) {
+      addSchedulerStatus(cleanLine, 'error');
+    }
+  }
+}
+
 // Validation
 const canRunForecast = computed(() => {
   if (!enableDemand.value && !enableCfac.value) return false;
@@ -392,6 +730,17 @@ const canRunForecast = computed(() => {
     if (enableCfac.value && !cfacDataDir.value) return false;
   }
   return true;
+});
+
+// Convert calibration period to days for display
+const computedTrainingDays = computed(() => {
+  switch (schedulerCalibrationPeriod.value) {
+    case '14days': return 14;
+    case '1month': return 30;
+    case '2months': return 60;
+    case '3months': return 90;
+    default: return 30;
+  }
 });
 
 // Clear format message
@@ -458,6 +807,126 @@ async function browseDatabase() {
     if (result.format !== 'unknown') {
       handleFormatResult(result, enableZonal.value);
     }
+  }
+}
+
+// ============ Settings Tab Browse Functions ============
+async function browseRegionalDb() {
+  const path = await window.electronAPI.selectFile([
+    { name: 'SQLite Database', extensions: ['db', 'sqlite', 'sqlite3'] },
+  ]);
+  if (path) globalRegionalDemandDb.value = path;
+}
+
+async function browseZonalDb() {
+  const path = await window.electronAPI.selectFile([
+    { name: 'SQLite Database', extensions: ['db', 'sqlite', 'sqlite3'] },
+  ]);
+  if (path) globalZonalDemandDb.value = path;
+}
+
+async function browseSchedulerDb() {
+  const path = await window.electronAPI.selectFile([
+    { name: 'SQLite Database', extensions: ['db', 'sqlite', 'sqlite3'] },
+  ]);
+  if (path) globalSchedulerDb.value = path;
+}
+
+async function browseDemandCsvDir() {
+  const path = await window.electronAPI.selectDirectory();
+  if (path) globalDemandCsvPath.value = path;
+}
+
+async function browseCfacCsvDir() {
+  const path = await window.electronAPI.selectDirectory();
+  if (path) globalCfacCsvPath.value = path;
+}
+
+async function browseWeatherCacheDir() {
+  const path = await window.electronAPI.selectDirectory();
+  if (path) globalWeatherCacheDir.value = path;
+}
+
+async function browseSchedulerOutputDir() {
+  const path = await window.electronAPI.selectDirectory();
+  if (path) globalSchedulerOutputDir.value = path;
+}
+
+// ============ Settings Tab Import Functions ============
+async function importDemandToDb() {
+  if (!globalDemandCsvPath.value) {
+    addSchedulerStatus('Error: No demand CSV directory specified', 'error');
+    return;
+  }
+  terminalExpanded.value = true;
+  addSchedulerStatus(`Importing demand data from ${globalDemandCsvPath.value}...`);
+  // Import to both regional and zonal databases
+  try {
+    const resultRegional = await window.electronAPI.importToDatabase({
+      dbPath: globalRegionalDemandDb.value,
+      dataType: 'demand',
+      sourcePath: globalDemandCsvPath.value
+    });
+    addSchedulerStatus(`Regional DB: ${resultRegional.message}`, resultRegional.success ? 'success' : 'error');
+
+    const resultZonal = await window.electronAPI.importToDatabase({
+      dbPath: globalZonalDemandDb.value,
+      dataType: 'demand',
+      sourcePath: globalDemandCsvPath.value
+    });
+    addSchedulerStatus(`Zonal DB: ${resultZonal.message}`, resultZonal.success ? 'success' : 'error');
+  } catch (error: any) {
+    addSchedulerStatus(`Error: ${error.message}`, 'error');
+  }
+}
+
+async function importCfacToDb() {
+  if (!globalCfacCsvPath.value) {
+    addSchedulerStatus('Error: No CFAC CSV directory specified', 'error');
+    return;
+  }
+  terminalExpanded.value = true;
+  addSchedulerStatus(`Importing CFAC data from ${globalCfacCsvPath.value}...`);
+  try {
+    const result = await window.electronAPI.importToDatabase({
+      dbPath: globalSchedulerDb.value,
+      dataType: 'cfac',
+      sourcePath: globalCfacCsvPath.value
+    });
+    addSchedulerStatus(result.message, result.success ? 'success' : 'error');
+  } catch (error: any) {
+    addSchedulerStatus(`Error: ${error.message}`, 'error');
+  }
+}
+
+// ============ Settings Tab Status Functions ============
+async function checkRegionalDbStatus() {
+  terminalExpanded.value = true;
+  try {
+    const info = await window.electronAPI.getDatabaseInfo(globalRegionalDemandDb.value);
+    addSchedulerStatus(`Regional Demand Database: ${info.message}`, info.success ? 'success' : 'error');
+  } catch (error: any) {
+    addSchedulerStatus(`Error checking database: ${error.message}`, 'error');
+  }
+}
+
+async function checkZonalDbStatus() {
+  terminalExpanded.value = true;
+  try {
+    const info = await window.electronAPI.getDatabaseInfo(globalZonalDemandDb.value);
+    addSchedulerStatus(`Zonal Demand Database: ${info.message}`, info.success ? 'success' : 'error');
+  } catch (error: any) {
+    addSchedulerStatus(`Error checking database: ${error.message}`, 'error');
+  }
+}
+
+async function checkSchedulerDbStatus() {
+  terminalExpanded.value = true;
+  try {
+    const info = await window.electronAPI.getDatabaseInfo(globalSchedulerDb.value);
+    addSchedulerStatus(`Scheduler Database: ${info.message}`, info.success ? 'success' : 'error');
+  } catch (error: any) {
+    addSchedulerStatus(`Error checking database: ${error.message}`, 'error');
   }
 }
 
@@ -915,9 +1384,24 @@ function addSchedulerStatus(message: string, type: 'info' | 'success' | 'error' 
 // Scheduler configuration management
 async function loadSchedulerConfig() {
   try {
-    const config = await window.electronAPI.loadSchedulerConfig();
+    const config = await window.electronAPI.loadSchedulerConfig() as Partial<SchedulerConfig> | null;
     if (config) {
-      schedulerConfig.value = config;
+      // Ensure demandGeography has a default value for backward compatibility
+      schedulerConfig.value = {
+        enabled: config.enabled ?? false,
+        runTimeMorning: config.runTimeMorning ?? '06:00',
+        runTimeEvening: config.runTimeEvening ?? '18:00',
+        secondRunEnabled: config.secondRunEnabled ?? false,
+        runDays: config.runDays ?? ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+        forecastDemand: config.forecastDemand ?? true,
+        forecastCfac: config.forecastCfac ?? true,
+        horizonDaily: config.horizonDaily ?? true,
+        horizonWeekly: config.horizonWeekly ?? true,
+        demandGeography: config.demandGeography ?? 'regional',
+        weatherMaxAge: config.weatherMaxAge ?? 6,
+        autoPushGateway: config.autoPushGateway ?? false,
+        archiveRetention: config.archiveRetention ?? 90
+      };
     }
   } catch (error: any) {
     console.error('Failed to load scheduler config:', error);
@@ -926,10 +1410,184 @@ async function loadSchedulerConfig() {
 
 async function saveSchedulerConfig() {
   try {
-    await window.electronAPI.saveSchedulerConfig(schedulerConfig.value);
+    // Use toRaw() to get a plain object that can be cloned for IPC
+    const plainConfig = toRaw(schedulerConfig.value);
+    await window.electronAPI.saveSchedulerConfig(plainConfig);
     addSchedulerStatus('Configuration saved', 'success');
   } catch (error: any) {
     addSchedulerStatus('Failed to save configuration: ' + error.message, 'error');
+  }
+}
+
+// Gateway configuration management
+async function loadGatewayConfig() {
+  try {
+    const config = await window.electronAPI.loadGatewayConfig();
+    if (config) {
+      gatewayConfig.value = {
+        host: config.host || '100.115.9.94',
+        port: config.port || 22,
+        username: config.username || 'vantage-upload',
+        password: config.password || ''
+      };
+    }
+  } catch (error: any) {
+    console.error('Failed to load gateway config:', error);
+  }
+}
+
+async function saveGatewayConfig() {
+  try {
+    // Convert reactive proxy to plain object for IPC serialization
+    const config = {
+      host: gatewayConfig.value.host,
+      port: gatewayConfig.value.port,
+      username: gatewayConfig.value.username,
+      password: gatewayConfig.value.password
+    };
+    const result = await window.electronAPI.saveGatewayConfig(config);
+    if (result.success) {
+      gatewayTestStatus.value = 'success';
+      gatewayTestMessage.value = 'Gateway configuration saved';
+      setTimeout(() => {
+        gatewayTestStatus.value = 'idle';
+        gatewayTestMessage.value = '';
+      }, 3000);
+    } else {
+      gatewayTestStatus.value = 'error';
+      gatewayTestMessage.value = result.error || 'Failed to save';
+    }
+  } catch (error: any) {
+    gatewayTestStatus.value = 'error';
+    gatewayTestMessage.value = 'Failed to save: ' + error.message;
+  }
+}
+
+async function testGatewayConnection() {
+  gatewayTestStatus.value = 'testing';
+  gatewayTestMessage.value = 'Testing connection...';
+
+  try {
+    // Convert reactive proxy to plain object for IPC serialization
+    const config = {
+      host: gatewayConfig.value.host,
+      port: gatewayConfig.value.port,
+      username: gatewayConfig.value.username,
+      password: gatewayConfig.value.password
+    };
+    // First save the config, then test
+    await window.electronAPI.saveGatewayConfig(config);
+    const result = await window.electronAPI.testGatewayConnection();
+
+    if (result.connected) {
+      gatewayTestStatus.value = 'success';
+      const accessibleDirs = result.directories?.filter((d: any) => d.accessible).length || 0;
+      const totalDirs = result.directories?.length || 0;
+      gatewayTestMessage.value = `Connected! ${accessibleDirs}/${totalDirs} directories accessible`;
+    } else {
+      gatewayTestStatus.value = 'error';
+      gatewayTestMessage.value = result.error || 'Connection failed';
+    }
+  } catch (error: any) {
+    gatewayTestStatus.value = 'error';
+    gatewayTestMessage.value = 'Test failed: ' + error.message;
+  }
+}
+
+// Gateway Storage Management Functions
+async function loadGatewayStorageStats() {
+  gatewayStorageLoading.value = true;
+  gatewayStorageError.value = '';
+  gatewayActionMessage.value = '';
+  gatewayActionType.value = '';
+
+  try {
+    const result = await window.electronAPI.getGatewayStorage();
+    if (result.error) {
+      gatewayStorageError.value = result.error;
+      gatewayStorageStats.value = null;
+    } else if (result.success && result.categories) {
+      gatewayStorageStats.value = {
+        categories: result.categories,
+        totalFiles: result.totalFiles || 0,
+        totalSize: result.totalSize || 0,
+        totalSizeFormatted: result.totalSizeFormatted || '0 B',
+        oldestFile: result.oldestFile || '',
+        newestFile: result.newestFile || ''
+      };
+    } else {
+      gatewayStorageStats.value = null;
+    }
+  } catch (error: any) {
+    gatewayStorageError.value = error.message || 'Failed to load storage stats';
+    gatewayStorageStats.value = null;
+  } finally {
+    gatewayStorageLoading.value = false;
+  }
+}
+
+async function archiveGatewayFiles() {
+  gatewayArchiveLoading.value = true;
+  gatewayActionMessage.value = '';
+  gatewayActionType.value = '';
+
+  try {
+    const result = await window.electronAPI.archiveGatewayFiles({
+      olderThanDays: gatewayArchiveDays.value,
+      deleteAfterArchive: true
+    });
+
+    if (result.error) {
+      gatewayActionMessage.value = result.error;
+      gatewayActionType.value = 'error';
+    } else if (result.success) {
+      const count = result.results?.archived?.length || 0;
+      gatewayActionMessage.value = result.message || `Archived ${count} files older than ${gatewayArchiveDays.value} days`;
+      gatewayActionType.value = 'success';
+      // Refresh stats
+      await loadGatewayStorageStats();
+    }
+  } catch (error: any) {
+    gatewayActionMessage.value = error.message || 'Archive failed';
+    gatewayActionType.value = 'error';
+  } finally {
+    gatewayArchiveLoading.value = false;
+  }
+}
+
+async function clearGatewayFiles() {
+  if (!gatewayClearConfirm.value) {
+    gatewayActionMessage.value = 'Please check the confirmation box to delete files';
+    gatewayActionType.value = 'error';
+    return;
+  }
+
+  gatewayClearLoading.value = true;
+  gatewayActionMessage.value = '';
+  gatewayActionType.value = '';
+
+  try {
+    const result = await window.electronAPI.clearGatewayFiles({
+      olderThanDays: gatewayClearDays.value,
+      confirm: 'DELETE'
+    });
+
+    if (result.error) {
+      gatewayActionMessage.value = result.error;
+      gatewayActionType.value = 'error';
+    } else if (result.success) {
+      const count = result.results?.deleted?.length || 0;
+      gatewayActionMessage.value = result.message || `Deleted ${count} files older than ${gatewayClearDays.value} days`;
+      gatewayActionType.value = 'success';
+      gatewayClearConfirm.value = false;
+      // Refresh stats
+      await loadGatewayStorageStats();
+    }
+  } catch (error: any) {
+    gatewayActionMessage.value = error.message || 'Clear failed';
+    gatewayActionType.value = 'error';
+  } finally {
+    gatewayClearLoading.value = false;
   }
 }
 
@@ -942,21 +1600,136 @@ async function loadRecentRuns(limit = 20) {
   }
 }
 
+async function loadSavedCalibrations(limit = 10) {
+  try {
+    const calibrations = await window.electronAPI.getCalibrations(limit);
+    savedCalibrations.value = calibrations;
+    // Auto-select the most recent converged calibration
+    const converged = calibrations.find(c => c.converged);
+    if (converged && !selectedCalibrationId.value) {
+      selectedCalibrationId.value = converged.id;
+    }
+  } catch (error: any) {
+    console.error('Failed to load saved calibrations:', error);
+  }
+}
+
 async function runSchedulerManual() {
   if (!manualRunDate.value) {
-    addSchedulerStatus('Please select a date', 'error');
+    addSchedulerStatus('Please select a start date', 'error');
     return;
   }
 
+  // Reset scheduler terminal state and expand terminal
+  schedulerStatusHistory.value = [];
+  schedulerProgress.value = 0;
+  schedulerCurrentStatus.value = '';
+  terminalExpanded.value = true;
+
   schedulerIsRunning.value = true;
+
+  // Auto-import new CSV data if enabled
+  if (autoImportBeforeRun.value) {
+    addSchedulerStatus('Checking for new CSV data to import...');
+    try {
+      // Determine which database to import to based on geography
+      const dbPath = schedulerDemandGeography.value === 'zonal'
+        ? globalZonalDemandDb.value
+        : globalRegionalDemandDb.value;
+
+      // Import demand data
+      if (globalDemandCsvPath.value) {
+        const demandResult = await window.electronAPI.importToDatabase({
+          dbPath: dbPath,
+          dataType: 'demand',
+          sourcePath: globalDemandCsvPath.value
+        });
+        if (demandResult.success) {
+          addSchedulerStatus(`Demand import: ${demandResult.message}`);
+        }
+      }
+
+      // Import CFAC data
+      if (globalCfacCsvPath.value && (manualRunType.value === 'cfac' || manualRunType.value === 'both')) {
+        const cfacResult = await window.electronAPI.importToDatabase({
+          dbPath: globalSchedulerDb.value,
+          dataType: 'cfac',
+          sourcePath: globalCfacCsvPath.value
+        });
+        if (cfacResult.success) {
+          addSchedulerStatus(`CFAC import: ${cfacResult.message}`);
+        }
+      }
+    } catch (error: any) {
+      addSchedulerStatus(`Auto-import warning: ${error.message}`, 'error');
+      // Continue with scheduler run even if import fails
+    }
+  }
+
+  // Determine if this is a date range (backfill) or single date run
+  const isDateRange = manualRunEndDate.value && manualRunEndDate.value !== manualRunDate.value;
+  if (isDateRange) {
+    addSchedulerStatus(`Starting backfill from ${manualRunDate.value} to ${manualRunEndDate.value}...`);
+  } else {
+    addSchedulerStatus(`Starting scheduler run for ${manualRunDate.value}...`);
+  }
+
   try {
-    await window.electronAPI.runSchedulerManual(
-      manualRunDate.value,
-      manualRunType.value,
-      manualRunHorizon.value
-    );
-    addSchedulerStatus('Manual run completed', 'success');
+    const calibratorPath = schedulerCalibrationMode.value === 'saved' && schedulerSelectedCalibrator.value
+      ? `models/calibrator/${schedulerSelectedCalibrator.value}.json`
+      : null;
+
+    // For auto mode, pass training period (data end date is auto-detected)
+    const trainingDays = schedulerCalibrationMode.value === 'auto' ? computedTrainingDays.value : undefined;
+
+    // For reuse mode, pass the selected calibration ID to skip recalibration
+    const useCalibrationId = schedulerCalibrationMode.value === 'reuse' && selectedCalibrationId.value
+      ? selectedCalibrationId.value
+      : null;
+
+    // Determine data source based on toggle
+    const useDb = schedulerDataSource.value === 'database';
+    let dataDbPath: string | null = null;
+
+    if (useDb) {
+      // Database mode - use configured database paths
+      if (schedulerDemandGeography.value === 'regional') {
+        dataDbPath = globalRegionalDemandDb.value;
+      } else if (schedulerDemandGeography.value === 'zonal') {
+        dataDbPath = globalZonalDemandDb.value;
+      } else {
+        // 'both' - use regional DB, scheduler will handle both modes
+        dataDbPath = globalRegionalDemandDb.value;
+      }
+    }
+    // CSV mode: useDb = false, dataDbPath = null (CLI will use default CSV paths)
+
+    await window.electronAPI.runSchedulerManual({
+      date: manualRunDate.value,
+      type: manualRunType.value,
+      horizon: manualRunHorizon.value,
+      calibratorPath,
+      trainingDays,
+      endDate: manualRunEndDate.value || null,
+      verbose: schedulerVerboseOutput.value,
+      pushGateway: schedulerConfig.value.autoPushGateway,
+      useCalibrationId,
+      useDb,
+      dataDbPath,
+      maxIterations: calibrationIterations.value,
+      // New options
+      refreshWeather: schedulerRefreshWeather.value,
+      overwrite: schedulerOverwrite.value,
+      suffix: schedulerSuffix.value || null,
+      outputDir: globalSchedulerOutputDir.value,
+      useXgboost: schedulerUseXgboost.value,
+      asymmetricLoss: schedulerAsymmetricLoss.value,
+      biasCorrection: schedulerBiasCorrection.value,
+      weatherCacheDir: globalWeatherCacheDir.value,
+    });
+    addSchedulerStatus(isDateRange ? 'Backfill completed' : 'Manual run completed', 'success');
     await loadRecentRuns();
+    await loadSavedCalibrations(); // Refresh calibrations after run (may have created new one)
   } catch (error: any) {
     addSchedulerStatus('Manual run failed: ' + error.message, 'error');
   } finally {
@@ -1055,6 +1828,29 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
             <path d="M12 6v6l4 2"/>
           </svg>
           <span class="nav-text">Scheduler</span>
+        </button>
+        <button
+          class="nav-item"
+          :class="{ active: activeTab === 'gateway' }"
+          @click="activeTab = 'gateway'; loadGatewayStorageStats()"
+          :disabled="isRunning || schedulerIsRunning"
+        >
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M5 12h14M12 5l7 7-7 7"/>
+          </svg>
+          <span class="nav-text">Gateway</span>
+        </button>
+        <button
+          class="nav-item"
+          :class="{ active: activeTab === 'settings' }"
+          @click="activeTab = 'settings'"
+          :disabled="isRunning || schedulerIsRunning"
+        >
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/>
+          </svg>
+          <span class="nav-text">Settings</span>
         </button>
       </nav>
 
@@ -1274,7 +2070,7 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
                     <span class="toggle-label">Zonal</span>
                   </label>
                 </div>
-                <div class="scaling-group-compact">
+                <div class="scaling-group-compact" v-if="!usePerTypeScaling">
                   <label>Scale</label>
                   <div class="scaling-input">
                     <input type="number" v-model="scalingPercent" min="1" max="200" :disabled="isRunning" />
@@ -1289,6 +2085,51 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
                   </label>
                 </div>
               </div>
+
+              <!-- Advanced Options -->
+              <div class="advanced-options-row">
+                <!-- Per-Type Scaling Toggle -->
+                <div class="toggle-group" v-if="enableCfac">
+                  <label class="toggle">
+                    <input type="checkbox" v-model="usePerTypeScaling" :disabled="isRunning" />
+                    <span class="toggle-slider"></span>
+                    <span class="toggle-label">Per-Type Scaling</span>
+                  </label>
+                </div>
+
+                <!-- Per-Type Scaling Inputs (shown when enabled) -->
+                <template v-if="usePerTypeScaling && enableCfac">
+                  <div class="scaling-group-compact">
+                    <label>Wind</label>
+                    <div class="scaling-input">
+                      <input type="number" v-model="scalingWind" min="1" max="200" :disabled="isRunning" />
+                      <span class="percent">%</span>
+                    </div>
+                  </div>
+                  <div class="scaling-group-compact">
+                    <label>Solar</label>
+                    <div class="scaling-input">
+                      <input type="number" v-model="scalingSolar" min="1" max="200" :disabled="isRunning" />
+                      <span class="percent">%</span>
+                    </div>
+                  </div>
+                </template>
+
+                <!-- Demand Growth Rate -->
+                <div class="form-group compact" v-if="enableDemand">
+                  <label>Growth Rate</label>
+                  <div class="scaling-input">
+                    <input type="number" v-model.number="demandGrowthRate" step="0.001" min="-0.1" max="0.1" :disabled="isRunning" style="width: 70px;" />
+                    <span class="percent" title="Daily growth rate (e.g., 0.001 = 0.1%/day)">%/d</span>
+                  </div>
+                </div>
+
+                <!-- Training End Date Cutoff -->
+                <div class="form-group compact">
+                  <label>Training Cutoff</label>
+                  <input type="date" v-model="trainingEndDate" :disabled="isRunning" placeholder="Optional" style="width: 130px;" />
+                </div>
+              </div>
             </section>
           </div>
         </div>
@@ -1297,15 +2138,162 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 
       <!-- ============ SCHEDULER TAB ============ -->
       <div v-if="activeTab === 'scheduler'" class="tab-content">
-        <h1 class="page-title">Scheduler Configuration</h1>
-        <p class="page-subtitle">Configure automated forecast scheduling and view run history</p>
-        <!-- Main Grid Layout for Scheduler Tab -->
-        <div class="content-grid">
-          <!-- Left Column -->
-          <div class="grid-column">
-            <!-- Configuration Section -->
-            <section class="card">
-              <h2>Automated Schedule</h2>
+        <h1 class="page-title">Scheduler</h1>
+        <p class="page-subtitle">Run manual forecasts and configure automated scheduling</p>
+
+        <!-- Manual Run Section - Full Width -->
+        <section class="card manual-run-card">
+          <h2>Manual Run</h2>
+          <div class="data-source-row">
+            <div class="source-toggle">
+              <label class="radio-label">
+                <input type="radio" v-model="schedulerDataSource" value="database" :disabled="schedulerIsRunning" />
+                <span>Database</span>
+              </label>
+              <label class="radio-label">
+                <input type="radio" v-model="schedulerDataSource" value="csv" :disabled="schedulerIsRunning" />
+                <span>CSV</span>
+              </label>
+            </div>
+            <span class="data-source-hint">
+              {{ schedulerDataSource === 'database'
+                ? (schedulerDemandGeography === 'regional' ? globalRegionalDemandDb : schedulerDemandGeography === 'zonal' ? globalZonalDemandDb : 'Both databases')
+                : globalDemandCsvPath }}
+              <span class="settings-link" @click="activeTab = 'settings'">(Settings)</span>
+            </span>
+          </div>
+          <div class="manual-run-grid">
+            <!-- Date Selection -->
+            <div class="manual-run-dates">
+              <div class="form-group compact">
+                <label>Start Date</label>
+                <input type="date" v-model="manualRunDate" :disabled="schedulerIsRunning" />
+              </div>
+              <div class="form-group compact">
+                <label>End Date <span class="optional">(optional)</span></label>
+                <input type="date" v-model="manualRunEndDate" :min="manualRunDate" :disabled="schedulerIsRunning" />
+              </div>
+            </div>
+
+            <!-- Type and Horizon -->
+            <div class="manual-run-options">
+              <div class="form-group compact">
+                <label>Type</label>
+                <select v-model="manualRunType" class="calibrator-dropdown" :disabled="schedulerIsRunning">
+                  <option value="both">Both</option>
+                  <option value="demand">Demand Only</option>
+                  <option value="cfac">CFAC Only</option>
+                </select>
+              </div>
+              <div class="form-group compact">
+                <label>Horizon</label>
+                <select v-model="manualRunHorizon" class="calibrator-dropdown" :disabled="schedulerIsRunning">
+                  <option value="both">Both</option>
+                  <option value="daily">Daily Only</option>
+                  <option value="weekly">Weekly Only</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- Calibration Settings -->
+            <div class="manual-run-calibration">
+              <div class="form-group compact">
+                <label>Calibration</label>
+                <div class="calibration-mode-row">
+                  <label class="radio-label">
+                    <input type="radio" v-model="schedulerCalibrationMode" value="auto" :disabled="schedulerIsRunning" />
+                    <span>Auto</span>
+                  </label>
+                  <label class="radio-label" :title="savedCalibrations.length === 0 ? 'No saved calibrations - run scheduler first' : 'Use saved calibration (skips calibration phase)'">
+                    <input type="radio" v-model="schedulerCalibrationMode" value="reuse" :disabled="schedulerIsRunning || savedCalibrations.length === 0" />
+                    <span>Reuse</span>
+                  </label>
+                  <label class="radio-label">
+                    <input type="radio" v-model="schedulerCalibrationMode" value="saved" :disabled="schedulerIsRunning || availableCalibratorModels.length === 0" />
+                    <span>Model</span>
+                  </label>
+                </div>
+              </div>
+              <!-- Reuse mode: select from saved calibrations -->
+              <div v-if="schedulerCalibrationMode === 'reuse'" class="form-group compact">
+                <select v-model="selectedCalibrationId" :disabled="schedulerIsRunning" class="calibrator-dropdown">
+                  <option v-for="cal in savedCalibrations" :key="cal.id" :value="cal.id">
+                    #{{ cal.id }} | Wind {{ cal.windScale >= 0 ? '+' : '' }}{{ cal.windScale }}%, Solar {{ cal.solarScale >= 0 ? '+' : '' }}{{ cal.solarScale }}% {{ cal.converged ? '✓' : '' }}
+                  </option>
+                </select>
+                <span v-if="selectedCalibrationId" class="hint-inline" style="margin-left: 8px; font-size: 11px;">
+                  {{ savedCalibrations.find(c => c.id === selectedCalibrationId)?.periodStart }} - {{ savedCalibrations.find(c => c.id === selectedCalibrationId)?.periodEnd }}
+                </span>
+              </div>
+              <!-- Saved model mode -->
+              <div v-if="schedulerCalibrationMode === 'saved'" class="form-group compact">
+                <select v-model="schedulerSelectedCalibrator" :disabled="schedulerIsRunning" class="calibrator-dropdown">
+                  <option v-for="model in availableCalibratorModels" :key="model.name" :value="model.name">
+                    {{ model.name }} <span v-if="model.mape">({{ model.mape.toFixed(1) }}% MAPE)</span>
+                  </option>
+                </select>
+              </div>
+              <!-- Auto mode: select calibration period -->
+              <div v-if="schedulerCalibrationMode === 'auto'" class="form-group compact">
+                <select v-model="schedulerCalibrationPeriod" :disabled="schedulerIsRunning" class="calibrator-dropdown">
+                  <option value="14days">2 Weeks</option>
+                  <option value="1month">1 Month</option>
+                  <option value="2months">2 Months</option>
+                  <option value="3months">3 Months</option>
+                </select>
+                <span class="hint-inline" style="margin-left: 8px;">({{ computedTrainingDays }} days)</span>
+              </div>
+            </div>
+
+            <!-- Advanced Options -->
+            <div class="manual-run-advanced">
+              <label class="checkbox-label" title="Force refresh of weather cache">
+                <input type="checkbox" v-model="schedulerRefreshWeather" :disabled="schedulerIsRunning" />
+                <span>Refresh Weather</span>
+              </label>
+              <!-- Backfill-specific options (only show when end date is set) -->
+              <template v-if="manualRunEndDate && manualRunEndDate !== manualRunDate">
+                <label class="checkbox-label" title="Overwrite existing forecasts">
+                  <input type="checkbox" v-model="schedulerOverwrite" :disabled="schedulerIsRunning" />
+                  <span>Overwrite</span>
+                </label>
+                <div class="form-group compact inline-suffix">
+                  <label>Suffix</label>
+                  <input type="text" v-model="schedulerSuffix" placeholder="_v2" :disabled="schedulerIsRunning" style="width: 80px;" />
+                </div>
+              </template>
+            </div>
+
+            <!-- Verbose and Run Button -->
+            <div class="manual-run-actions">
+              <label class="checkbox-label">
+                <input type="checkbox" v-model="schedulerVerboseOutput" :disabled="schedulerIsRunning" />
+                <span>Verbose</span>
+              </label>
+              <button @click="runSchedulerManual" class="btn btn-primary" :disabled="schedulerIsRunning || !manualRunDate">
+                <span v-if="schedulerIsRunning" class="btn-content">
+                  <span class="spinner"></span>
+                  Running...
+                </span>
+                <span v-else>Run Now</span>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Automation Settings - Combined Card -->
+        <section class="card automation-card">
+          <div class="automation-header">
+            <h2>Automation Settings</h2>
+            <button @click="saveSchedulerConfig" class="btn btn-primary btn-sm">
+              Save Configuration
+            </button>
+          </div>
+
+          <div class="automation-grid">
+            <!-- Schedule Section -->
+            <div class="automation-section">
+              <h3>Schedule</h3>
               <div class="toggle-group" style="margin-bottom: 12px;">
                 <label class="toggle">
                   <input type="checkbox" v-model="schedulerConfig.enabled" />
@@ -1313,29 +2301,24 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
                   <span class="toggle-label">Enable Scheduler</span>
                 </label>
               </div>
-
               <div class="form-group compact">
-                <label>Morning Run Time</label>
+                <label>Morning Run</label>
                 <input type="time" v-model="schedulerConfig.runTimeMorning" />
               </div>
-
-              <div class="toggle-group" style="margin-top: 12px; margin-bottom: 8px;">
+              <div class="toggle-group" style="margin-top: 8px;">
                 <label class="toggle">
                   <input type="checkbox" v-model="schedulerConfig.secondRunEnabled" />
                   <span class="toggle-slider"></span>
-                  <span class="toggle-label">Enable Evening Run</span>
+                  <span class="toggle-label">Evening Run</span>
                 </label>
               </div>
-
-              <div v-if="schedulerConfig.secondRunEnabled" class="form-group compact">
-                <label>Evening Run Time</label>
+              <div v-if="schedulerConfig.secondRunEnabled" class="form-group compact" style="margin-top: 8px;">
                 <input type="time" v-model="schedulerConfig.runTimeEvening" />
               </div>
-
               <div class="form-group compact" style="margin-top: 12px;">
-                <label>Run Days</label>
-                <div class="checkbox-options" style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;">
-                  <label class="checkbox-label" v-for="day in ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']" :key="day">
+                <label>Days</label>
+                <div class="days-grid">
+                  <label class="day-checkbox" v-for="day in ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']" :key="day">
                     <input
                       type="checkbox"
                       :checked="schedulerConfig.runDays.includes(day)"
@@ -1347,186 +2330,543 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
                         }
                       }"
                     />
-                    <span>{{ day }}</span>
+                    <span>{{ day.charAt(0) }}</span>
                   </label>
                 </div>
               </div>
-            </section>
+            </div>
 
-            <!-- Weather Settings -->
-            <section class="card">
-              <h2>Weather Settings</h2>
-              <div class="form-group compact">
-                <label>Max Weather Age (hours)</label>
-                <input type="number" v-model="schedulerConfig.weatherMaxAge" min="1" max="24" />
+            <!-- Forecast Types Section -->
+            <div class="automation-section">
+              <h3>Forecast Types</h3>
+              <div class="toggle-group">
+                <label class="toggle">
+                  <input type="checkbox" v-model="schedulerConfig.forecastDemand" />
+                  <span class="toggle-slider"></span>
+                  <span class="toggle-label">Demand</span>
+                </label>
               </div>
-              <p class="hint">Reject weather data older than this many hours</p>
-            </section>
-
-            <!-- Manual Run Section -->
-            <section class="card">
-              <h2>Manual Run</h2>
-              <div class="form-group compact">
-                <label>Date</label>
-                <input type="date" v-model="manualRunDate" />
+              <div class="toggle-group" style="margin-top: 8px;">
+                <label class="toggle">
+                  <input type="checkbox" v-model="schedulerConfig.forecastCfac" />
+                  <span class="toggle-slider"></span>
+                  <span class="toggle-label">CFAC</span>
+                </label>
               </div>
-              <div class="form-group compact">
-                <label>Type</label>
-                <select v-model="manualRunType" class="calibrator-dropdown">
+              <!-- Geography dropdown for demand forecasts -->
+              <div v-if="schedulerConfig.forecastDemand" class="form-group compact" style="margin-top: 12px;">
+                <label>Demand Mode</label>
+                <select v-model="schedulerConfig.demandGeography" class="geography-dropdown">
+                  <option value="regional">Regional (3)</option>
+                  <option value="zonal">Zonal (14)</option>
                   <option value="both">Both</option>
-                  <option value="demand">Demand Only</option>
-                  <option value="cfac">CFAC Only</option>
                 </select>
               </div>
-              <div class="form-group compact">
-                <label>Horizon</label>
-                <select v-model="manualRunHorizon" class="calibrator-dropdown">
-                  <option value="both">Both</option>
-                  <option value="daily">Daily Only</option>
-                  <option value="weekly">Weekly Only</option>
-                </select>
-              </div>
-              <button @click="runSchedulerManual" class="btn btn-primary" style="width: 100%; margin-top: 8px;">
-                Run Now
-              </button>
-            </section>
-          </div>
+            </div>
 
-          <!-- Center Column -->
-          <div class="grid-column">
-            <!-- Forecast Types Configuration -->
-            <section class="card">
-              <h2>Forecast Types</h2>
-              <div class="options-grid-2x2">
-                <div class="toggle-group">
-                  <label class="toggle">
-                    <input type="checkbox" v-model="schedulerConfig.forecastDemand" />
-                    <span class="toggle-slider"></span>
-                    <span class="toggle-label">Demand</span>
-                  </label>
-                </div>
-                <div class="toggle-group">
-                  <label class="toggle">
-                    <input type="checkbox" v-model="schedulerConfig.forecastCfac" />
-                    <span class="toggle-slider"></span>
-                    <span class="toggle-label">CFAC</span>
-                  </label>
-                </div>
+            <!-- Horizons Section -->
+            <div class="automation-section">
+              <h3>Horizons</h3>
+              <div class="toggle-group">
+                <label class="toggle">
+                  <input type="checkbox" v-model="schedulerConfig.horizonDaily" />
+                  <span class="toggle-slider"></span>
+                  <span class="toggle-label">Daily</span>
+                </label>
               </div>
-            </section>
-
-            <!-- Horizons Configuration -->
-            <section class="card">
-              <h2>Horizons</h2>
-              <div class="options-grid-2x2">
-                <div class="toggle-group">
-                  <label class="toggle">
-                    <input type="checkbox" v-model="schedulerConfig.horizonDaily" />
-                    <span class="toggle-slider"></span>
-                    <span class="toggle-label">Daily</span>
-                  </label>
-                </div>
-                <div class="toggle-group">
-                  <label class="toggle">
-                    <input type="checkbox" v-model="schedulerConfig.horizonWeekly" />
-                    <span class="toggle-slider"></span>
-                    <span class="toggle-label">Weekly</span>
-                  </label>
-                </div>
+              <div class="toggle-group" style="margin-top: 8px;">
+                <label class="toggle">
+                  <input type="checkbox" v-model="schedulerConfig.horizonWeekly" />
+                  <span class="toggle-slider"></span>
+                  <span class="toggle-label">Weekly</span>
+                </label>
               </div>
-            </section>
+            </div>
 
-            <!-- Gateway Settings -->
-            <section class="card">
-              <h2>Gateway Integration</h2>
+            <!-- Gateway Section -->
+            <div class="automation-section gateway-section">
+              <h3>Gateway</h3>
               <div class="toggle-group gateway-toggle">
                 <label class="toggle">
                   <input type="checkbox" v-model="schedulerConfig.autoPushGateway" />
                   <span class="toggle-slider gateway"></span>
-                  <span class="toggle-label">Auto-Push to Gateway</span>
+                  <span class="toggle-label">Auto-Push</span>
                 </label>
               </div>
-              <p class="hint">Automatically push forecasts to Vantage-Gateway server</p>
-            </section>
+              <p class="hint">Push forecasts to Vantage-Gateway</p>
 
-            <!-- Save Configuration Button -->
-            <button @click="saveSchedulerConfig" class="btn btn-primary" style="width: 100%;">
-              Save Configuration
-            </button>
-          </div>
+              <!-- Gateway Configuration -->
+              <div class="gateway-config" v-if="schedulerConfig.autoPushGateway">
+                <div class="form-row">
+                  <div class="form-group compact">
+                    <label>Host</label>
+                    <input type="text" v-model="gatewayConfig.host" placeholder="100.115.9.94" style="width: 140px;" />
+                  </div>
+                  <div class="form-group compact">
+                    <label>Port</label>
+                    <input type="number" v-model="gatewayConfig.port" min="1" max="65535" style="width: 70px;" />
+                  </div>
+                </div>
+                <div class="form-group compact">
+                  <label>Username</label>
+                  <input type="text" v-model="gatewayConfig.username" placeholder="vantage-upload" />
+                </div>
+                <div class="form-group compact">
+                  <label>Password</label>
+                  <input type="password" v-model="gatewayConfig.password" placeholder="Enter gateway password" />
+                </div>
+                <div class="gateway-actions">
+                  <button
+                    class="btn btn-sm"
+                    @click="saveGatewayConfig"
+                    :disabled="gatewayTestStatus === 'testing'"
+                  >
+                    Save
+                  </button>
+                  <button
+                    class="btn btn-sm btn-secondary"
+                    @click="testGatewayConnection"
+                    :disabled="gatewayTestStatus === 'testing' || !gatewayConfig.password"
+                  >
+                    <span v-if="gatewayTestStatus === 'testing'">Testing...</span>
+                    <span v-else>Test Connection</span>
+                  </button>
+                </div>
+                <div v-if="gatewayTestMessage" class="gateway-status" :class="gatewayTestStatus">
+                  {{ gatewayTestMessage }}
+                </div>
+              </div>
+            </div>
 
-          <!-- Right Column -->
-          <div class="grid-column">
-            <!-- Archive Settings -->
-            <section class="card">
-              <h2>Archive Settings</h2>
+            <!-- Weather Section -->
+            <div class="automation-section">
+              <h3>Weather</h3>
               <div class="form-group compact">
-                <label>Retention Days</label>
-                <input type="number" v-model="schedulerConfig.archiveRetention" min="7" max="365" />
+                <label>Max Age (hours)</label>
+                <input type="number" v-model="schedulerConfig.weatherMaxAge" min="1" max="24" style="width: 80px;" />
               </div>
-              <p class="hint">Delete forecast records older than this many days</p>
-            </section>
+              <p class="hint">Reject stale weather data</p>
+            </div>
 
-            <!-- Recent Runs -->
-            <section class="card" style="grid-row: span 2;">
-              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-                <h2 style="margin: 0;">Recent Runs</h2>
-                <button @click="loadRecentRuns()" class="btn btn-text btn-sm">Refresh</button>
+            <!-- Archive Section -->
+            <div class="automation-section">
+              <h3>Archive</h3>
+              <div class="form-group compact">
+                <label>Retention (days)</label>
+                <input type="number" v-model="schedulerConfig.archiveRetention" min="7" max="365" style="width: 80px;" />
+              </div>
+              <p class="hint">Auto-delete old records</p>
+            </div>
+          </div>
+        </section>
+      </div><!-- End Scheduler Tab -->
+
+      <!-- ============ GATEWAY TAB ============ -->
+      <div v-if="activeTab === 'gateway'" class="tab-content">
+        <h1 class="page-title">Gateway Storage</h1>
+        <p class="page-subtitle">Manage forecast files on the Vantage Gateway server</p>
+
+        <!-- Action Message -->
+        <div v-if="gatewayActionMessage" class="format-notification" :class="gatewayActionType">
+          <span class="format-icon">{{ gatewayActionType === 'error' ? '✕' : '✓' }}</span>
+          <span>{{ gatewayActionMessage }}</span>
+          <button @click="gatewayActionMessage = ''" class="format-close">&times;</button>
+        </div>
+
+        <div class="gateway-layout">
+          <!-- Storage Statistics Card -->
+          <section class="card">
+            <div class="card-header-row">
+              <h2>Storage Statistics</h2>
+              <button @click="loadGatewayStorageStats" class="btn btn-sm btn-secondary" :disabled="gatewayStorageLoading">
+                <span v-if="gatewayStorageLoading">Loading...</span>
+                <span v-else>Refresh</span>
+              </button>
+            </div>
+
+            <div v-if="gatewayStorageError" class="error-message">
+              {{ gatewayStorageError }}
+            </div>
+
+            <div v-else-if="gatewayStorageStats" class="storage-stats">
+              <div class="stats-summary">
+                <div class="stat-item">
+                  <span class="stat-value">{{ gatewayStorageStats.totalFiles }}</span>
+                  <span class="stat-label">Total Files</span>
+                </div>
+                <div class="stat-item">
+                  <span class="stat-value">{{ gatewayStorageStats.totalSizeFormatted }}</span>
+                  <span class="stat-label">Total Size</span>
+                </div>
+                <div class="stat-item">
+                  <span class="stat-value">{{ gatewayStorageStats.oldestFile || 'N/A' }}</span>
+                  <span class="stat-label">Oldest File</span>
+                </div>
+                <div class="stat-item">
+                  <span class="stat-value">{{ gatewayStorageStats.newestFile || 'N/A' }}</span>
+                  <span class="stat-label">Newest File</span>
+                </div>
               </div>
 
-              <div v-if="recentRuns.length === 0" class="hint" style="text-align: center; padding: 20px;">
-                No recent runs found
-              </div>
-
-              <div v-else style="overflow-x: auto; max-height: 400px; overflow-y: auto;">
-                <table class="runs-table" style="width: 100%; font-size: 12px;">
-                  <thead style="position: sticky; top: 0; background: var(--bg-primary); z-index: 1;">
+              <div class="category-breakdown">
+                <h3>By Category</h3>
+                <table class="stats-table">
+                  <thead>
                     <tr>
-                      <th style="padding: 8px; text-align: left; border-bottom: 1px solid var(--border-color);">Date</th>
-                      <th style="padding: 8px; text-align: left; border-bottom: 1px solid var(--border-color);">Type</th>
-                      <th style="padding: 8px; text-align: left; border-bottom: 1px solid var(--border-color);">Horizon</th>
-                      <th style="padding: 8px; text-align: center; border-bottom: 1px solid var(--border-color);">Status</th>
-                      <th style="padding: 8px; text-align: right; border-bottom: 1px solid var(--border-color);">Records</th>
-                      <th style="padding: 8px; text-align: center; border-bottom: 1px solid var(--border-color);">Gateway</th>
+                      <th>Category</th>
+                      <th>Files</th>
+                      <th>Size</th>
+                      <th>Date Range</th>
                     </tr>
                   </thead>
                   <tbody>
-                    <tr v-for="run in recentRuns" :key="run.id" style="border-bottom: 1px solid var(--border-color-light);">
-                      <td style="padding: 6px 8px;">{{ run.run_date }}</td>
-                      <td style="padding: 6px 8px;">{{ run.forecast_type }}</td>
-                      <td style="padding: 6px 8px;">{{ run.horizon }}</td>
-                      <td style="padding: 6px 8px; text-align: center;">
-                        <span :style="{
-                          padding: '2px 8px',
-                          borderRadius: '12px',
-                          fontSize: '11px',
-                          backgroundColor: run.status === 'completed' ? 'var(--success-bg)' : run.status === 'failed' ? 'var(--error-bg)' : 'var(--warning-bg)',
-                          color: run.status === 'completed' ? 'var(--success-color)' : run.status === 'failed' ? 'var(--error-color)' : 'var(--warning-color)'
-                        }">
-                          {{ run.status }}
-                        </span>
-                      </td>
-                      <td style="padding: 6px 8px; text-align: right;">{{ run.records_generated }}</td>
-                      <td style="padding: 6px 8px; text-align: center;">
-                        <span v-if="run.pushed_to_gateway" style="color: var(--gateway-color);">✓</span>
-                        <span v-else style="color: var(--text-muted);">-</span>
-                      </td>
+                    <tr v-for="(stats, category) in gatewayStorageStats.categories" :key="category">
+                      <td>{{ category }}</td>
+                      <td>{{ stats.files }}</td>
+                      <td>{{ stats.sizeFormatted }}</td>
+                      <td>{{ stats.oldest }} to {{ stats.newest }}</td>
                     </tr>
                   </tbody>
                 </table>
               </div>
-            </section>
+            </div>
 
-          </div>
+            <div v-else class="empty-state">
+              Click "Refresh" to load storage statistics
+            </div>
+          </section>
+
+          <!-- Archive Files Card -->
+          <section class="card">
+            <h2>Archive Files</h2>
+            <p class="hint">Move old forecast files to the archive folder on the gateway server.</p>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label>Archive files older than</label>
+                <div class="input-with-suffix">
+                  <input type="number" v-model="gatewayArchiveDays" min="1" max="365" style="width: 80px;" />
+                  <span class="input-suffix">days</span>
+                </div>
+              </div>
+            </div>
+
+            <button
+              @click="archiveGatewayFiles"
+              class="btn btn-primary"
+              :disabled="gatewayArchiveLoading"
+            >
+              <span v-if="gatewayArchiveLoading">Archiving...</span>
+              <span v-else>Archive Old Files</span>
+            </button>
+          </section>
+
+          <!-- Clear Files Card -->
+          <section class="card card-danger">
+            <h2>Clear Files</h2>
+            <p class="hint warning">Permanently delete forecast files from the gateway server. This action cannot be undone.</p>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label>Delete files older than</label>
+                <div class="input-with-suffix">
+                  <input type="number" v-model="gatewayClearDays" min="1" max="365" style="width: 80px;" />
+                  <span class="input-suffix">days</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label class="checkbox-label danger">
+                <input type="checkbox" v-model="gatewayClearConfirm" />
+                <span>I understand this will permanently delete files</span>
+              </label>
+            </div>
+
+            <button
+              @click="clearGatewayFiles"
+              class="btn btn-danger"
+              :disabled="gatewayClearLoading || !gatewayClearConfirm"
+            >
+              <span v-if="gatewayClearLoading">Deleting...</span>
+              <span v-else>Delete Old Files</span>
+            </button>
+          </section>
         </div>
-      </div><!-- End Scheduler Tab -->
+      </div><!-- End Gateway Tab -->
+
+      <!-- ============ SETTINGS TAB ============ -->
+      <div v-if="activeTab === 'settings'" class="tab-content">
+        <h1 class="page-title">Settings</h1>
+        <p class="page-subtitle">Configure global database paths and auto-import settings</p>
+
+        <div class="settings-grid">
+          <!-- Database Paths Section -->
+          <section class="card settings-section">
+            <h2>Database Paths</h2>
+            <p class="section-description">Configure database locations for demand and scheduler data</p>
+
+            <div class="form-group">
+              <label>Regional Demand Database</label>
+              <p class="field-hint">Used for 3-region forecasts (CLUZ, CVIS, CMIN)</p>
+              <div class="path-input-row">
+                <input type="text" v-model="globalRegionalDemandDb" placeholder="data/iload.db" class="path-input" />
+                <button @click="browseRegionalDb" class="btn btn-sm btn-secondary">Browse</button>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label>Zonal Demand Database</label>
+              <p class="field-hint">Used for 14-zone forecasts (01NLUZ, 02METRO, etc.)</p>
+              <div class="path-input-row">
+                <input type="text" v-model="globalZonalDemandDb" placeholder="data/iload_zonal.db" class="path-input" />
+                <button @click="browseZonalDb" class="btn btn-sm btn-secondary">Browse</button>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label>Scheduler Database</label>
+              <p class="field-hint">Stores run history, calibrations, and scheduler config</p>
+              <div class="path-input-row">
+                <input type="text" v-model="globalSchedulerDb" placeholder="./forecast.db" class="path-input" />
+                <button @click="browseSchedulerDb" class="btn btn-sm btn-secondary">Browse</button>
+              </div>
+            </div>
+          </section>
+
+          <!-- CSV Source Directories Section -->
+          <section class="card settings-section">
+            <h2>CSV Source Directories</h2>
+            <p class="section-description">Default directories for training data and imports</p>
+
+            <div class="form-group">
+              <label>Demand Data Directory</label>
+              <p class="field-hint">CSV files for demand training data</p>
+              <div class="path-input-row">
+                <input type="text" v-model="globalDemandCsvPath" placeholder="Data Samples/Demand" class="path-input" />
+                <button @click="browseDemandCsvDir" class="btn btn-sm btn-secondary">Browse</button>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label>CFAC Data Directory</label>
+              <p class="field-hint">CSV files for capacity factor training data</p>
+              <div class="path-input-row">
+                <input type="text" v-model="globalCfacCsvPath" placeholder="Data Samples/Capacity Factor" class="path-input" />
+                <button @click="browseCfacCsvDir" class="btn btn-sm btn-secondary">Browse</button>
+              </div>
+            </div>
+
+            <div class="import-actions">
+              <button @click="importDemandToDb" class="btn btn-secondary" :disabled="isRunning">
+                Import Demand CSV to Database
+              </button>
+              <button @click="importCfacToDb" class="btn btn-secondary" :disabled="isRunning">
+                Import CFAC CSV to Database
+              </button>
+            </div>
+          </section>
+
+          <!-- Cache & Output Directories Section -->
+          <section class="card settings-section">
+            <h2>Cache & Output Directories</h2>
+            <p class="section-description">Configure weather cache and default output locations</p>
+
+            <div class="form-group">
+              <label>Weather Cache Directory</label>
+              <p class="field-hint">Cached weather data from Visual Crossing API</p>
+              <div class="path-input-row">
+                <input type="text" v-model="globalWeatherCacheDir" placeholder="./weather_cache" class="path-input" />
+                <button @click="browseWeatherCacheDir" class="btn btn-sm btn-secondary">Browse</button>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label>Scheduler Output Directory</label>
+              <p class="field-hint">Default output location for scheduled forecasts</p>
+              <div class="path-input-row">
+                <input type="text" v-model="globalSchedulerOutputDir" placeholder="./output/forecasts" class="path-input" />
+                <button @click="browseSchedulerOutputDir" class="btn btn-sm btn-secondary">Browse</button>
+              </div>
+            </div>
+          </section>
+
+          <!-- CFAC Model Options - Wind -->
+          <section class="card settings-section">
+            <h2>Wind Model Options</h2>
+            <p class="section-description">Optimal: Default settings (4-Tier Hybrid achieves ~73% MAPE)</p>
+            <div class="preset-buttons">
+              <button @click="windUseXgboost = false; windAsymmetricLoss = false; windBiasCorrection = false" class="btn btn-sm btn-outline">
+                Use Recommended
+              </button>
+            </div>
+
+            <div class="toggle-group">
+              <label class="toggle">
+                <input type="checkbox" v-model="windUseXgboost" />
+                <span class="toggle-slider"></span>
+                <span class="toggle-label">Use XGBoost for ML layer</span>
+              </label>
+              <p class="field-hint">Not recommended for wind - 4-Tier Hybrid performs better with defaults</p>
+            </div>
+
+            <div class="toggle-group">
+              <label class="toggle">
+                <input type="checkbox" v-model="windAsymmetricLoss" />
+                <span class="toggle-slider"></span>
+                <span class="toggle-label">Asymmetric loss</span>
+              </label>
+              <p class="field-hint">Not recommended for wind - can cause overcorrection</p>
+            </div>
+
+            <div class="toggle-group">
+              <label class="toggle">
+                <input type="checkbox" v-model="windBiasCorrection" />
+                <span class="toggle-slider"></span>
+                <span class="toggle-label">Station-specific bias correction</span>
+              </label>
+              <p class="field-hint">Disabled by default - wind patterns too variable between seasons</p>
+            </div>
+          </section>
+
+          <!-- CFAC Model Options - Solar -->
+          <section class="card settings-section">
+            <h2>Solar Model Options</h2>
+            <p class="section-description">Optimal: XGBoost + Asymmetric Loss (~16% MAPE, 43% bias reduction)</p>
+            <div class="preset-buttons">
+              <button @click="solarUseXgboost = true; solarAsymmetricLoss = true; solarBiasCorrection = false" class="btn btn-sm btn-outline">
+                Use Recommended
+              </button>
+            </div>
+
+            <div class="toggle-group">
+              <label class="toggle">
+                <input type="checkbox" v-model="solarUseXgboost" />
+                <span class="toggle-slider"></span>
+                <span class="toggle-label">Use XGBoost for ML layer</span>
+              </label>
+              <p class="field-hint">Recommended for solar - better non-linear learning for irradiance patterns</p>
+            </div>
+
+            <div class="toggle-group">
+              <label class="toggle">
+                <input type="checkbox" v-model="solarAsymmetricLoss" />
+                <span class="toggle-slider"></span>
+                <span class="toggle-label">Asymmetric loss</span>
+              </label>
+              <p class="field-hint">Recommended - penalizes under-predictions 2x (43% bias reduction)</p>
+            </div>
+
+            <div class="toggle-group">
+              <label class="toggle">
+                <input type="checkbox" v-model="solarBiasCorrection" />
+                <span class="toggle-slider"></span>
+                <span class="toggle-label">Station-specific bias correction</span>
+              </label>
+              <p class="field-hint">Per-station calibration enabled by default in forecast2 command</p>
+            </div>
+          </section>
+
+          <!-- Auto-Update Settings Section -->
+          <section class="card settings-section">
+            <h2>Auto-Update Settings</h2>
+            <p class="section-description">Configure automatic data updates before scheduler runs</p>
+
+            <div class="toggle-group">
+              <label class="toggle">
+                <input type="checkbox" v-model="autoImportBeforeRun" />
+                <span class="toggle-slider"></span>
+                <span class="toggle-label">Auto-import new CSV data before scheduler runs</span>
+              </label>
+              <p class="field-hint">Check for new CSV files and import them to the database</p>
+            </div>
+
+            <div class="toggle-group">
+              <label class="toggle">
+                <input type="checkbox" v-model="autoFetchWeather" />
+                <span class="toggle-slider"></span>
+                <span class="toggle-label">Auto-fetch weather data</span>
+              </label>
+              <p class="field-hint">Fetch missing or stale weather data from Visual Crossing API</p>
+            </div>
+          </section>
+
+          <!-- Calibration Settings Section -->
+          <section class="card settings-section">
+            <h2>Calibration Settings</h2>
+            <p class="section-description">Configure auto-calibration behavior for forecasts</p>
+
+            <div class="form-group">
+              <label>Calibration Iterations</label>
+              <p class="field-hint">Number of calibration iterations (0 = no calibration, 1-10 = iterations)</p>
+              <div class="range-input-group">
+                <input
+                  type="range"
+                  v-model.number="calibrationIterations"
+                  min="0"
+                  max="10"
+                  step="1"
+                  class="range-input"
+                />
+                <span class="range-value">{{ calibrationIterations === 0 ? 'Off' : calibrationIterations }}</span>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label>Training Days</label>
+              <p class="field-hint">Number of historical days used for calibration (7-30 days)</p>
+              <div class="range-input-group">
+                <input
+                  type="range"
+                  v-model.number="schedulerCalibDays"
+                  min="7"
+                  max="30"
+                  step="1"
+                  class="range-input"
+                />
+                <span class="range-value">{{ schedulerCalibDays }} days</span>
+              </div>
+            </div>
+          </section>
+
+          <!-- Database Status Section -->
+          <section class="card settings-section full-width">
+            <h2>Database Status</h2>
+            <div class="db-status-grid">
+              <div class="db-status-card">
+                <h3>Regional Demand</h3>
+                <p class="db-path">{{ globalRegionalDemandDb }}</p>
+                <button @click="checkRegionalDbStatus" class="btn btn-sm btn-outline">Check Status</button>
+              </div>
+              <div class="db-status-card">
+                <h3>Zonal Demand</h3>
+                <p class="db-path">{{ globalZonalDemandDb }}</p>
+                <button @click="checkZonalDbStatus" class="btn btn-sm btn-outline">Check Status</button>
+              </div>
+              <div class="db-status-card">
+                <h3>Scheduler</h3>
+                <p class="db-path">{{ globalSchedulerDb }}</p>
+                <button @click="checkSchedulerDbStatus" class="btn btn-sm btn-outline">Check Status</button>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div><!-- End Settings Tab -->
 
     </main>
 
     <!-- Bottom Terminal Panel -->
-    <div class="terminal-panel" :class="{ expanded: terminalExpanded }">
+    <div
+      class="terminal-panel"
+      :class="{ expanded: terminalExpanded, resizing: isResizing }"
+      :style="terminalExpanded ? { height: terminalHeight + 'px' } : {}"
+    >
+      <!-- Resize Handle -->
+      <div class="terminal-resize-handle" @mousedown="startTerminalResize">
+        <div class="resize-grip"></div>
+      </div>
       <div class="terminal-header">
-        <!-- Generate Button (Left Side) -->
+        <!-- Generate Button (Left Side) - Manual Tab Only -->
         <button
           v-if="activeTab === 'manual'"
           @click.stop="runForecast"
@@ -1540,22 +2880,56 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
           <span v-else>Generate Forecast</span>
         </button>
 
-        <!-- Terminal Toggle Area -->
-        <div class="terminal-toggle-area" @click="terminalExpanded = !terminalExpanded">
+        <!-- Terminal Toggle Area - Manual Tab -->
+        <div v-if="activeTab === 'manual'" class="terminal-toggle-area" @click="terminalExpanded = !terminalExpanded">
           <span class="terminal-toggle">{{ terminalExpanded ? '▼' : '▲' }}</span>
           <span class="terminal-title">Terminal</span>
-          <span v-if="isRunning || schedulerIsRunning" class="terminal-status running">
+          <span v-if="isRunning" class="terminal-status running">
             <span class="status-dot"></span>
             Running...
           </span>
-          <span v-else-if="(activeTab === 'manual' && isComplete) || (activeTab === 'scheduler' && schedulerStatusHistory.length > 0)" class="terminal-status complete">
+          <span v-else-if="isComplete" class="terminal-status complete">
             Complete
           </span>
         </div>
 
+        <!-- Terminal Tabs - Scheduler Tab -->
+        <div v-if="activeTab === 'scheduler'" class="terminal-tabs">
+          <button
+            class="terminal-tab"
+            :class="{ active: terminalPanelTab === 'terminal' }"
+            @click.stop="terminalPanelTab = 'terminal'; terminalExpanded = true"
+          >
+            <span class="terminal-toggle" v-if="terminalPanelTab === 'terminal'">{{ terminalExpanded ? '▼' : '▲' }}</span>
+            Terminal
+            <span v-if="schedulerIsRunning" class="terminal-status running">
+              <span class="status-dot"></span>
+            </span>
+          </button>
+          <button
+            class="terminal-tab"
+            :class="{ active: terminalPanelTab === 'runs' }"
+            @click.stop="terminalPanelTab = 'runs'; terminalExpanded = true; loadRecentRuns()"
+          >
+            Recent Runs
+            <span v-if="recentRuns.length > 0" class="runs-badge">{{ recentRuns.length }}</span>
+          </button>
+        </div>
+
         <span class="terminal-spacer"></span>
+
+        <!-- Refresh button for Runs tab -->
         <button
-          v-if="(activeTab === 'manual' && statusHistory.length > 0) || (activeTab === 'scheduler' && schedulerStatusHistory.length > 0)"
+          v-if="activeTab === 'scheduler' && terminalPanelTab === 'runs'"
+          @click.stop="loadRecentRuns()"
+          class="btn btn-text btn-sm"
+        >
+          Refresh
+        </button>
+
+        <!-- Clear button -->
+        <button
+          v-if="(activeTab === 'manual' && statusHistory.length > 0) || (activeTab === 'scheduler' && terminalPanelTab === 'terminal' && schedulerStatusHistory.length > 0)"
           @click.stop="activeTab === 'manual' ? resetProgress() : (schedulerStatusHistory = [])"
           class="btn btn-text btn-sm"
         >
@@ -1595,8 +2969,8 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
           </div>
         </template>
 
-        <!-- Scheduler Progress -->
-        <template v-if="activeTab === 'scheduler'">
+        <!-- Scheduler Progress (Terminal Tab) -->
+        <template v-if="activeTab === 'scheduler' && terminalPanelTab === 'terminal'">
           <div class="progress-section" v-if="schedulerIsRunning || schedulerProgress > 0">
             <div class="progress-bar-container">
               <div
@@ -1624,10 +2998,54 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
               <span class="history-message">{{ item.message }}</span>
             </div>
           </div>
+
+          <div v-if="!schedulerIsRunning && schedulerStatusHistory.length === 0" class="terminal-empty">
+            Ready. Configure options above and click Run Now to begin.
+          </div>
         </template>
 
-        <div v-if="(activeTab === 'manual' && !isRunning && !isComplete && statusHistory.length === 0) ||
-                   (activeTab === 'scheduler' && !schedulerIsRunning && schedulerStatusHistory.length === 0)"
+        <!-- Recent Runs (Runs Tab) -->
+        <template v-if="activeTab === 'scheduler' && terminalPanelTab === 'runs'">
+          <div v-if="recentRuns.length === 0" class="terminal-empty">
+            No recent runs found. Run a manual forecast to see run history.
+          </div>
+
+          <div v-else class="runs-table-container">
+            <table class="runs-table">
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Type</th>
+                  <th>Horizon</th>
+                  <th>Status</th>
+                  <th>Records</th>
+                  <th>Gateway</th>
+                  <th>Created</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="run in recentRuns" :key="run.id">
+                  <td>{{ run.run_date }}</td>
+                  <td>{{ run.forecast_type }}</td>
+                  <td>{{ run.horizon }}</td>
+                  <td>
+                    <span class="status-badge" :class="run.status">
+                      {{ run.status }}
+                    </span>
+                  </td>
+                  <td class="text-right">{{ run.records_generated }}</td>
+                  <td class="text-center">
+                    <span v-if="run.pushed_to_gateway" class="gateway-check">✓</span>
+                    <span v-else class="gateway-none">-</span>
+                  </td>
+                  <td class="text-muted">{{ run.created_at }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
+
+        <div v-if="activeTab === 'manual' && !isRunning && !isComplete && statusHistory.length === 0"
              class="terminal-empty">
           Ready. Configure options above and click the action button to begin.
         </div>
@@ -2119,6 +3537,12 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
   color: var(--accent-danger);
 }
 
+.optional {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-weight: normal;
+}
+
 /* Model Training Section */
 .training-mode-container {
   padding: 12px;
@@ -2334,6 +3758,224 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
   border-left: 1px solid var(--border-color);
 }
 
+.gateway-section {
+  min-width: 280px;
+}
+
+.gateway-config {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color);
+}
+
+.gateway-config .form-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.gateway-config .form-group {
+  margin-bottom: 8px;
+}
+
+.gateway-config .form-group label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+  display: block;
+}
+
+.gateway-config input {
+  width: 100%;
+  padding: 6px 8px;
+  font-size: 0.8rem;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+.gateway-config input:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+}
+
+.gateway-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.gateway-actions .btn-sm {
+  padding: 6px 12px;
+  font-size: 0.75rem;
+}
+
+.gateway-status {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+}
+
+.gateway-status.success {
+  background: rgba(76, 175, 80, 0.15);
+  color: #4caf50;
+  border: 1px solid rgba(76, 175, 80, 0.3);
+}
+
+.gateway-status.error {
+  background: rgba(244, 67, 54, 0.15);
+  color: #f44336;
+  border: 1px solid rgba(244, 67, 54, 0.3);
+}
+
+.gateway-status.testing {
+  background: rgba(33, 150, 243, 0.15);
+  color: #2196f3;
+  border: 1px solid rgba(33, 150, 243, 0.3);
+}
+
+/* Gateway Tab Styles */
+.gateway-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 20px;
+}
+
+.card-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.card-header-row h2 {
+  margin: 0;
+}
+
+.storage-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.stats-summary {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+}
+
+.stat-item {
+  background: var(--bg-primary);
+  padding: 16px;
+  border-radius: 8px;
+  text-align: center;
+}
+
+.stat-value {
+  display: block;
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 4px;
+}
+
+.stat-label {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.category-breakdown h3 {
+  margin-bottom: 12px;
+  font-size: 1rem;
+  color: var(--text-primary);
+}
+
+.stats-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.stats-table th,
+.stats-table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+.stats-table th {
+  background: var(--bg-primary);
+  font-weight: 500;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
+.stats-table td {
+  font-size: 0.9rem;
+}
+
+.empty-state {
+  padding: 40px;
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.error-message {
+  padding: 12px;
+  background: rgba(244, 67, 54, 0.1);
+  border: 1px solid rgba(244, 67, 54, 0.3);
+  border-radius: 6px;
+  color: #f44336;
+}
+
+.input-with-suffix {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.input-suffix {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+.card-danger {
+  border: 1px solid rgba(244, 67, 54, 0.3);
+}
+
+.card-danger h2 {
+  color: #f44336;
+}
+
+.hint.warning {
+  color: #ff9800;
+}
+
+.checkbox-label.danger {
+  color: #f44336;
+}
+
+.checkbox-label.danger input:checked + span {
+  color: #f44336;
+}
+
+.btn-danger {
+  background: #f44336;
+  color: white;
+  border: none;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #d32f2f;
+}
+
+.btn-danger:disabled {
+  background: rgba(244, 67, 54, 0.5);
+  cursor: not-allowed;
+}
+
 .toggle-label {
   font-weight: 500;
   font-size: 0.85rem;
@@ -2377,7 +4019,7 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 }
 
 /* =====================================================
-   TERMINAL PANEL (Bottom Expandable)
+   TERMINAL PANEL (Bottom Expandable & Resizable)
    ===================================================== */
 .terminal-panel {
   grid-column: 2;
@@ -2386,13 +4028,55 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
   border-top: 1px solid var(--border-color);
   display: flex;
   flex-direction: column;
-  max-height: 50px;
-  transition: max-height 0.3s ease;
+  height: 50px;
+  transition: height 0.2s ease;
   overflow: hidden;
+  position: relative;
 }
 
 .terminal-panel.expanded {
-  max-height: 300px;
+  /* Height is now controlled via inline style for resizing */
+  min-height: 100px;
+  max-height: 600px;
+}
+
+.terminal-panel.resizing {
+  transition: none; /* Disable transition during drag */
+  user-select: none;
+}
+
+/* Resize Handle */
+.terminal-resize-handle {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 6px;
+  cursor: ns-resize;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.terminal-resize-handle:hover,
+.terminal-panel.resizing .terminal-resize-handle {
+  background: rgba(59, 130, 246, 0.2);
+}
+
+.resize-grip {
+  width: 40px;
+  height: 3px;
+  background: var(--border-color);
+  border-radius: 2px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.terminal-resize-handle:hover .resize-grip,
+.terminal-panel.resizing .resize-grip {
+  opacity: 1;
+  background: var(--accent-primary);
 }
 
 .terminal-header {
@@ -2741,6 +4425,51 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 
 .format-close:hover {
   opacity: 1;
+}
+
+/* Advanced Options Row (Manual Forecast Tab) */
+.advanced-options-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color);
+}
+
+.advanced-options-row .toggle-group {
+  padding: 8px 12px;
+  background: transparent;
+}
+
+.advanced-options-row .form-group.compact {
+  margin-bottom: 0;
+}
+
+/* Manual Run Advanced Options (Scheduler Tab) */
+.manual-run-advanced {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 8px 0;
+}
+
+.manual-run-advanced .checkbox-label {
+  white-space: nowrap;
+}
+
+.manual-run-advanced .form-group.compact.inline-suffix {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 0;
+}
+
+.manual-run-advanced .form-group.compact.inline-suffix label {
+  margin-bottom: 0;
+  font-size: 0.75rem;
 }
 
 /* Responsive adjustments for widescreen */
@@ -3407,5 +5136,516 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 .calibrator-dropdown:disabled {
   background: var(--bg-secondary);
   cursor: not-allowed;
+}
+
+.auto-calibration-options {
+  margin-bottom: 8px;
+}
+
+.auto-calibration-options .form-group {
+  margin-bottom: 8px;
+}
+
+/* =====================================================
+   SETTINGS TAB
+   ===================================================== */
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+.settings-section {
+  padding: 20px;
+}
+
+.settings-section.full-width {
+  grid-column: 1 / -1;
+}
+
+.settings-section h2 {
+  margin: 0 0 8px 0;
+  font-size: 1.1rem;
+}
+
+.settings-section .section-description {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  margin: 0 0 12px 0;
+}
+
+.settings-section .preset-buttons {
+  margin-bottom: 16px;
+}
+
+.settings-section .preset-buttons .btn {
+  font-size: 0.8rem;
+  padding: 6px 12px;
+}
+
+.settings-section .form-group {
+  margin-bottom: 16px;
+}
+
+.settings-section .form-group label {
+  display: block;
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+
+.settings-section .field-hint {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  margin: 4px 0 8px 0;
+}
+
+.settings-section .path-input-row {
+  display: flex;
+  gap: 8px;
+}
+
+.settings-section .path-input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 0.9rem;
+}
+
+.settings-section .path-input:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+}
+
+.import-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-color);
+}
+
+.toggle-group {
+  margin-bottom: 16px;
+}
+
+.toggle-group .field-hint {
+  margin-left: 56px;
+}
+
+.range-input-group {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.range-input {
+  flex: 1;
+  height: 6px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: var(--border-color);
+  border-radius: 3px;
+  outline: none;
+}
+
+.range-input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  background: var(--accent-primary);
+  border-radius: 50%;
+  cursor: pointer;
+  transition: transform 0.15s ease;
+}
+
+.range-input::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+
+.range-input::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  background: var(--accent-primary);
+  border-radius: 50%;
+  cursor: pointer;
+  border: none;
+}
+
+.range-value {
+  min-width: 60px;
+  text-align: right;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.db-status-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+
+.db-status-card {
+  background: var(--bg-primary);
+  padding: 16px;
+  border-radius: 8px;
+  text-align: center;
+}
+
+.db-status-card h3 {
+  margin: 0 0 8px 0;
+  font-size: 0.95rem;
+}
+
+.db-status-card .db-path {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  margin: 0 0 12px 0;
+  word-break: break-all;
+}
+
+@media (max-width: 900px) {
+  .settings-grid {
+    grid-template-columns: 1fr;
+  }
+  .db-status-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* =====================================================
+   SCHEDULER TAB - NEW LAYOUT
+   ===================================================== */
+
+/* Manual Run Card - Full Width */
+.manual-run-card {
+  margin-bottom: 20px;
+}
+
+.data-source-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.data-source-row .source-toggle {
+  display: flex;
+  gap: 12px;
+}
+
+.data-source-hint {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.settings-link {
+  color: var(--accent-primary);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.settings-link:hover {
+  color: var(--accent-hover);
+}
+
+.manual-run-datasource {
+  display: flex;
+  gap: 20px;
+  align-items: flex-end;
+  margin-bottom: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.manual-run-datasource .source-toggle {
+  display: flex;
+  gap: 16px;
+}
+
+.manual-run-datasource .database-path-group {
+  flex: 1;
+  max-width: 400px;
+}
+
+.manual-run-datasource .path-input-row {
+  display: flex;
+  gap: 8px;
+}
+
+.manual-run-datasource .path-input {
+  flex: 1;
+  min-width: 200px;
+}
+
+.manual-run-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1.5fr auto;
+  gap: 20px;
+  align-items: end;
+}
+
+.manual-run-dates,
+.manual-run-options {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.manual-run-calibration {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.manual-run-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding-bottom: 4px;
+}
+
+.manual-run-actions .btn {
+  white-space: nowrap;
+  min-width: 100px;
+}
+
+/* Automation Card */
+.automation-card {
+  padding: 20px;
+}
+
+.automation-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.automation-header h2 {
+  margin: 0;
+}
+
+.automation-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 24px;
+}
+
+.automation-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.automation-section h3 {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin: 0 0 8px 0;
+}
+
+.automation-section .hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+/* Days Grid for Scheduler */
+.days-grid {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.day-checkbox {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.day-checkbox:hover {
+  border-color: var(--accent-primary);
+}
+
+.day-checkbox input {
+  display: none;
+}
+
+.day-checkbox input:checked + span {
+  color: var(--accent-primary);
+  font-weight: 600;
+}
+
+.day-checkbox span {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+/* Terminal Tabs for Scheduler */
+.terminal-tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.terminal-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: transparent;
+  border: none;
+  border-radius: 6px 6px 0 0;
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.terminal-tab:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-primary);
+}
+
+.terminal-tab.active {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.terminal-tab .terminal-toggle {
+  font-size: 0.625rem;
+  margin-right: 2px;
+}
+
+.runs-badge {
+  background: var(--accent-primary);
+  color: white;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  min-width: 18px;
+  text-align: center;
+}
+
+/* Runs Table in Terminal */
+.runs-table-container {
+  overflow: auto;
+  max-height: calc(100% - 20px);
+}
+
+.runs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.runs-table thead {
+  position: sticky;
+  top: 0;
+  background: var(--bg-secondary);
+  z-index: 1;
+}
+
+.runs-table th {
+  padding: 8px 12px;
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.runs-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.runs-table tr:hover td {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.runs-table .text-right {
+  text-align: right;
+}
+
+.runs-table .text-center {
+  text-align: center;
+}
+
+.runs-table .text-muted {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.status-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.status-badge.completed {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+}
+
+.status-badge.failed {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+}
+
+.status-badge.pending {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+}
+
+.gateway-check {
+  color: var(--gateway-color, #10b981);
+}
+
+.gateway-none {
+  color: var(--text-muted);
+}
+
+/* Responsive adjustments for scheduler */
+@media (max-width: 1400px) {
+  .manual-run-grid {
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+
+  .manual-run-actions {
+    grid-column: span 2;
+    justify-content: flex-end;
+  }
+
+  .automation-grid {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+  }
+}
+
+@media (max-width: 1000px) {
+  .automation-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
 }
 </style>

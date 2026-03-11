@@ -95,19 +95,42 @@ export function getConfig(): GatewayConfig {
 }
 
 /**
+ * Detect if a filename represents zonal demand data (14 zones)
+ * Zonal files use ZDEM prefix or contain 'zonal' in the name
+ */
+function isZonalDemandFile(filename: string): boolean {
+  const fn = filename.toUpperCase();
+  return fn.includes('ZDEM') || fn.includes('ZONAL');
+}
+
+/**
  * Get remote directory based on filename pattern or explicit category
  * Matches structure in Documents/vantage-gateway/GATEWAY_SETUP_COMPLETE.md
  * Note: The SFTP user is chrooted to /opt/vantage/csv_storage
  * so paths are relative to that directory
+ *
+ * Directory structure for demand files:
+ * - /day-ahead/demand/regional  - 3-region demand files (FC_DEM_*, DA_DEM_*)
+ * - /day-ahead/demand/zonal     - 14-zone demand files (FC_ZDEM_*, DA_ZDEM_*)
+ * - /week-ahead/demand/regional - 7-day regional demand
+ * - /week-ahead/demand/zonal    - 7-day zonal demand
+ *
+ * MHCF files remain unchanged (no geography split):
+ * - /day-ahead/mhcf
+ * - /week-ahead/mhcf
  */
 export function getRemoteDirectory(filename: string, category?: ForecastCategory): string {
   // If explicit category provided
   if (category) {
+    // For demand categories, check if file is zonal to append geography subdirectory
+    const isZonal = isZonalDemandFile(filename);
+    const geography = isZonal ? '/zonal' : '/regional';
+
     const pathMap: Record<ForecastCategory, string> = {
-      'day-ahead-demand': '/day-ahead/demand',
-      'day-ahead-mhcf': '/day-ahead/mhcf',
-      'week-ahead-demand': '/week-ahead/demand',
-      'week-ahead-mhcf': '/week-ahead/mhcf',
+      'day-ahead-demand': `/day-ahead/demand${geography}`,
+      'day-ahead-mhcf': '/day-ahead/mhcf',  // MHCF never has geography split
+      'week-ahead-demand': `/week-ahead/demand${geography}`,
+      'week-ahead-mhcf': '/week-ahead/mhcf',  // MHCF never has geography split
       'historical-scenarios-weekly': '/historical/scenarios/weekly',
       'historical-scenarios-monthly': '/historical/scenarios/monthly',
       'historical-databases': '/historical/databases'
@@ -117,19 +140,35 @@ export function getRemoteDirectory(filename: string, category?: ForecastCategory
 
   // Auto-detect from filename
   const fn = filename.toUpperCase();
+  const isZonal = isZonalDemandFile(filename);
+  const geography = isZonal ? '/zonal' : '/regional';
 
-  // Day-Ahead patterns
-  if (fn.startsWith('DA_DEM') || fn.includes('DAY_AHEAD_DEM')) {
-    return '/day-ahead/demand';
+  // Day-Ahead demand patterns - route to geography subdirectory
+  // Zonal: DA_ZDEM_*, FC_ZDEM_*, *_ZDEM_*
+  // Regional: DA_DEM_*, FC_DEM_*, DA_DEMAND_*
+  if (fn.startsWith('DA_ZDEM') || fn.startsWith('FC_ZDEM') || (fn.includes('DAY_AHEAD') && fn.includes('ZDEM'))) {
+    return '/day-ahead/demand/zonal';
   }
+  if (fn.startsWith('DA_DEMAND') || fn.startsWith('DA_DEM') || fn.startsWith('FC_DEM') || fn.includes('DAY_AHEAD_DEM')) {
+    return '/day-ahead/demand/regional';
+  }
+
+  // Week-Ahead demand patterns - route to geography subdirectory
+  // Zonal: WA_ZDEM_*, FC_ZDEM_* with week-ahead dates
+  // Regional: WA_DEM_*, WA_DEMAND_*
+  if (fn.startsWith('WA_ZDEM') || (fn.includes('WEEK_AHEAD') && fn.includes('ZDEM'))) {
+    return '/week-ahead/demand/zonal';
+  }
+  if (fn.startsWith('WA_DEMAND') || fn.startsWith('WA_DEM') || fn.includes('WEEK_AHEAD_DEM')) {
+    return '/week-ahead/demand/regional';
+  }
+
+  // Day-Ahead MHCF patterns (no geography split)
   if (fn.startsWith('DA_MHCF') || fn.startsWith('DA_CF') || fn.includes('DAY_AHEAD_MHCF')) {
     return '/day-ahead/mhcf';
   }
 
-  // Week-Ahead patterns
-  if (fn.startsWith('WA_DEM') || fn.includes('WEEK_AHEAD_DEM')) {
-    return '/week-ahead/demand';
-  }
+  // Week-Ahead MHCF patterns (no geography split)
   if (fn.startsWith('WA_MHCF') || fn.startsWith('WA_CF') || fn.includes('WEEK_AHEAD_MHCF')) {
     return '/week-ahead/mhcf';
   }
@@ -137,15 +176,15 @@ export function getRemoteDirectory(filename: string, category?: ForecastCategory
   // Legacy patterns (backward compatibility)
   // Zonal demand files (must check before regional)
   if (fn.startsWith('FC_ZDEM_') || fn.includes('ZDEM')) {
-    return '/demand/zonal';
+    return '/day-ahead/demand/zonal';  // Default to day-ahead for legacy zonal
   }
   // Regional demand files
   if (fn.startsWith('FC_DEM_') || fn.includes('_DEM_')) {
-    return '/demand/regional';
+    return '/day-ahead/demand/regional';  // Default to day-ahead for legacy regional
   }
   // Capacity factor files
   if (fn.startsWith('FC_CF_') || fn.includes('CFAC') || fn.includes('_CF_')) {
-    return '/cfac';
+    return '/day-ahead/mhcf';  // Default to day-ahead for legacy CFAC
   }
 
   // Historical patterns
@@ -335,13 +374,14 @@ export async function testGatewayConnection(): Promise<GatewayTestResult> {
   const sftp = new SftpClient();
 
   const directories = [
-    '/day-ahead/demand',
+    '/day-ahead/demand/regional',
+    '/day-ahead/demand/zonal',
     '/day-ahead/mhcf',
-    '/week-ahead/demand',
+    '/week-ahead/demand/regional',
+    '/week-ahead/demand/zonal',
     '/week-ahead/mhcf',
-    '/demand/regional',
-    '/demand/zonal',
-    '/cfac',
+    '/historical/scenarios/weekly',
+    '/historical/scenarios/monthly',
     '/other'
   ];
 

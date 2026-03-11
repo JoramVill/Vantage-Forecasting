@@ -2233,6 +2233,7 @@ cfacCommand
   .option('--use-db', 'Load CFAC training data from database instead of CSV files')
   .option('--db <path>', 'Database path when using --use-db (default: ./forecast.db)')
   .option('--push', 'Push generated forecast to Vantage-Gateway server')
+  .option('--weather-refresh-mode <mode>', 'Weather refresh mode: cache (no downloads), refresh (smart), force-refresh (always download)', 'refresh')
   // NOTE: LSTM model option removed from production - experimental only via direct code modification
   .action(async (options) => {
     try {
@@ -2253,6 +2254,7 @@ cfacCommand
       // 4-Tier wind model is now the default (50% MAPE vs 107% for enhanced-hybrid)
       const wind4Tier = options.noWind4tier !== true && options.no_wind_4tier !== true;
       const lstmCorrection = options.lstmCorrection || false;
+      const weatherRefreshMode = options.weatherRefreshMode || 'refresh';
 
       // Parse scale factors (manual overrides)
       const scaleAll = parseFloat(options.scale) / 100;  // Convert percent to decimal
@@ -2612,6 +2614,9 @@ cfacCommand
       // Fetch weather data for training period
       console.log('\n🌤️  Fetching weather data for training period...');
 
+      // Weather fetch options - respect CLI weather-refresh-mode
+      const weatherOptions = { refreshMode: weatherRefreshMode as 'cache' | 'refresh' | 'force-refresh' };
+
       // Fetch weather for WIND stations using station-specific coordinates (100m hub height)
       console.log('   Fetching wind station-specific weather (100m hub height)...');
       const trainWindWeatherCsv = await weatherService.fetchAllClusters(
@@ -2619,7 +2624,8 @@ cfacCommand
         trainStart,
         trainEnd,
         (msg) => console.log(`   ${msg}`),
-        windStationClusterIds  // All are wind clusters - need 100m data
+        windStationClusterIds,  // All are wind clusters - need 100m data
+        weatherOptions
       );
 
       // Fetch weather for SOLAR stations using station-specific coordinates
@@ -2629,7 +2635,8 @@ cfacCommand
         trainStart,
         trainEnd,
         (msg) => console.log(`   ${msg}`),
-        new Set<string>()  // Not wind - no 100m data needed
+        new Set<string>(),  // Not wind - no 100m data needed
+        weatherOptions
       );
 
       // Fetch weather for other stations using cluster coordinates
@@ -2642,7 +2649,8 @@ cfacCommand
         trainStart,
         trainEnd,
         (msg) => console.log(`   ${msg}`),
-        new Set<string>()  // No wind clusters here
+        new Set<string>(),  // No wind clusters here
+        weatherOptions
       );
 
       // Parse training weather into cluster/station -> timestamp -> features
@@ -3176,7 +3184,8 @@ cfacCommand
         options.start,
         options.end,
         (msg) => console.log(`   ${msg}`),
-        windStationClusterIds
+        windStationClusterIds,
+        weatherOptions
       );
 
       // Fetch forecast weather for solar stations (station-specific coordinates)
@@ -3185,7 +3194,8 @@ cfacCommand
         options.start,
         options.end,
         (msg) => console.log(`   ${msg}`),
-        new Set<string>()  // Not wind - no 100m data needed
+        new Set<string>(),  // Not wind - no 100m data needed
+        weatherOptions
       );
 
       // Fetch forecast weather for other stations (cluster-based)
@@ -3196,7 +3206,8 @@ cfacCommand
         options.start,
         options.end,
         (msg) => console.log(`   ${msg}`),
-        new Set<string>()
+        new Set<string>(),
+        weatherOptions
       );
 
       // Parse forecast weather
@@ -9357,10 +9368,16 @@ scheduler
   .option('--cfac-path <path>', 'Path to cfac training data', 'Data Samples/Capacity Factor')
   .option('--output <dir>', 'Output directory', './output')
   .option('--db <path>', 'Scheduler database path', './forecast.db')
+  // Database source options
+  .option('--use-db', 'Use database as training data source instead of CSV files')
+  .option('--data-db <path>', 'Database path for training data when using --use-db')
   // Calibration options
   .option('--calib-days <days>', 'Days to use for calibration', '7')
   .option('--calib-threshold <percent>', 'Max acceptable calibration deviation', '5')
   .option('--max-iterations <n>', 'Max calibration iterations', '3')
+  // Use saved calibration (skip calibration phase)
+  .option('--use-calibration <id>', 'Use saved calibration by ID (run "scheduler calibrations" to list)')
+  .option('--use-saved-calibration', 'Use most recent saved calibration (skips calibration)')
   // Demand model options
   .option('--demand-model <type>', 'Demand model: hybrid, regression, xgboost', 'hybrid')
   // CFAC model options
@@ -9369,8 +9386,13 @@ scheduler
   .option('--bias-correction', 'Enable station-specific bias correction')
   // Enhanced Phase 3A options
   .option('--refresh-weather', 'Force refresh weather cache for future dates')
+  .option('--push-gateway', 'Push forecast to gateway after completion')
   .option('--no-push', 'Skip gateway push even if enabled')
   .option('--no-archive', 'Skip archiving')
+  // Model loading options
+  .option('--load-calibrator <path>', 'Load calibrator model from file (skips auto-training)')
+  // Auto-calibration period options
+  .option('--training-days <days>', 'Number of days for auto-calibration training period', '30')
   .action(async (options) => {
     try {
       const service = new ForecastSchedulerService({
@@ -9387,7 +9409,12 @@ scheduler
         // CFAC options
         useXgboost: options.useXgboost || false,
         asymmetricLoss: options.asymmetricLoss || false,
-        biasCorrection: options.biasCorrection || false
+        biasCorrection: options.biasCorrection || false,
+        // Gateway push
+        pushToGateway: options.pushGateway || false,
+        // Database source options
+        useDb: options.useDb || false,
+        dataDbPath: options.dataDb
       });
 
       const asOfDate = options.date || DateTime.now().toISODate()!;
@@ -9402,7 +9429,11 @@ scheduler
       const result = await service.runCalibratedForecasts(asOfDate, {
         forecastType,
         horizon,
-        verbose: true
+        verbose: true,
+        loadCalibratorPath: options.loadCalibrator,
+        trainingDays: parseInt(options.trainingDays) || 30,
+        useCalibrationId: options.useCalibration ? parseInt(options.useCalibration) : undefined,
+        useMostRecentCalibration: options.useSavedCalibration || false
       });
 
       const summary = service.getRunsSummary();
@@ -9431,8 +9462,23 @@ scheduler
   .option('--cfac-path <path>', 'Path to cfac training data', 'Data Samples/Capacity Factor')
   .option('--output <dir>', 'Output directory', './output')
   .option('--db <path>', 'Scheduler database path', './forecast.db')
+  // Database source options
+  .option('--use-db', 'Use database as training data source instead of CSV files')
+  .option('--data-db <path>', 'Database path for training data when using --use-db')
   .option('--calib-days <days>', 'Days to use for calibration', '7')
+  .option('--max-iterations <n>', 'Max calibration iterations', '3')
+  // Use saved calibration (skip calibration phase - recommended for backfill!)
+  .option('--use-calibration <id>', 'Use saved calibration by ID (run "scheduler calibrations" to list)')
+  .option('--use-saved-calibration', 'Use most recent saved calibration (RECOMMENDED for backfill)')
+  // Auto-calibration period options
+  .option('--training-days <days>', 'Number of days for auto-calibration training period', '30')
+  // Model loading options
+  .option('--load-calibrator <path>', 'Load calibrator model from file (skips auto-training)')
+  // Output options
+  .option('-v, --verbose', 'Show detailed progress for each date (default: true)')
+  .option('-q, --quiet', 'Minimal output, only show errors and summary')
   // Enhanced Phase 3A options
+  .option('--push-gateway', 'Push forecast to gateway after completion')
   .option('--overwrite', 'Overwrite existing archives')
   .option('--suffix <text>', 'Add suffix to filenames (e.g., "_v2")')
   .action(async (options) => {
@@ -9442,7 +9488,11 @@ scheduler
         cfacDataPath: options.cfacPath,
         outputDir: options.output,
         dbPath: options.db,
-        calibrationDays: parseInt(options.calibDays) || 7
+        calibrationDays: parseInt(options.calibDays) || 7,
+        pushToGateway: options.pushGateway || false,
+        // Database source options
+        useDb: options.useDb || false,
+        dataDbPath: options.dataDb
       });
 
       let horizon: 'daily' | 'weekly' | 'both' = 'both';
@@ -9458,7 +9508,33 @@ scheduler
       let current = start;
       let runCount = 0;
 
+      // Determine calibration mode
+      const useCalibrationId = options.useCalibration ? parseInt(options.useCalibration) : undefined;
+      const useMostRecentCalibration = options.useSavedCalibration || false;
+
       console.log(`\n🔄 Backfilling calibrated forecasts from ${options.start} to ${options.end}`);
+
+      // Show calibration info
+      if (useCalibrationId) {
+        const cal = service.getCalibrationById(useCalibrationId);
+        if (cal) {
+          console.log(`   📋 Using saved calibration #${useCalibrationId}`);
+          console.log(`      Wind: ${cal.windScale >= 0 ? '+' : ''}${cal.windScale}%, Solar: ${cal.solarScale >= 0 ? '+' : ''}${cal.solarScale}%`);
+        }
+      } else if (useMostRecentCalibration) {
+        const recent = service.getMostRecentCalibration();
+        if (recent) {
+          console.log(`   📋 Using most recent calibration #${recent.id}`);
+          console.log(`      Wind: ${recent.calibration.windScale >= 0 ? '+' : ''}${recent.calibration.windScale}%, Solar: ${recent.calibration.solarScale >= 0 ? '+' : ''}${recent.calibration.solarScale}%`);
+        }
+      } else {
+        console.log(`   ⚠️  No saved calibration specified - will recalibrate for EACH date`);
+        console.log(`      TIP: Use --use-saved-calibration for faster backfill`);
+      }
+
+      if (options.pushGateway) {
+        console.log(`   📤 Gateway push: ENABLED`);
+      }
 
       while (current <= end) {
         const dateStr = current.toISODate()!;
@@ -9469,7 +9545,13 @@ scheduler
           await service.runCalibratedForecasts(dateStr, {
             horizon,
             forecastType,
-            verbose: false
+            verbose: !options.quiet,  // Verbose by default, use --quiet to suppress
+            trainingDays: parseInt(options.trainingDays) || 30,
+            loadCalibratorPath: options.loadCalibrator,
+            suffix: options.suffix,
+            overwrite: options.overwrite,
+            useCalibrationId,
+            useMostRecentCalibration
           });
           runCount++;
           console.log(`   ✓ ${dateStr} complete`);
@@ -9531,6 +9613,81 @@ scheduler
     }
   });
 
+// scheduler calibrations - List saved calibrations
+scheduler
+  .command('calibrations')
+  .description('List saved calibrations with their settings and metrics')
+  .option('--db <path>', 'Database path', './forecast.db')
+  .option('-n, --limit <number>', 'Number of calibrations to show', '10')
+  .action(async (options) => {
+    try {
+      const service = new ForecastSchedulerService({
+        demandDataPath: 'Data Samples/Demand',
+        cfacDataPath: 'Data Samples/Capacity Factor',
+        outputDir: './output',
+        dbPath: options.db
+      });
+
+      const calibrations = service.getCalibrationHistory(parseInt(options.limit) || 10);
+
+      if (calibrations.length === 0) {
+        console.log('\n📋 No saved calibrations found.');
+        console.log('   Run "scheduler run" to create a calibration.\n');
+        service.close();
+        return;
+      }
+
+      console.log('\n═══════════════════════════════════════════════════════════════════════════════');
+      console.log('                           SAVED CALIBRATIONS                                   ');
+      console.log('═══════════════════════════════════════════════════════════════════════════════\n');
+
+      console.log('  ID │ Date & Time          │ Wind    │ Solar   │ Period                    │ Status');
+      console.log('─────┼──────────────────────┼─────────┼─────────┼───────────────────────────┼────────');
+
+      for (const cal of calibrations) {
+        const id = String(cal.id).padStart(3);
+        const date = new Date(cal.created_at);
+        const dateStr = date.toLocaleDateString('en-CA');  // YYYY-MM-DD format
+        const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const windSign = cal.wind_scale >= 0 ? '+' : '';
+        const solarSign = cal.solar_scale >= 0 ? '+' : '';
+        const windScale = `${windSign}${cal.wind_scale}%`.padStart(6);
+        const solarScale = `${solarSign}${cal.solar_scale}%`.padStart(6);
+        const period = `${cal.calibration_start} to ${cal.calibration_end}`;
+        const status = cal.within_threshold ? '✓ OK' : '○ Partial';
+
+        console.log(` ${id} │ ${dateStr} ${timeStr} │ ${windScale} │ ${solarScale} │ ${period} │ ${status}`);
+      }
+
+      console.log('\n───────────────────────────────────────────────────────────────────────────────');
+      console.log('  Usage: scheduler run --use-calibration <ID>');
+      console.log('         scheduler run --use-saved-calibration  (uses most recent)');
+      console.log('         scheduler backfill --use-calibration <ID>');
+      console.log('───────────────────────────────────────────────────────────────────────────────\n');
+
+      // Show most recent calibration details
+      const recent = service.getMostRecentCalibration();
+      if (recent) {
+        const cal = recent.calibration;
+        console.log('📋 Most Recent Calibration (#' + recent.id + '):');
+        console.log(`   Created: ${new Date(recent.createdAt).toLocaleString()}`);
+        console.log(`   Period: ${cal.calibrationPeriod.start} to ${cal.calibrationPeriod.end}`);
+        console.log(`   Wind Scale: ${cal.windScale >= 0 ? '+' : ''}${cal.windScale}% (deviation: ${cal.windDeviation.toFixed(1)}%)`);
+        console.log(`   Solar Scale: ${cal.solarScale >= 0 ? '+' : ''}${cal.solarScale}% (deviation: ${cal.solarDeviation.toFixed(1)}%)`);
+        if (cal.demandPeakScale !== 0 || cal.demandOffpeakScale !== 0) {
+          console.log(`   Demand Peak: ${cal.demandPeakScale >= 0 ? '+' : ''}${cal.demandPeakScale}%`);
+          console.log(`   Demand Off-peak: ${cal.demandOffpeakScale >= 0 ? '+' : ''}${cal.demandOffpeakScale}%`);
+        }
+        console.log(`   Converged: ${cal.withinThreshold ? 'Yes ✓' : 'No (partial convergence)'}`);
+      }
+
+      service.close();
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
 // scheduler status - Show scheduler status and history
 scheduler
   .command('status')
@@ -9542,7 +9699,7 @@ scheduler
       const Database = (await import('better-sqlite3')).default;
       const db = new Database(options.db);
 
-      // Ensure tables exist
+      // Ensure tables exist with full schema
       db.exec(`
         CREATE TABLE IF NOT EXISTS forecast_runs (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -9557,7 +9714,12 @@ scheduler
           status TEXT DEFAULT 'pending',
           records_generated INTEGER,
           duration_ms INTEGER,
+          output_file TEXT,
           error_message TEXT,
+          scale_wind REAL,
+          scale_solar REAL,
+          gateway_path TEXT,
+          gateway_category TEXT,
           created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS forecast_evaluations (
@@ -9574,6 +9736,26 @@ scheduler
           notes TEXT
         );
       `);
+
+      // Add missing columns to existing tables (migration)
+      const columns = db.prepare("PRAGMA table_info(forecast_runs)").all() as { name: string }[];
+      const columnNames = columns.map(c => c.name);
+
+      if (!columnNames.includes('gateway_path')) {
+        db.exec('ALTER TABLE forecast_runs ADD COLUMN gateway_path TEXT');
+      }
+      if (!columnNames.includes('gateway_category')) {
+        db.exec('ALTER TABLE forecast_runs ADD COLUMN gateway_category TEXT');
+      }
+      if (!columnNames.includes('output_file')) {
+        db.exec('ALTER TABLE forecast_runs ADD COLUMN output_file TEXT');
+      }
+      if (!columnNames.includes('scale_wind')) {
+        db.exec('ALTER TABLE forecast_runs ADD COLUMN scale_wind REAL');
+      }
+      if (!columnNames.includes('scale_solar')) {
+        db.exec('ALTER TABLE forecast_runs ADD COLUMN scale_solar REAL');
+      }
 
       const summary = db.prepare(`
         SELECT

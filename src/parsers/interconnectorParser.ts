@@ -193,7 +193,10 @@ export function parseInterconnectorCsv(
       onProgress?.(`Processing ${file}...`);
       const { records, interconnectors, minDate, maxDate, congestionCount } = parseSingleRTDHS(file);
 
-      allRecords.push(...records);
+      // Use loop instead of spread to avoid stack overflow with large arrays
+      for (const record of records) {
+        allRecords.push(record);
+      }
       interconnectors.forEach(i => allInterconnectors.add(i));
 
       for (const [interconnector, count] of congestionCount.entries()) {

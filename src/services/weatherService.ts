@@ -929,7 +929,8 @@ export class WeatherService {
     startDate: string,
     endDate: string,
     onProgress?: (message: string) => void,
-    isWindCluster: boolean = false
+    isWindCluster: boolean = false,
+    options?: FetchWeatherOptions
   ): Promise<{ success: boolean; data?: string; error?: string; cached: number; downloaded: number; refreshed?: number }> {
     const dates = this.getDateRange(startDate, endDate);
     let cachedCount = 0;
@@ -940,11 +941,24 @@ export class WeatherService {
     const locationId = cluster.clusterId;
     const cacheKey = cluster.clusterId;
     const fetchedAt = DateTime.now().toISO()!;
+    const refreshMode = options?.refreshMode || 'refresh';
+    const maxAgeHours = options?.maxAgeHours ?? 24;
 
     onProgress?.(`Fetching ${isWindCluster ? 'wind (100m)' : 'standard'} weather for cluster ${cluster.clusterId} (${cluster.name}): ${dates.length} days`);
 
-    // Check which dates need fetching using smart database logic
-    const missingDates = db.getClusterMissingDates(locationId, startDate, endDate, 24);
+    // In 'cache' mode, skip all downloads and use existing data only
+    let missingDates: string[];
+    if (refreshMode === 'cache') {
+      missingDates = []; // Don't download anything
+      cachedCount = dates.length;
+      onProgress?.(`  Cache-only mode: using existing ${dates.length} days from database`);
+    } else if (refreshMode === 'force-refresh') {
+      missingDates = dates; // Download everything
+      onProgress?.(`  Force-refresh: re-downloading all ${dates.length} days`);
+    } else {
+      // Normal 'refresh' mode - Check which dates need fetching using smart database logic
+      missingDates = db.getClusterMissingDates(locationId, startDate, endDate, maxAgeHours);
+    }
 
     // Get existing data counts
     const existingCount = dates.length - missingDates.length;
@@ -1061,18 +1075,26 @@ export class WeatherService {
     startDate: string,
     endDate: string,
     onProgress?: (message: string) => void,
-    windClusterIds?: Set<string>
+    windClusterIds?: Set<string>,
+    options?: FetchWeatherOptions
   ): Promise<Map<string, string>> {
     const results = new Map<string, string>();
     const totalClusters = clusters.length;
     const windCount = windClusterIds?.size || 0;
     const dates = this.getDateRange(startDate, endDate);
     const totalDays = dates.length;
+    const refreshMode = options?.refreshMode || 'refresh';
 
     // Show detailed header
     onProgress?.(`   Clusters: ${totalClusters} locations (${windCount} wind, ${totalClusters - windCount} other)`);
     onProgress?.(`   Period: ${startDate} to ${endDate} (${totalDays} days)`);
-    onProgress?.(`   Expected API calls: up to ${totalClusters * totalDays} (cached data will be skipped)`);
+    if (refreshMode === 'cache') {
+      onProgress?.(`   Mode: CACHE-ONLY (no downloads, using existing data)`);
+    } else if (refreshMode === 'force-refresh') {
+      onProgress?.(`   Mode: FORCE-REFRESH (re-downloading all data)`);
+    } else {
+      onProgress?.(`   Expected API calls: up to ${totalClusters * totalDays} (cached data will be skipped)`);
+    }
 
     let totalCached = 0;
     let totalDownloaded = 0;
@@ -1086,7 +1108,7 @@ export class WeatherService {
 
       onProgress?.(`   [${processedCount}/${totalClusters}] ${cluster.clusterId} ${clusterType} @ ${cluster.latitude.toFixed(4)}, ${cluster.longitude.toFixed(4)}`);
 
-      const result = await this.fetchClusterWeatherData(cluster, startDate, endDate, onProgress, isWindCluster);
+      const result = await this.fetchClusterWeatherData(cluster, startDate, endDate, onProgress, isWindCluster, options);
       if (result.success && result.data) {
         results.set(cluster.clusterId, result.data);
         totalCached += result.cached || 0;

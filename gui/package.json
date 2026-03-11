@@ -37,12 +37,21 @@
     "directories": {
       "output": "release"
     },
+    "asar": false,
     "files": [
       "dist/**/*",
-      "dist-electron/**/*"
+      "dist-electron/**/*",
+      "assets/**/*"
     ],
     "win": {
-      "target": "nsis",
+      "target": [
+        {
+          "target": "dir",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "icon": "assets/VANTAGE_LOGO-removebg-preview.ico"
     },
     "mac": {
@@ -50,6 +59,15 @@
     },
     "linux": {
       "icon": "assets/VANTAGE_LOGO-removebg-preview.png"
+    },
+    "portable": {
+      "artifactName": "${productName}-portable.exe"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "${productName}-Setup-${version}.exe"
     }
   }
 }

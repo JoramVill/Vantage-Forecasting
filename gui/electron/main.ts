@@ -3,11 +3,73 @@ import { spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import Store from 'electron-store';
-import Database from 'better-sqlite3';
+
+// Note: better-sqlite3 is NOT loaded directly in Electron main process
+// due to native module compatibility issues (NODE_MODULE_VERSION mismatch).
+// All database operations use helper scripts spawned via Node.js subprocess.
 
 // Zone codes for detection
 const ZONAL_CODES = ['01NLUZ', '02METRO', '03SLUZ', '04LEYTE', '05CEBU', '06NEGROS', '07BOHOL', '08PANAY', '09NWMIN', '10LANAO', '11NCMIN', '12NEMIN', '13SEMIN', '14SWMIN'];
 const REGIONAL_CODES = ['CLUZ', 'CVIS', 'CMIN'];
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PORTABLE MODE DETECTION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Detect if running in portable mode (packaged distribution)
+ * Portable mode is detected by:
+ * 1. Presence of .portable marker file in app directory
+ * 2. Presence of cli/node/node.exe (bundled Node.js)
+ */
+function isPortableMode(): boolean {
+  const appDir = path.dirname(app.getPath('exe'));
+  const portableMarker = path.join(appDir, '.portable');
+  const bundledNode = path.join(appDir, 'cli', 'node', 'node.exe');
+  return fs.existsSync(portableMarker) || fs.existsSync(bundledNode);
+}
+
+/**
+ * Get the application root directory
+ * - Portable: directory containing the .exe
+ * - Development: project root (parent of gui/)
+ */
+function getAppRoot(): string {
+  if (isPortableMode()) {
+    return path.dirname(app.getPath('exe'));
+  }
+  // Development mode: go up from gui/dist-electron to project root
+  const guiDir = path.dirname(__dirname);
+  return path.dirname(guiDir);
+}
+
+/**
+ * Get the Node.js executable path
+ * - Portable: bundled node.exe in cli/node/
+ * - Development: system 'node' command
+ */
+function getNodePath(): string {
+  if (isPortableMode()) {
+    const bundledNode = path.join(getAppRoot(), 'cli', 'node', 'node.exe');
+    if (fs.existsSync(bundledNode)) {
+      return bundledNode;
+    }
+  }
+  return 'node'; // Use system node
+}
+
+/**
+ * Get the CLI script path
+ * - Portable: cli/dist/index.js
+ * - Development: dist/index.js (relative to project root)
+ */
+function getCliScriptPath(): string {
+  const appRoot = getAppRoot();
+  if (isPortableMode()) {
+    return path.join(appRoot, 'cli', 'dist', 'index.js');
+  }
+  return path.join(appRoot, 'dist', 'index.js');
+}
 
 // Settings store with encryption
 const store = new Store({
@@ -17,14 +79,56 @@ const store = new Store({
 
 let mainWindow: BrowserWindow | null = null;
 
+// Window state management
+interface WindowState {
+  width: number;
+  height: number;
+  x?: number;
+  y?: number;
+  isMaximized?: boolean;
+}
+
+function getWindowState(): WindowState {
+  const defaultState: WindowState = { width: 1000, height: 800 };
+  const saved = store.get('windowState') as WindowState | undefined;
+  return saved || defaultState;
+}
+
+function saveWindowState(): void {
+  if (!mainWindow) return;
+
+  const isMaximized = mainWindow.isMaximized();
+  if (!isMaximized) {
+    const bounds = mainWindow.getBounds();
+    store.set('windowState', {
+      width: bounds.width,
+      height: bounds.height,
+      x: bounds.x,
+      y: bounds.y,
+      isMaximized: false,
+    });
+  } else {
+    // Keep the previous non-maximized bounds but flag as maximized
+    const current = store.get('windowState') as WindowState | undefined;
+    if (current) {
+      store.set('windowState', { ...current, isMaximized: true });
+    }
+  }
+}
+
 function createWindow() {
   // Get icon path - go up from dist-electron to gui, then to assets
   const guiDir = path.dirname(__dirname);
   const iconPath = path.join(guiDir, 'assets', 'VANTAGE_LOGO-removebg-preview.ico');
 
+  // Restore previous window state
+  const windowState = getWindowState();
+
   mainWindow = new BrowserWindow({
-    width: 1000,
-    height: 800,
+    width: windowState.width,
+    height: windowState.height,
+    x: windowState.x,
+    y: windowState.y,
     minWidth: 800,
     minHeight: 600,
     title: 'Vantage Forecaster',
@@ -42,6 +146,16 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
+
+  // Restore maximized state
+  if (windowState.isMaximized) {
+    mainWindow.maximize();
+  }
+
+  // Save window state on resize/move
+  mainWindow.on('resize', saveWindowState);
+  mainWindow.on('move', saveWindowState);
+  mainWindow.on('close', saveWindowState);
 
   // Load Vite dev server in development, built files in production
   if (process.env.NODE_ENV === 'development') {
@@ -70,16 +184,13 @@ app.on('activate', () => {
   }
 });
 
-// Get the CLI path - go up from gui/dist-electron to project root
+// Get the CLI path - portable aware
 function getCliPath(): string {
-  const guiDir = path.dirname(__dirname);
-  const projectRoot = path.dirname(guiDir);
-  return path.join(projectRoot, 'dist', 'index.js');
+  return getCliScriptPath();
 }
 
 function getProjectRoot(): string {
-  const guiDir = path.dirname(__dirname);
-  return path.dirname(guiDir);
+  return getAppRoot();
 }
 
 // IPC Handler: Run CLI command with real-time output
@@ -88,10 +199,12 @@ ipcMain.handle('run-command', async (_event, args: string[]) => {
     const cliPath = getCliPath();
     const projectRoot = getProjectRoot();
 
-    console.log('Running command:', 'node', cliPath, ...args);
+    const nodePath = getNodePath();
+    console.log('Running command:', nodePath, cliPath, ...args);
     console.log('Working directory:', projectRoot);
+    console.log('Portable mode:', isPortableMode());
 
-    const child = spawn('node', [cliPath, ...args], {
+    const child = spawn(nodePath, [cliPath, ...args], {
       cwd: projectRoot,
       shell: false,
       env: { ...process.env },
@@ -134,10 +247,11 @@ ipcMain.handle('run-script', async (_event, scriptPath: string, args: string[]) 
     const projectRoot = getProjectRoot();
     const fullScriptPath = path.join(projectRoot, scriptPath);
 
-    console.log('Running script:', 'node', fullScriptPath, ...args);
+    const nodePath = getNodePath();
+    console.log('Running script:', nodePath, fullScriptPath, ...args);
     console.log('Working directory:', projectRoot);
 
-    const child = spawn('node', [fullScriptPath, ...args], {
+    const child = spawn(nodePath, [fullScriptPath, ...args], {
       cwd: projectRoot,
       shell: false,
       env: { ...process.env },
@@ -218,8 +332,15 @@ ipcMain.handle('get-app-path', () => {
 });
 
 // IPC Handler: Load settings
+// Returns all saved settings from electron-store
 ipcMain.handle('load-settings', () => {
+  // Return all stored settings (store.store contains all key-value pairs)
+  // We provide defaults for commonly used settings
+  const allSettings = store.store as Record<string, any>;
+
+  // Merge with defaults for backward compatibility
   return {
+    // Manual tab settings
     dataSource: store.get('dataSource', 'csv'),
     databasePath: store.get('databasePath', ''),
     demandDataDir: store.get('demandDataDir', ''),
@@ -231,7 +352,15 @@ ipcMain.handle('load-settings', () => {
     enableCfac: store.get('enableCfac', true),
     enableZonal: store.get('enableZonal', false),
     scalingPercent: store.get('scalingPercent', 100),
-    cfacModel: store.get('cfacModel', 'lstm'), // LSTM is the new default
+    cfacModel: store.get('cfacModel', 'hybrid'),
+    demandModel: store.get('demandModel', 'hybrid-calibrated'),
+    pushToGateway: store.get('pushToGateway', false),
+    // Per-type scaling
+    scalingWind: store.get('scalingWind', 100),
+    scalingSolar: store.get('scalingSolar', 100),
+    usePerTypeScaling: store.get('usePerTypeScaling', false),
+    demandGrowthRate: store.get('demandGrowthRate', 0),
+    trainingEndDate: store.get('trainingEndDate', ''),
     // Output naming settings
     demandPrefix: store.get('demandPrefix', 'FC_DEM_'),
     demandZonalPrefix: store.get('demandZonalPrefix', 'FC_ZDEM_'),
@@ -240,6 +369,57 @@ ipcMain.handle('load-settings', () => {
     useCustomName: store.get('useCustomName', false),
     customDemandName: store.get('customDemandName', ''),
     customCfacName: store.get('customCfacName', ''),
+    // Tab state
+    activeTab: store.get('activeTab', 'manual'),
+    // Scheduler settings
+    schedulerDailyEnabled: store.get('schedulerDailyEnabled', true),
+    schedulerWeeklyEnabled: store.get('schedulerWeeklyEnabled', true),
+    schedulerDemandEnabled: store.get('schedulerDemandEnabled', true),
+    schedulerCfacEnabled: store.get('schedulerCfacEnabled', true),
+    schedulerDemandGeography: store.get('schedulerDemandGeography', 'regional'),
+    schedulerOutputDir: store.get('schedulerOutputDir', 'output/forecasts'),
+    schedulerDemandModel: store.get('schedulerDemandModel', 'hybrid'),
+    schedulerCalibDays: store.get('schedulerCalibDays', 7),
+    schedulerCalibThreshold: store.get('schedulerCalibThreshold', 5),
+    schedulerMaxIterations: store.get('schedulerMaxIterations', 3),
+    calibrationIterations: store.get('calibrationIterations', 3),
+    schedulerDataSource: store.get('schedulerDataSource', 'database'),
+    schedulerTimes: store.get('schedulerTimes', ['06:00']),
+    schedulerAutoEnabled: store.get('schedulerAutoEnabled', false),
+    schedulerDemandPrefix: store.get('schedulerDemandPrefix', 'FC_DEM_'),
+    schedulerDemandZonalPrefix: store.get('schedulerDemandZonalPrefix', 'FC_ZDEM_'),
+    schedulerCfacPrefix: store.get('schedulerCfacPrefix', 'FC_CF_'),
+    schedulerOutputSuffix: store.get('schedulerOutputSuffix', ''),
+    schedulerSelectedCalibrator: store.get('schedulerSelectedCalibrator', ''),
+    schedulerCalibrationMode: store.get('schedulerCalibrationMode', 'auto'),
+    schedulerCalibrationPeriod: store.get('schedulerCalibrationPeriod', '1month'),
+    selectedCalibrationId: store.get('selectedCalibrationId', null),
+    schedulerRefreshWeather: store.get('schedulerRefreshWeather', false),
+    schedulerOverwrite: store.get('schedulerOverwrite', false),
+    schedulerSuffix: store.get('schedulerSuffix', ''),
+    // Global settings (Settings tab)
+    globalRegionalDemandDb: store.get('globalRegionalDemandDb', 'data/iload.db'),
+    globalZonalDemandDb: store.get('globalZonalDemandDb', 'data/iload_zonal.db'),
+    globalSchedulerDb: store.get('globalSchedulerDb', './forecast.db'),
+    globalDemandCsvPath: store.get('globalDemandCsvPath', 'Data Samples/Demand'),
+    globalCfacCsvPath: store.get('globalCfacCsvPath', 'Data Samples/Capacity Factor'),
+    globalWeatherCacheDir: store.get('globalWeatherCacheDir', './weather_cache'),
+    globalSchedulerOutputDir: store.get('globalSchedulerOutputDir', './output/forecasts'),
+    autoImportBeforeRun: store.get('autoImportBeforeRun', true),
+    autoFetchWeather: store.get('autoFetchWeather', true),
+    // Per-type CFAC settings (Wind and Solar have different optimal configurations)
+    windUseXgboost: store.get('windUseXgboost', false),
+    windAsymmetricLoss: store.get('windAsymmetricLoss', false),
+    windBiasCorrection: store.get('windBiasCorrection', false),
+    solarUseXgboost: store.get('solarUseXgboost', true),
+    solarAsymmetricLoss: store.get('solarAsymmetricLoss', true),
+    solarBiasCorrection: store.get('solarBiasCorrection', false),
+    // Calibration settings
+    calibrationMode: store.get('calibrationMode', 'auto'),
+    selectedCalibrator: store.get('selectedCalibrator', ''),
+    saveCalibrator: store.get('saveCalibrator', false),
+    // Include any other settings that were saved
+    ...allSettings,
   };
 });
 
@@ -428,7 +608,8 @@ ipcMain.handle('get-database-info', async (_event, dbPath: string) => {
     }
 
     // Run the db-info script from the project root (where better-sqlite3 is installed)
-    const child = spawn('node', [scriptPath, fullPath], {
+    const nodePath = getNodePath();
+    const child = spawn(nodePath, [scriptPath, fullPath], {
       cwd: projectRoot,
       shell: false,
       env: { ...process.env },
@@ -500,9 +681,10 @@ ipcMain.handle('import-to-database', async (_event, options: {
     // Build the import command
     const args = ['db', 'import', '-t', options.dataType, '-f', options.sourcePath, '--db', options.dbPath];
 
-    console.log('Running import:', 'node', cliPath, ...args);
+    const nodePath = getNodePath();
+    console.log('Running import:', nodePath, cliPath, ...args);
 
-    const child = spawn('node', [cliPath, ...args], {
+    const child = spawn(nodePath, [cliPath, ...args], {
       cwd: projectRoot,
       shell: false,
       env: { ...process.env },
@@ -596,195 +778,208 @@ ipcMain.handle('list-trained-models', async () => {
 // SCHEDULER IPC HANDLERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// Load scheduler configuration from database
-ipcMain.handle('load-scheduler-config', async () => {
-  try {
+// Helper function to run scheduler-query script
+function runSchedulerQuery(command: string, ...args: string[]): Promise<any> {
+  return new Promise((resolve, reject) => {
     const projectRoot = getProjectRoot();
+    const nodePath = getNodePath();
+    const scriptPath = path.join(projectRoot, 'scripts', 'scheduler-query.cjs');
     const dbPath = path.join(projectRoot, 'forecast.db');
 
-    // Check if database exists
-    if (!fs.existsSync(dbPath)) {
-      // Return defaults if database doesn't exist
-      return {
-        enabled: false,
-        runTimeMorning: '06:00',
-        runTimeEvening: '18:00',
-        secondRunEnabled: false,
-        runDays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
-        forecastDemand: true,
-        forecastCfac: true,
-        horizonDaily: true,
-        horizonWeekly: true,
-        weatherMaxAge: 6,
-        autoPushGateway: false,
-        archiveRetention: 90
-      };
-    }
+    const spawnArgs = [scriptPath, command, ...args, dbPath];
 
-    // Use better-sqlite3 to read config
-    const db = new Database(dbPath);
+    const child = spawn(nodePath, spawnArgs, {
+      cwd: projectRoot,
+      env: { ...process.env },
+      windowsHide: true,
+    });
 
-    const config = db.prepare('SELECT * FROM scheduler_config WHERE id = 1').get() as any;
-    db.close();
+    let stdout = '';
+    let stderr = '';
 
-    if (!config) {
-      // Return defaults if no config found
-      return {
-        enabled: false,
-        runTimeMorning: '06:00',
-        runTimeEvening: '18:00',
-        secondRunEnabled: false,
-        runDays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
-        forecastDemand: true,
-        forecastCfac: true,
-        horizonDaily: true,
-        horizonWeekly: true,
-        weatherMaxAge: 6,
-        autoPushGateway: false,
-        archiveRetention: 90
-      };
-    }
+    child.stdout.on('data', (data) => {
+      stdout += data.toString();
+    });
 
-    // Parse database values to config format
-    const dayMap: Record<string, string> = {'1':'Mon','2':'Tue','3':'Wed','4':'Thu','5':'Fri','6':'Sat','7':'Sun'};
-    const runDays = config.run_days ? config.run_days.split(',').map((d: string) => {
-      return dayMap[d.trim()] || d.trim();
-    }) : ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+    child.stderr.on('data', (data) => {
+      stderr += data.toString();
+    });
 
-    const forecastTypes = config.forecast_types || 'demand,cfac';
-    const horizons = config.horizons || 'daily,weekly';
+    child.on('close', (code) => {
+      if (code === 0 && stdout.trim()) {
+        try {
+          resolve(JSON.parse(stdout.trim()));
+        } catch (e) {
+          console.error('Failed to parse scheduler-query output:', stdout);
+          reject(new Error('Invalid JSON output'));
+        }
+      } else {
+        console.error('scheduler-query error:', stderr);
+        reject(new Error(stderr || 'Unknown error'));
+      }
+    });
 
-    return {
-      enabled: config.enabled === 1,
-      runTimeMorning: config.run_time_morning || '06:00',
-      runTimeEvening: config.run_time_evening || '18:00',
-      secondRunEnabled: !!config.run_time_evening,
-      runDays,
-      forecastDemand: forecastTypes.includes('demand'),
-      forecastCfac: forecastTypes.includes('cfac'),
-      horizonDaily: horizons.includes('daily'),
-      horizonWeekly: horizons.includes('weekly'),
-      weatherMaxAge: config.weather_max_age_hours || 6,
-      autoPushGateway: config.auto_push_gateway === 1,
-      archiveRetention: config.archive_retention_days || 90
-    };
+    child.on('error', (err) => {
+      reject(err);
+    });
+  });
+}
+
+// Load scheduler configuration from database
+ipcMain.handle('load-scheduler-config', async () => {
+  const defaults = {
+    enabled: false,
+    runTimeMorning: '06:00',
+    runTimeEvening: '18:00',
+    secondRunEnabled: false,
+    runDays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+    forecastDemand: true,
+    forecastCfac: true,
+    horizonDaily: true,
+    horizonWeekly: true,
+    weatherMaxAge: 6,
+    autoPushGateway: false,
+    archiveRetention: 90
+  };
+
+  try {
+    const config = await runSchedulerQuery('config');
+    return config || defaults;
   } catch (error: any) {
     console.error('Failed to load scheduler config:', error);
-    // Return defaults on error
-    return {
-      enabled: false,
-      runTimeMorning: '06:00',
-      runTimeEvening: '18:00',
-      secondRunEnabled: false,
-      runDays: ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'],
-      forecastDemand: true,
-      forecastCfac: true,
-      horizonDaily: true,
-      horizonWeekly: true,
-      weatherMaxAge: 6,
-      autoPushGateway: false,
-      archiveRetention: 90
-    };
+    return defaults;
   }
 });
 
 // Save scheduler configuration to database
 ipcMain.handle('save-scheduler-config', async (_event, config) => {
-  try {
-    const projectRoot = getProjectRoot();
-    const dbPath = path.join(projectRoot, 'forecast.db');
+  // Use CLI to save scheduler config (avoids native module issues in dev)
+  const cliPath = getCliPath();
+  const projectRoot = getProjectRoot();
+  const nodePath = getNodePath();
 
-    const db = new Database(dbPath);
+  // Build CLI arguments for scheduler config command
+  const args = [cliPath, 'scheduler', 'config'];
 
-    // Convert runDays to database format (1-7)
-    const dayMap: Record<string, string> = {'Mon':'1','Tue':'2','Wed':'3','Thu':'4','Fri':'5','Sat':'6','Sun':'7'};
-    const runDays = config.runDays.map((d: string) => dayMap[d] || d).join(',');
+  // Convert runDays to database format (1-7)
+  const dayMap: Record<string, string> = {'Mon':'1','Tue':'2','Wed':'3','Thu':'4','Fri':'5','Sat':'6','Sun':'7'};
+  const runDays = config.runDays.map((d: string) => dayMap[d] || d).join(',');
 
-    // Build forecast_types and horizons
-    const forecastTypes = [];
-    if (config.forecastDemand) forecastTypes.push('demand');
-    if (config.forecastCfac) forecastTypes.push('cfac');
+  // Set times
+  const times = config.secondRunEnabled
+    ? `${config.runTimeMorning},${config.runTimeEvening}`
+    : config.runTimeMorning;
+  args.push('--set-times', times);
 
-    const horizons = [];
-    if (config.horizonDaily) horizons.push('daily');
-    if (config.horizonWeekly) horizons.push('weekly');
+  // Set days
+  args.push('--set-days', runDays);
 
-    db.prepare(`
-      INSERT INTO scheduler_config (id, enabled, run_time_morning, run_time_evening,
-        run_days, forecast_types, horizons, weather_max_age_hours,
-        auto_push_gateway, archive_retention_days, updated_at)
-      VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-      ON CONFLICT(id) DO UPDATE SET
-        enabled = excluded.enabled,
-        run_time_morning = excluded.run_time_morning,
-        run_time_evening = excluded.run_time_evening,
-        run_days = excluded.run_days,
-        forecast_types = excluded.forecast_types,
-        horizons = excluded.horizons,
-        weather_max_age_hours = excluded.weather_max_age_hours,
-        auto_push_gateway = excluded.auto_push_gateway,
-        archive_retention_days = excluded.archive_retention_days,
-        updated_at = excluded.updated_at
-    `).run(
-      config.enabled ? 1 : 0,
-      config.runTimeMorning,
-      config.secondRunEnabled ? config.runTimeEvening : null,
-      runDays,
-      forecastTypes.join(','),
-      horizons.join(','),
-      config.weatherMaxAge,
-      config.autoPushGateway ? 1 : 0,
-      config.archiveRetention
-    );
+  // Set weather max age
+  args.push('--weather-max-age', String(config.weatherMaxAge));
 
-    db.close();
-    return { success: true };
-  } catch (error: any) {
-    console.error('Failed to save scheduler config:', error);
-    return { success: false, error: error.message };
+  // Set archive retention
+  args.push('--archive-retention', String(config.archiveRetention));
+
+  // Enable or disable
+  if (config.enabled) {
+    args.push('--enable');
+  } else {
+    args.push('--disable');
   }
+
+  return new Promise((resolve) => {
+    const child = spawn(nodePath, args, {
+      cwd: projectRoot,
+      shell: false,
+      env: { ...process.env }
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', (data: Buffer) => {
+      stdout += data.toString();
+    });
+
+    child.stderr.on('data', (data: Buffer) => {
+      stderr += data.toString();
+    });
+
+    child.on('close', (code: number | null) => {
+      if (code === 0) {
+        resolve({ success: true });
+      } else {
+        console.error('Failed to save scheduler config via CLI:', stderr);
+        resolve({ success: false, error: stderr || 'CLI command failed' });
+      }
+    });
+
+    child.on('error', (error: Error) => {
+      console.error('Failed to spawn CLI for scheduler config:', error);
+      resolve({ success: false, error: error.message });
+    });
+  });
 });
 
 // Get recent forecast runs from database
 ipcMain.handle('get-recent-runs', async (_event, limit = 20) => {
   try {
-    const projectRoot = getProjectRoot();
-    const dbPath = path.join(projectRoot, 'forecast.db');
-
-    // Check if database exists
-    if (!fs.existsSync(dbPath)) {
-      return [];
-    }
-
-    const db = new Database(dbPath);
-
-    const runs = db.prepare(`
-      SELECT id, run_date, forecast_type, horizon, status,
-             records_generated, gateway_path, created_at
-      FROM forecast_runs
-      ORDER BY created_at DESC
-      LIMIT ?
-    `).all(limit) as any[];
-
-    db.close();
-
-    return runs.map((run: any) => ({
-      ...run,
-      pushed_to_gateway: !!run.gateway_path
-    }));
+    const runs = await runSchedulerQuery('runs', String(limit));
+    return runs || [];
   } catch (error: any) {
     console.error('Failed to get recent runs:', error);
     return [];
   }
 });
 
+// Get saved calibrations from database
+ipcMain.handle('get-calibrations', async (_event, limit = 10) => {
+  try {
+    const calibrations = await runSchedulerQuery('calibrations', String(limit));
+    return calibrations || [];
+  } catch (error: any) {
+    console.error('Failed to get calibrations:', error);
+    return [];
+  }
+});
+
 // Run scheduler manually with specified parameters
-ipcMain.handle('run-scheduler-manual', async (_event, date, type, horizon) => {
+ipcMain.handle('run-scheduler-manual', async (_event, options: {
+  date: string;
+  type: string;
+  horizon: string;
+  calibratorPath?: string | null;
+  trainingDays?: number;
+  endDate?: string | null;
+  verbose?: boolean;
+  pushGateway?: boolean;
+  useCalibrationId?: number | null;
+  useDb?: boolean;
+  dataDbPath?: string | null;
+  maxIterations?: number;
+  refreshWeather?: boolean;
+  overwrite?: boolean;
+  suffix?: string | null;
+  outputDir?: string;
+  useXgboost?: boolean;
+  asymmetricLoss?: boolean;
+  biasCorrection?: boolean;
+  weatherCacheDir?: string;
+}) => {
   const cliPath = getCliPath();
   const projectRoot = getProjectRoot();
 
+  const { date, type, horizon, calibratorPath, trainingDays, endDate, verbose, pushGateway,
+          useCalibrationId, useDb, dataDbPath, maxIterations, refreshWeather, overwrite,
+          suffix, outputDir, useXgboost, asymmetricLoss, biasCorrection, weatherCacheDir } = options;
+
+  // Determine if this is a date range (backfill) or single date run
+  const isBackfill = endDate && endDate !== date;
+
   // Build CLI arguments
-  const args = [cliPath, 'scheduler', 'run', '-d', date];
+  const args = isBackfill
+    ? [cliPath, 'scheduler', 'backfill', '-s', date, '-e', endDate]
+    : [cliPath, 'scheduler', 'run', '-d', date];
 
   if (type === 'demand') args.push('--demand-only');
   else if (type === 'cfac') args.push('--cfac-only');
@@ -792,11 +987,82 @@ ipcMain.handle('run-scheduler-manual', async (_event, date, type, horizon) => {
   if (horizon === 'daily') args.push('--daily');
   else if (horizon === 'weekly') args.push('--weekly');
 
-  console.log('Running scheduler:', 'node', ...args);
+  // Add calibrator path if using a saved model
+  if (calibratorPath) {
+    args.push('--load-calibrator', calibratorPath);
+  }
+
+  // Add auto-calibration training period (data end date is auto-detected from actual data)
+  if (trainingDays && trainingDays > 0) {
+    args.push('--training-days', String(trainingDays));
+  }
+
+  // Add max calibration iterations (0 = no calibration)
+  if (typeof maxIterations === 'number') {
+    args.push('--max-iterations', String(maxIterations));
+  }
+
+  // Add quiet flag if verbose is explicitly false (verbose is default/true)
+  if (verbose === false) {
+    args.push('--quiet');
+  }
+
+  // Add gateway push flag if enabled
+  if (pushGateway === true) {
+    args.push('--push-gateway');
+  }
+
+  // Use saved calibration to skip calibration phase
+  if (useCalibrationId && useCalibrationId > 0) {
+    args.push('--use-calibration', String(useCalibrationId));
+  }
+
+  // Database source options
+  if (useDb === true) {
+    args.push('--use-db');
+    if (dataDbPath) {
+      args.push('--data-db', dataDbPath);
+    }
+  }
+
+  // New options
+  if (refreshWeather === true) {
+    args.push('--refresh-weather');
+  }
+
+  if (isBackfill && overwrite === true) {
+    args.push('--overwrite');
+  }
+
+  if (isBackfill && suffix) {
+    args.push('--suffix', suffix);
+  }
+
+  if (outputDir) {
+    args.push('--output', outputDir);
+  }
+
+  if (useXgboost === true) {
+    args.push('--use-xgboost');
+  }
+
+  if (asymmetricLoss === true) {
+    args.push('--asymmetric-loss');
+  }
+
+  if (biasCorrection === true) {
+    args.push('--bias-correction');
+  }
+
+  // Note: --cache is not supported by scheduler commands (it uses its own weather cache logic)
+  // The weatherCacheDir setting is used by manual forecast commands instead
+
+  const nodePath = getNodePath();
+  console.log('Running scheduler:', nodePath, ...args);
 
   // Return promise that resolves when command completes
   return new Promise((resolve) => {
-    const child = spawn('node', args, {
+    const child = spawn(nodePath, args, {
       cwd: projectRoot,
       shell: false,
       env: { ...process.env }
@@ -835,4 +1101,344 @@ ipcMain.handle('run-scheduler-manual', async (_event, date, type, horizon) => {
       resolve({ success: false, error: err.message });
     });
   });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GATEWAY CONFIGURATION IPC HANDLERS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+interface GatewayConfig {
+  host: string;
+  port: number;
+  username: string;
+  password: string;
+}
+
+interface ConfigFile {
+  gateway?: GatewayConfig;
+  [key: string]: any;
+}
+
+// Load gateway configuration from config.json
+ipcMain.handle('load-gateway-config', async () => {
+  try {
+    const projectRoot = getProjectRoot();
+    const configPath = path.join(projectRoot, 'config.json');
+
+    const defaults: GatewayConfig = {
+      host: '100.115.9.94',
+      port: 22,
+      username: 'vantage-upload',
+      password: ''
+    };
+
+    if (!fs.existsSync(configPath)) {
+      return defaults;
+    }
+
+    const configContent = fs.readFileSync(configPath, 'utf8');
+    const config: ConfigFile = JSON.parse(configContent);
+
+    return {
+      host: config.gateway?.host || defaults.host,
+      port: config.gateway?.port || defaults.port,
+      username: config.gateway?.username || defaults.username,
+      password: config.gateway?.password || defaults.password
+    };
+  } catch (error: any) {
+    console.error('Failed to load gateway config:', error);
+    return {
+      host: '100.115.9.94',
+      port: 22,
+      username: 'vantage-upload',
+      password: ''
+    };
+  }
+});
+
+// Save gateway configuration to config.json
+ipcMain.handle('save-gateway-config', async (_event, gatewayConfig: GatewayConfig) => {
+  try {
+    const projectRoot = getProjectRoot();
+    const configPath = path.join(projectRoot, 'config.json');
+
+    let config: ConfigFile = {};
+
+    // Load existing config if it exists
+    if (fs.existsSync(configPath)) {
+      const configContent = fs.readFileSync(configPath, 'utf8');
+      config = JSON.parse(configContent);
+    }
+
+    // Update gateway section
+    config.gateway = {
+      host: gatewayConfig.host,
+      port: gatewayConfig.port,
+      username: gatewayConfig.username,
+      password: gatewayConfig.password
+    };
+
+    // Write back to config.json
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+
+    return { success: true };
+  } catch (error: any) {
+    console.error('Failed to save gateway config:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Test gateway connection
+ipcMain.handle('test-gateway-connection', async () => {
+  try {
+    const projectRoot = getProjectRoot();
+    const cliPath = getCliPath();
+    const nodePath = getNodePath();
+
+    return new Promise<{ connected: boolean; directories?: any[]; error?: string }>((resolve) => {
+      const args = ['gateway', 'test'];
+
+      const child = spawn(nodePath, [cliPath, ...args], {
+        cwd: projectRoot,
+        env: { ...process.env },
+        shell: true
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      child.stdout.on('data', (data) => {
+        stdout += data.toString();
+      });
+
+      child.stderr.on('data', (data) => {
+        stderr += data.toString();
+      });
+
+      child.on('close', (code) => {
+        // Parse the output to determine connection status
+        const output = stdout + stderr;
+
+        if (code === 0 && output.includes('Connected')) {
+          // Parse directory results from output
+          const directories: { path: string; accessible: boolean; error?: string }[] = [];
+          const lines = output.split('\n');
+
+          for (const line of lines) {
+            if (line.includes('/day-ahead') || line.includes('/week-ahead') ||
+                line.includes('/demand') || line.includes('/cfac') || line.includes('/other')) {
+              const accessible = line.includes('✓');
+              const pathMatch = line.match(/[✓✗]\s+(\S+)/);
+              if (pathMatch) {
+                directories.push({
+                  path: pathMatch[1],
+                  accessible,
+                  error: accessible ? undefined : 'Not accessible'
+                });
+              }
+            }
+          }
+
+          resolve({ connected: true, directories });
+        } else {
+          // Extract error message
+          let error = 'Connection failed';
+          if (output.includes('password not configured')) {
+            error = 'Password not configured';
+          } else if (output.includes('ECONNREFUSED')) {
+            error = 'Connection refused - check if Tailscale is connected';
+          } else if (output.includes('ETIMEDOUT')) {
+            error = 'Connection timed out - check network';
+          } else if (output.includes('Authentication')) {
+            error = 'Authentication failed - check password';
+          } else if (stderr) {
+            error = stderr.split('\n')[0];
+          }
+
+          resolve({ connected: false, error });
+        }
+      });
+
+      child.on('error', (err) => {
+        resolve({ connected: false, error: err.message });
+      });
+
+      // Timeout after 30 seconds
+      setTimeout(() => {
+        child.kill();
+        resolve({ connected: false, error: 'Connection timed out' });
+      }, 30000);
+    });
+  } catch (error: any) {
+    return { connected: false, error: error.message };
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GATEWAY STORAGE MANAGEMENT IPC HANDLERS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+interface GatekeeperApiConfig {
+  baseUrl: string;
+  adminKey: string;
+}
+
+// Helper function to get gateway API configuration
+function getGatekeeperApiConfig(): GatekeeperApiConfig {
+  const projectRoot = getProjectRoot();
+  const configPath = path.join(projectRoot, 'config.json');
+
+  // Default to Tailscale Funnel URL (HTTPS, no port)
+  let baseUrl = 'https://vantage-gateway.taile437a5.ts.net';
+  let adminKey = ''; // Admin key for authentication
+
+  if (fs.existsSync(configPath)) {
+    try {
+      const configContent = fs.readFileSync(configPath, 'utf8');
+      const config: ConfigFile = JSON.parse(configContent);
+      // Allow override of the API URL if specified
+      if (config.gatekeeperApiUrl) {
+        baseUrl = config.gatekeeperApiUrl;
+      }
+      if (config.gatekeeperAdminKey) {
+        adminKey = config.gatekeeperAdminKey;
+      }
+    } catch (e) {
+      // Use defaults
+    }
+  }
+
+  // Also check environment variable
+  if (!adminKey && process.env.VANTAGE_ADMIN_KEY) {
+    adminKey = process.env.VANTAGE_ADMIN_KEY;
+  }
+
+  return {
+    baseUrl,
+    adminKey
+  };
+}
+
+// Get gateway storage statistics
+ipcMain.handle('get-gateway-storage', async () => {
+  try {
+    const { baseUrl, adminKey } = getGatekeeperApiConfig();
+
+    if (!adminKey) {
+      return { success: false, error: 'Gatekeeper admin key not configured. Add "gatekeeperAdminKey" to config.json or set VANTAGE_ADMIN_KEY environment variable.' };
+    }
+
+    const response = await fetch(`${baseUrl}/admin/storage`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${adminKey}`
+      }
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      if (response.status === 401) {
+        return { success: false, error: 'Authentication failed. Check your admin key.' };
+      }
+      return { success: false, error: `HTTP ${response.status}: ${errorText}` };
+    }
+
+    const data = await response.json();
+    return { success: true, ...data };
+  } catch (error: any) {
+    console.error('Failed to get gateway storage:', error);
+    if (error.code === 'ECONNREFUSED') {
+      return { success: false, error: 'Cannot connect to Gatekeeper API. Is the server running?' };
+    }
+    if (error.cause?.code === 'ECONNREFUSED') {
+      return { success: false, error: 'Cannot connect to Gatekeeper API. Is the server running?' };
+    }
+    return { success: false, error: error.message };
+  }
+});
+
+// Archive old gateway files
+ipcMain.handle('archive-gateway-files', async (_event, options: { olderThanDays: number; deleteAfterArchive?: boolean }) => {
+  try {
+    const { baseUrl, adminKey } = getGatekeeperApiConfig();
+
+    if (!adminKey) {
+      return { success: false, error: 'Gatekeeper admin key not configured.' };
+    }
+
+    const response = await fetch(`${baseUrl}/admin/archive`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${adminKey}`
+      },
+      body: JSON.stringify({
+        olderThanDays: options.olderThanDays,
+        deleteAfterArchive: options.deleteAfterArchive || false
+      })
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      if (response.status === 401) {
+        return { success: false, error: 'Authentication failed. Check your admin key.' };
+      }
+      return { success: false, error: `HTTP ${response.status}: ${errorText}` };
+    }
+
+    const data = await response.json();
+    return { success: true, ...data };
+  } catch (error: any) {
+    console.error('Failed to archive gateway files:', error);
+    if (error.code === 'ECONNREFUSED' || error.cause?.code === 'ECONNREFUSED') {
+      return { success: false, error: 'Cannot connect to Gatekeeper API. Is the server running?' };
+    }
+    return { success: false, error: error.message };
+  }
+});
+
+// Clear (delete) old gateway files
+ipcMain.handle('clear-gateway-files', async (_event, options: { olderThanDays: number; confirm: string }) => {
+  try {
+    // Validate confirmation string
+    if (options.confirm !== 'DELETE') {
+      return { success: false, error: 'Invalid confirmation string. Must be "DELETE".' };
+    }
+
+    const { baseUrl, adminKey } = getGatekeeperApiConfig();
+
+    if (!adminKey) {
+      return { success: false, error: 'Gatekeeper admin key not configured.' };
+    }
+
+    const response = await fetch(`${baseUrl}/admin/clear`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${adminKey}`
+      },
+      body: JSON.stringify({
+        olderThanDays: options.olderThanDays,
+        confirm: options.confirm
+      })
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      if (response.status === 401) {
+        return { success: false, error: 'Authentication failed. Check your admin key.' };
+      }
+      return { success: false, error: `HTTP ${response.status}: ${errorText}` };
+    }
+
+    const data = await response.json();
+    return { success: true, ...data };
+  } catch (error: any) {
+    console.error('Failed to clear gateway files:', error);
+    if (error.code === 'ECONNREFUSED' || error.cause?.code === 'ECONNREFUSED') {
+      return { success: false, error: 'Cannot connect to Gatekeeper API. Is the server running?' };
+    }
+    return { success: false, error: error.message };
+  }
 });

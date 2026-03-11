@@ -2,6 +2,95 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with the Vantage Forecaster codebase.
 
+---
+
+## Orchestrator Integration
+
+This project follows protocols from the central **Orchestrator** at `C:\Source_Codes\Orchestrator`.
+
+### Subagent Output Template
+
+When completing tasks as a subagent, end responses with:
+
+```
+---SUBAGENT-SUMMARY---
+STATUS: [completed|partial|blocked|failed]
+FILES_CHANGED:
+- [file paths]
+CHANGELOG_ENTRY: |
+  ### Added/Changed/Fixed
+  - [description]
+ASSUMPTIONS:
+- [assumptions made]
+WARNINGS:
+- [issues or concerns]
+DOCS_NEEDING_REVIEW:
+- [documents that may need updates]
+---END-SUMMARY---
+```
+
+---
+
+## Session Initialization
+
+Before starting work on this codebase, read the following files:
+
+1. **This file** (`CLAUDE.md`) - Primary command reference and architecture
+2. `Documents/DOCUMENTATION_INDEX.md` - Navigate to relevant docs
+3. `Documents/AI_AGENT_GUIDE.md` - Critical context for AI agents
+4. `CHANGELOG.md` - Recent changes and current state
+5. `context.md` - Current task context (if exists)
+
+---
+
+## Documentation Index
+
+All documentation files in this project (verified 2026-03-11):
+
+### Root Files
+
+| File | Purpose | Last Verified |
+|------|---------|---------------|
+| `CLAUDE.md` | Primary AI agent reference - commands, models, architecture | 2026-03-04 |
+| `README.md` | Project overview, quick start, installation | 2026-03-04 |
+| `CHANGELOG.md` | Version history (Keep a Changelog format) | 2026-03-04 |
+| `GATEKEEPER_LICENSE_INTEGRATION.md` | License validation for Apollo clients | 2026-03-04 |
+| `context.md` | Current task tracking (temporary) | 2026-03-04 |
+
+### Documents/ Folder (Active)
+
+| File | Purpose | Last Verified |
+|------|---------|---------------|
+| `DOCUMENTATION_INDEX.md` | Master index for all documentation | 2026-03-04 |
+| `QUICK_START.md` | 5-minute getting started guide | 2026-03-04 |
+| `CLI_GUIDE.md` | Complete CLI command reference | 2026-03-04 |
+| `GUI_GUIDE.md` | Desktop GUI user manual | 2026-03-04 |
+| `MODEL_OVERVIEW.md` | Forecasting models and performance | 2026-03-04 |
+| `TECHNICAL_OVERVIEW.md` | Architecture and code structure | 2026-03-04 |
+| `DEPLOYMENT_GUIDE.md` | Portable Windows deployment | 2026-03-04 |
+| `AI_AGENT_GUIDE.md` | AI agent onboarding guide | 2026-03-04 |
+| `GATEWAY_FILE_SPECIFICATION.md` | Gateway file format and naming | 2026-03-04 |
+| `FORECAST_FILE_API_SPEC.md` | Forecast file API specification | 2026-03-04 |
+
+### Documents/archive/ (Historical)
+
+| File | Purpose | Last Verified |
+|------|---------|---------------|
+| `DEVELOPER_GUIDE.md` | Legacy developer guide (superseded by CLAUDE.md) | 2026-03-04 |
+| `USER_GUIDE.md` | Legacy user guide (superseded by GUI_GUIDE.md) | 2026-03-04 |
+| `AI_QUICK_REFERENCE.md` | Legacy AI reference | 2026-03-04 |
+| `CFAC_MODEL_COMPARISON_REPORT.md` | Historical model comparison | 2026-03-04 |
+| `DEEP_TRAINING_SPECIFICATION.md` | LSTM training specs | 2026-03-04 |
+| `PHASE2_IMPLEMENTATION_SUMMARY.md` | Phase 2 summary | 2026-03-04 |
+| `PLAN_LSTM_*.md` | LSTM planning documents (3 files) | 2026-03-04 |
+| `outage_analysis_report.md` | Historical outage analysis | 2026-03-04 |
+| `plan.md` | Legacy planning document | 2026-03-04 |
+| `interconnector_analysis/*.md` | Interconnector analysis reports (7 files) | 2026-03-04 |
+| `planning/*.md` | Planning documents (6 files) | 2026-03-04 |
+| `vantage-gateway/*.md` | Gateway setup docs (3 files) | 2026-03-04 |
+
+---
+
 ## Documentation
 
 **Read documentation first:** All docs in `Documents/` folder. Start with `DOCUMENTATION_INDEX.md`.
@@ -9,9 +98,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with th
 Key guides:
 - `GUI_GUIDE.md` - Desktop GUI user manual with CLI command mappings
 - `CLI_GUIDE.md` - Complete CLI command reference
-- `USER_GUIDE.md` - Workflows and examples
 - `MODEL_OVERVIEW.md` - Forecasting model descriptions and performance
-- `interconnector_analysis/INTERCONNECTOR_FINAL_SUMMARY.md` - Interconnector analysis
+- `AI_AGENT_GUIDE.md` - AI agent onboarding and critical context
+- `DEPLOYMENT_GUIDE.md` - Portable Windows deployment instructions
 
 ---
 
@@ -28,6 +117,25 @@ npm run dev -- <command> [options]      # Development mode
 cd gui && npm install && npm run dev    # Development
 npm run electron:build                   # Package for distribution
 ```
+
+### Portable Deployment (Windows)
+```bash
+# Full portable build with all data (~600MB ZIP)
+node scripts/build-portable.cjs --zip --clean
+
+# App-only update (no data, ~150MB)
+node scripts/build-portable.cjs --no-data --zip
+
+# Create data update packs
+node scripts/create-data-pack.cjs --type weather    # Weather cache only
+node scripts/create-data-pack.cjs --type training   # Training data only
+node scripts/create-data-pack.cjs --type databases  # Databases only
+node scripts/create-data-pack.cjs --type all        # Full data pack
+```
+
+**Output:** `portable-build/VantageForecaster/` - Self-contained folder with bundled Node.js, no installation required.
+
+See `Documents/DEPLOYMENT_GUIDE.md` for full deployment documentation.
 
 ---
 

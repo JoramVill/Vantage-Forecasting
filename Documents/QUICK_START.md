@@ -188,12 +188,12 @@ npm run electron:build
 ## Need Help?
 
 ### Full Documentation
-- **CLI_REFERENCE.md** - Complete command reference with all flags
-- **CAPACITY_FACTOR_GUIDE.md** - Deep dive into capacity factor forecasting
-- **METHODOLOGY_REPORT.md** - Comprehensive methodology for clients
-- **USER_GUIDE.md** - Workflows and advanced examples
+- **CLI_GUIDE.md** - Complete command reference with all flags
+- **MODEL_OVERVIEW.md** - Deep dive into all forecasting models
+- **GUI_GUIDE.md** - Desktop GUI user manual
 - **TECHNICAL_OVERVIEW.md** - Architecture and internals
 - **AI_AGENT_GUIDE.md** - Guide for AI assistants working with this codebase
+- **DEPLOYMENT_GUIDE.md** - Portable Windows deployment
 
 ### Quick Reference
 Start with: **DOCUMENTATION_INDEX.md** in `Documents/` folder
@@ -211,7 +211,7 @@ rm -rf weather_cache
 Close any open database connections or viewers.
 
 **Import failures?**
-Check CSV format matches expected schema (see CLI_REFERENCE.md).
+Check CSV format matches expected schema (see CLI_GUIDE.md).
 
 ---
 

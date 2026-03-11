@@ -1,8 +1,21 @@
 # AI Agent Onboarding Guide
 
+**Start Here:** This guide provides essential context for AI agents working with this codebase.
+
+## Documentation Navigation
+
+| Need | Document |
+|------|----------|
+| **Quick command reference** | [../CLAUDE.md](../CLAUDE.md) - Primary reference |
+| **All documentation** | [DOCUMENTATION_INDEX.md](DOCUMENTATION_INDEX.md) |
+| **CLI commands** | [CLI_GUIDE.md](CLI_GUIDE.md) |
+| **GUI usage** | [GUI_GUIDE.md](GUI_GUIDE.md) |
+| **Deployment** | [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) |
+| **Models explained** | [MODEL_OVERVIEW.md](MODEL_OVERVIEW.md) |
+
 ## What This Project Is
 
-iLoad Forecasting Utility - a TypeScript/Node.js CLI for forecasting Philippine power grid (WESM) electricity demand and renewable energy capacity factors. Built for iPool energy trading operations.
+Vantage Forecaster - a TypeScript/Node.js application (CLI + Electron GUI) for forecasting Philippine power grid (WESM) electricity demand and renewable energy capacity factors. Built for iPool energy trading operations.
 
 ## Critical Context
 
@@ -252,14 +265,78 @@ const formatted = dt.toFormat('yyyy-MM-dd HH:mm:ss');
 4. **Filter early** - remove invalid samples before feature engineering
 5. **Prepared statements** - reuse for multiple executions
 
+## Deployment
+
+### Portable Windows Build
+
+```bash
+# Full portable build with all data (~600MB ZIP)
+node scripts/build-portable.cjs --zip --clean
+
+# App-only update (no data)
+node scripts/build-portable.cjs --no-data --zip
+
+# Create data update packs
+node scripts/create-data-pack.cjs --type weather    # Weather cache only
+node scripts/create-data-pack.cjs --type training   # Training data only
+node scripts/create-data-pack.cjs --type all        # Full data pack
+```
+
+### Portable Mode Detection
+
+The Electron app detects portable mode via:
+1. `.portable` marker file in app directory
+2. Presence of `cli/node/node.exe` (bundled Node.js)
+
+When portable, paths are relative to the exe directory instead of project root.
+
+### Key Deployment Files
+
+- `scripts/build-portable.cjs` - Main build script
+- `scripts/create-data-pack.cjs` - Data pack generator
+- `gui/electron/main.ts` - Portable mode path detection (`isPortableMode()`, `getAppRoot()`)
+
+## GUI Application
+
+The desktop GUI is in `gui/` directory (Electron + Vue 3):
+
+```bash
+cd gui && npm install && npm run dev  # Development
+npm run electron:build                 # Build for distribution
+```
+
+Key GUI files:
+- `gui/electron/main.ts` - Electron main process, IPC handlers
+- `gui/src/App.vue` - Main Vue component
+- `gui/src/components/` - UI components
+
+## Zonal Mode (14 Sub-Regions)
+
+The system supports two data modes:
+
+| Mode | Regions | Database | Weather Cities |
+|------|---------|----------|----------------|
+| **Regional** | 3 (CLUZ, CVIS, CMIN) | `iload.db` | 3 (Manila, Cebu, Davao) |
+| **Zonal** | 14 sub-regions | `iload_zonal.db` | 42 (3 per zone) |
+
+Zonal codes: 01NLUZ, 02METRO, 03SLUZ, 04LEYTE, 05CEBU, 06NEGROS, 07BOHOL, 08PANAY, 09NWMIN, 10LANAO, 11NCMIN, 12NEMIN, 13SEMIN, 14SWMIN
+
+Zone configuration: `src/data/zones.json`
+
 ## Related Documentation
 
-- `Documents/QUICK_START.md` - Getting started in 5 minutes
-- `Documents/MODEL_OVERVIEW.md` - All models explained
-- `Documents/CLI_GUIDE.md` - Complete command reference
-- `Documents/TECHNICAL_OVERVIEW.md` - Architecture and data flow
-- `Documents/CAPACITY_FACTOR_GUIDE.md` - Capacity factor forecasting deep dive
-- `CLAUDE.md` - Project-level instructions (root directory)
+| Document | Description |
+|----------|-------------|
+| `../CLAUDE.md` | **Primary reference** - Commands, models, architecture |
+| `DOCUMENTATION_INDEX.md` | Complete documentation index |
+| `QUICK_START.md` | Getting started in 5 minutes |
+| `CLI_GUIDE.md` | Complete command reference |
+| `GUI_GUIDE.md` | Desktop GUI user manual |
+| `MODEL_OVERVIEW.md` | All models explained |
+| `TECHNICAL_OVERVIEW.md` | Architecture and code structure |
+| `DEPLOYMENT_GUIDE.md` | Building portable distributions |
+
+Historical documents are in `Documents/archive/`.
 
 ## Quick Reference: Common CLI Commands
 
@@ -285,10 +362,42 @@ node dist/index.js scheduler run -d 2026-01-29 --demand-only --output ./output
 
 ## First Steps as a New Agent
 
-1. **Read this guide completely** (you're doing it now)
-2. **Read CLAUDE.md** in root directory for user instructions
-3. **Check git status** to see current branch and changes
-4. **Read relevant model files** based on task (demand vs capacity factor)
-5. **Run a test forecast** to verify environment is working
-6. **Check documentation** in `Documents/` folder for detailed guides
-7. **Start coding** - you now have everything you need
+1. **Read CLAUDE.md** in root directory - this is the primary reference
+2. **Check git status** to see current branch and changes
+3. **Identify the task type**:
+   - Demand forecasting → `src/models/hybridModel.ts`
+   - Capacity factor → `src/models/capacityFactor/`
+   - GUI changes → `gui/`
+   - Deployment → `scripts/build-portable.cjs`
+4. **Read relevant model/service files** for your task
+5. **Run `npm run build`** to verify TypeScript compiles
+6. **Test your changes** with appropriate CLI command
+7. **Update documentation** if you changed user-facing behavior
+
+## Quick Command Reference
+
+```bash
+# Build CLI
+npm run build
+
+# Demand forecast (regional)
+node dist/index.js forecast -d "Data Samples/Demand" -s 2026-01-01 -e 2026-01-31 -o output/demand.csv
+
+# Demand forecast (zonal - 14 zones)
+node dist/index.js forecast -d "Data Samples/Demand" -s 2026-01-01 -e 2026-01-31 -o output/demand.csv --zonal
+
+# Capacity factor forecast
+node dist/index.js cfac forecast2 -t "Data Samples/Capacity Factor" -s 2026-01-01 -e 2026-01-31 -o output/cfac.csv
+
+# Scheduler run
+node dist/index.js scheduler run -d 2026-01-01
+
+# Database status
+node dist/index.js db status
+
+# Build portable distribution
+node scripts/build-portable.cjs --zip --clean
+
+# GUI development
+cd gui && npm run dev
+```

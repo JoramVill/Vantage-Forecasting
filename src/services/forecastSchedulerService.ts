@@ -52,7 +52,8 @@ interface CalibrationResult {
   demandOffpeakDeviation: number;  // Off-peak hours (21:00-09:00) deviation %
   demandPeakScale: number;         // Calculated peak scaling factor
   demandOffpeakScale: number;      // Calculated off-peak scaling factor
-  calibrationPeriod: { start: string; end: string };
+  calibrationPeriod: { start: string; end: string };  // CFAC calibration period
+  demandCalibrationPeriod?: { start: string; end: string };  // Demand calibration period (if different)
   withinThreshold: boolean;
   // Per-station calibration scales (station code -> scale factor, e.g., 1.05 = +5%)
   stationScales: Record<string, number>;
@@ -69,7 +70,8 @@ interface SchedulerConfig {
   maxCalibrationIterations?: number; // Max iterations to converge (default: 3)
   // Demand options
   demandModel?: 'hybrid' | 'regression' | 'xgboost';
-  useDb?: boolean;
+  useDb?: boolean;       // Use database as training data source
+  dataDbPath?: string;   // Database path for training data (different from dbPath which is scheduler db)
   trainDays?: number;
   demandScale?: number;
   demandGrowth?: number;
@@ -105,11 +107,17 @@ interface SchedulerConfigDB {
   run_days: string;  // Comma-separated
   forecast_types: string;  // Comma-separated
   horizons: string;  // Comma-separated
+  demand_geography: 'regional' | 'zonal' | 'both';  // Geography mode for demand forecasts
   weather_max_age_hours: number;
   auto_push_gateway: boolean;
   archive_retention_days: number;
   updated_at: string;
 }
+
+// Zonal demand columns (14 zones)
+const ZONAL_COLUMNS = ['01NLUZ', '02METRO', '03SLUZ', '04LEYTE', '05CEBU', '06NEGROS', '07BOHOL', '08PANAY', '09NWMIN', '10LANAO', '11NCMIN', '12NEMIN', '13SEMIN', '14SWMIN'];
+// Regional demand columns (3 regions)
+const REGIONAL_COLUMNS = ['CLUZ', 'CVIS', 'CMIN'];
 
 export class ForecastSchedulerService {
   private db: Database.Database;
@@ -118,6 +126,7 @@ export class ForecastSchedulerService {
   private cliPath: string;
   private projectRoot: string;
   private lastCalibration: CalibrationResult | null = null;
+  private isZonalData: boolean | null = null;  // Cache the data format detection
 
   constructor(config: SchedulerConfig) {
     this.config = {
@@ -132,6 +141,15 @@ export class ForecastSchedulerService {
     };
     this.db = new Database(config.dbPath);
     this.ensureTables();
+
+    // Load stored scheduler config from database if pushToGateway not explicitly set
+    // This connects the GUI's "Auto-push to Gateway" setting to the scheduler service
+    if (this.config.pushToGateway === undefined) {
+      const storedConfig = this.loadSchedulerConfig();
+      if (storedConfig && storedConfig.auto_push_gateway) {
+        this.config.pushToGateway = true;
+      }
+    }
 
     // Determine CLI path - use project root as working directory
     this.nodeCmd = process.execPath;
@@ -204,11 +222,15 @@ export class ForecastSchedulerService {
         run_days TEXT DEFAULT '1,2,3,4,5,6,7',
         forecast_types TEXT DEFAULT 'demand,cfac',
         horizons TEXT DEFAULT 'daily,weekly',
+        demand_geography TEXT DEFAULT 'regional',
         weather_max_age_hours INTEGER DEFAULT 6,
         auto_push_gateway INTEGER DEFAULT 1,
         archive_retention_days INTEGER DEFAULT 90,
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP
       );
+
+      -- Migration: Add demand_geography column if it doesn't exist
+      -- This is a safe operation that will fail silently if the column already exists
 
       -- Forecast archive tracking
       CREATE TABLE IF NOT EXISTS forecast_archive (
@@ -262,13 +284,98 @@ export class ForecastSchedulerService {
       CREATE INDEX IF NOT EXISTS idx_cfac_hourly_run ON cfac_forecast_hourly(run_id);
       CREATE INDEX IF NOT EXISTS idx_cfac_hourly_dt ON cfac_forecast_hourly(datetime);
     `);
+
+    // Migration: Add demand_geography column if it doesn't exist (for existing databases)
+    try {
+      const tableInfo = this.db.prepare('PRAGMA table_info(scheduler_config)').all() as { name: string }[];
+      const hasGeographyColumn = tableInfo.some(col => col.name === 'demand_geography');
+      if (!hasGeographyColumn) {
+        this.db.exec(`ALTER TABLE scheduler_config ADD COLUMN demand_geography TEXT DEFAULT 'regional'`);
+      }
+    } catch {
+      // Column likely already exists or table doesn't exist yet (will be created above)
+    }
+
+    // Migration: Add missing columns to forecast_runs table (for existing databases)
+    try {
+      const forecastRunsInfo = this.db.prepare('PRAGMA table_info(forecast_runs)').all() as { name: string }[];
+      const columnNames = forecastRunsInfo.map(col => col.name);
+
+      if (!columnNames.includes('gateway_path')) {
+        this.db.exec('ALTER TABLE forecast_runs ADD COLUMN gateway_path TEXT');
+      }
+      if (!columnNames.includes('gateway_category')) {
+        this.db.exec('ALTER TABLE forecast_runs ADD COLUMN gateway_category TEXT');
+      }
+      if (!columnNames.includes('output_file')) {
+        this.db.exec('ALTER TABLE forecast_runs ADD COLUMN output_file TEXT');
+      }
+      if (!columnNames.includes('scale_wind')) {
+        this.db.exec('ALTER TABLE forecast_runs ADD COLUMN scale_wind REAL');
+      }
+      if (!columnNames.includes('scale_solar')) {
+        this.db.exec('ALTER TABLE forecast_runs ADD COLUMN scale_solar REAL');
+      }
+    } catch {
+      // Columns likely already exist or table doesn't exist yet (will be created above)
+    }
+  }
+
+  /**
+   * Detect if demand data is in zonal format (14 zones) vs regional format (3 regions)
+   * Checks the first CSV file in the demand data path for column headers.
+   * Result is cached for the lifetime of the service instance.
+   */
+  private detectDemandDataFormat(): boolean {
+    if (this.isZonalData !== null) {
+      return this.isZonalData;
+    }
+
+    try {
+      const demandDir = this.config.demandDataPath;
+      if (!existsSync(demandDir)) {
+        this.isZonalData = false;
+        return false;
+      }
+
+      // Find first CSV file
+      const files = readdirSync(demandDir).filter(f => f.endsWith('.csv'));
+      if (files.length === 0) {
+        this.isZonalData = false;
+        return false;
+      }
+
+      // Read header of first file
+      const content = readFileSync(join(demandDir, files[0]), 'utf-8');
+      const headerLine = content.split('\n')[0] || '';
+      const columns = headerLine.split(',').map(c => c.trim());
+
+      // Check for zonal columns (e.g., 01NLUZ, 02METRO, etc.)
+      const hasZonalColumns = ZONAL_COLUMNS.some(zc => columns.includes(zc));
+      // Check for regional columns (CLUZ, CVIS, CMIN)
+      const hasRegionalColumns = REGIONAL_COLUMNS.some(rc => columns.includes(rc));
+
+      // Prefer zonal detection if both are present (shouldn't happen), otherwise use what's found
+      this.isZonalData = hasZonalColumns && !hasRegionalColumns;
+      return this.isZonalData;
+    } catch {
+      this.isZonalData = false;
+      return false;
+    }
+  }
+
+  /**
+   * Get the appropriate demand columns based on data format
+   */
+  private getDemandColumns(): string[] {
+    return this.detectDemandDataFormat() ? ZONAL_COLUMNS : REGIONAL_COLUMNS;
   }
 
   /**
    * MAIN ENTRY POINT: Run calibrated forecasts
    *
    * This method:
-   * 1. Runs calibration to determine optimal wind/solar scaling
+   * 1. Runs calibration to determine optimal wind/solar scaling (or uses saved calibration)
    * 2. Verifies calibration is within threshold
    * 3. Generates production forecasts with calibrated values
    */
@@ -278,6 +385,12 @@ export class ForecastSchedulerService {
       forecastType?: 'demand' | 'cfac' | 'both';
       horizon?: 'daily' | 'weekly' | 'both';
       verbose?: boolean;
+      loadCalibratorPath?: string;  // Path to saved calibrator model (skips auto-training)
+      trainingDays?: number;  // Number of days for auto-calibration training (default: 30)
+      suffix?: string;  // Suffix to append to archive filenames (e.g., "_v2")
+      overwrite?: boolean;  // Overwrite existing archives
+      useCalibrationId?: number;  // Use saved calibration by ID (skips calibration phase)
+      useMostRecentCalibration?: boolean;  // Use most recent saved calibration
     }
   ): Promise<{
     calibration: CalibrationResult;
@@ -294,8 +407,41 @@ export class ForecastSchedulerService {
       console.log(`\n📅 As-of date: ${asOfDate}`);
     }
 
-    // Step 1: Run calibration
-    const calibration = await this.runCalibration(asOfDate, verbose);
+    // Step 1: Get calibration (from saved or run new)
+    let calibration: CalibrationResult;
+
+    if (options?.useCalibrationId) {
+      // Use specific saved calibration
+      const saved = this.getCalibrationById(options.useCalibrationId);
+      if (!saved) {
+        throw new Error(`Calibration ID ${options.useCalibrationId} not found`);
+      }
+      calibration = saved;
+      if (verbose) {
+        console.log(`\n📋 Using saved calibration #${options.useCalibrationId}`);
+        console.log(`   Wind: ${calibration.windScale >= 0 ? '+' : ''}${calibration.windScale}%`);
+        console.log(`   Solar: ${calibration.solarScale >= 0 ? '+' : ''}${calibration.solarScale}%`);
+        console.log(`   Period: ${calibration.calibrationPeriod.start} to ${calibration.calibrationPeriod.end}`);
+        console.log(`   Converged: ${calibration.withinThreshold ? 'Yes ✓' : 'No'}`);
+      }
+    } else if (options?.useMostRecentCalibration) {
+      // Use most recent saved calibration
+      const recent = this.getMostRecentCalibration();
+      if (!recent) {
+        throw new Error('No saved calibration found. Run calibration first or remove --use-saved-calibration flag.');
+      }
+      calibration = recent.calibration;
+      if (verbose) {
+        console.log(`\n📋 Using most recent calibration #${recent.id} (${new Date(recent.createdAt).toLocaleString()})`);
+        console.log(`   Wind: ${calibration.windScale >= 0 ? '+' : ''}${calibration.windScale}%`);
+        console.log(`   Solar: ${calibration.solarScale >= 0 ? '+' : ''}${calibration.solarScale}%`);
+        console.log(`   Period: ${calibration.calibrationPeriod.start} to ${calibration.calibrationPeriod.end}`);
+        console.log(`   Converged: ${calibration.withinThreshold ? 'Yes ✓' : 'No'}`);
+      }
+    } else {
+      // Run new calibration (auto-detects most recent actual data)
+      calibration = await this.runCalibration(asOfDate, verbose, options?.trainingDays);
+    }
 
     // Step 2: Check if within threshold
     if (!calibration.withinThreshold) {
@@ -309,6 +455,7 @@ export class ForecastSchedulerService {
       demand: [],
       cfac: []
     };
+    const errors: string[] = [];  // Track errors so one failure doesn't stop others
 
     const asOf = DateTime.fromISO(asOfDate);
 
@@ -327,15 +474,29 @@ export class ForecastSchedulerService {
       }
 
       if (forecastType === 'demand' || forecastType === 'both') {
-        const run = await this.runDemandForecast(asOfDate, targetDate, targetDate, 'daily', verbose, calibration);
-        forecasts.demand!.push(run);
+        try {
+          const run = await this.runDemandForecast(asOfDate, targetDate, targetDate, 'daily', verbose, calibration, options?.loadCalibratorPath, options?.suffix, options?.overwrite);
+          forecasts.demand!.push(run);
+        } catch (error: any) {
+          errors.push(`Daily demand: ${error.message}`);
+          if (verbose) {
+            console.log(`   ⚠️  Daily demand forecast failed: ${error.message}`);
+          }
+        }
       }
 
       if (forecastType === 'cfac' || forecastType === 'both') {
-        const run = await this.runCfacForecastWithCalibration(
-          asOfDate, targetDate, targetDate, 'daily', calibration, verbose
-        );
-        forecasts.cfac!.push(run);
+        try {
+          const run = await this.runCfacForecastWithCalibration(
+            asOfDate, targetDate, targetDate, 'daily', calibration, verbose, options?.suffix, options?.overwrite
+          );
+          forecasts.cfac!.push(run);
+        } catch (error: any) {
+          errors.push(`Daily CFAC: ${error.message}`);
+          if (verbose) {
+            console.log(`   ⚠️  Daily CFAC forecast failed: ${error.message}`);
+          }
+        }
       }
     }
 
@@ -349,15 +510,37 @@ export class ForecastSchedulerService {
       }
 
       if (forecastType === 'demand' || forecastType === 'both') {
-        const run = await this.runDemandForecast(asOfDate, startDate, endDate, 'weekly', verbose, calibration);
-        forecasts.demand!.push(run);
+        try {
+          const run = await this.runDemandForecast(asOfDate, startDate, endDate, 'weekly', verbose, calibration, options?.loadCalibratorPath, options?.suffix, options?.overwrite);
+          forecasts.demand!.push(run);
+        } catch (error: any) {
+          errors.push(`Weekly demand: ${error.message}`);
+          if (verbose) {
+            console.log(`   ⚠️  Weekly demand forecast failed: ${error.message}`);
+          }
+        }
       }
 
       if (forecastType === 'cfac' || forecastType === 'both') {
-        const run = await this.runCfacForecastWithCalibration(
-          asOfDate, startDate, endDate, 'weekly', calibration, verbose
-        );
-        forecasts.cfac!.push(run);
+        try {
+          const run = await this.runCfacForecastWithCalibration(
+            asOfDate, startDate, endDate, 'weekly', calibration, verbose, options?.suffix, options?.overwrite
+          );
+          forecasts.cfac!.push(run);
+        } catch (error: any) {
+          errors.push(`Weekly CFAC: ${error.message}`);
+          if (verbose) {
+            console.log(`   ⚠️  Weekly CFAC forecast failed: ${error.message}`);
+          }
+        }
+      }
+    }
+
+    // Report any errors that occurred
+    if (errors.length > 0 && verbose) {
+      console.log(`\n⚠️  Some forecasts failed:`);
+      for (const err of errors) {
+        console.log(`   - ${err}`);
       }
     }
 
@@ -379,26 +562,61 @@ export class ForecastSchedulerService {
   /**
    * Run calibration to determine optimal scaling factors
    * Iterates until ALL metrics are within threshold or max iterations reached
+   *
+   * Auto-detects the most recent actual data date from CFAC files.
+   * The training period counts back from the most recent actual data date.
    */
-  async runCalibration(asOfDate: string, verbose: boolean = true): Promise<CalibrationResult> {
-    const calibDays = this.config.calibrationDays!;
+  async runCalibration(
+    asOfDate: string,
+    verbose: boolean = true,
+    trainingDays?: number
+  ): Promise<CalibrationResult> {
+    // Use provided values or fall back to config defaults
+    const calibDays = trainingDays || this.config.calibrationDays!;
     const threshold = this.config.calibrationThreshold!;
     // Use higher max iterations to ensure convergence
     const maxIterations = Math.max(this.config.maxCalibrationIterations || 3, 10);
 
-    const asOf = DateTime.fromISO(asOfDate);
+    // Auto-detect the most recent actual data dates for CFAC and demand separately
+    const cfacMostRecentDate = this.findMostRecentActualDate(this.config.cfacDataPath);
+    const demandMostRecentDate = this.findMostRecentActualDate(this.config.demandDataPath);
 
-    // Find calibration period (most recent data before as-of date)
-    const calibEnd = asOf.minus({ days: 1 }).toISODate()!;
-    const calibStart = asOf.minus({ days: calibDays }).toISODate()!;
+    if (!cfacMostRecentDate && !demandMostRecentDate) {
+      throw new Error('Could not find any actual data files for calibration');
+    }
+
+    // CFAC calibration period
+    const cfacCalibEnd = cfacMostRecentDate;
+    const cfacCalibEndDt = cfacCalibEnd ? DateTime.fromISO(cfacCalibEnd) : null;
+    const cfacCalibStart = cfacCalibEndDt ? cfacCalibEndDt.minus({ days: calibDays }).toISODate()! : null;
+
+    // Demand calibration period (may differ from CFAC)
+    const demandCalibEnd = demandMostRecentDate;
+    const demandCalibEndDt = demandCalibEnd ? DateTime.fromISO(demandCalibEnd) : null;
+    const demandCalibStart = demandCalibEndDt ? demandCalibEndDt.minus({ days: calibDays }).toISODate()! : null;
 
     if (verbose) {
       console.log('\n───────────────────────────────────────────────────────────────────────────────');
       console.log('                              CALIBRATION PHASE                                 ');
       console.log('───────────────────────────────────────────────────────────────────────────────');
-      console.log(`   Calibration period: ${calibStart} to ${calibEnd}`);
+      if (cfacCalibEnd) {
+        console.log(`   CFAC data ends: ${cfacCalibEnd}`);
+        console.log(`   CFAC calibration: ${cfacCalibStart} to ${cfacCalibEnd} (${calibDays} days)`);
+      } else {
+        console.log('   CFAC data: Not available');
+      }
+      if (demandCalibEnd) {
+        console.log(`   Demand data ends: ${demandCalibEnd}`);
+        console.log(`   Demand calibration: ${demandCalibStart} to ${demandCalibEnd} (${calibDays} days)`);
+      } else {
+        console.log('   Demand data: Not available');
+      }
       console.log(`   Threshold: ±${threshold}%, Max iterations: ${maxIterations}`);
     }
+
+    // For backwards compatibility, use CFAC dates if available, otherwise demand
+    const calibEnd = cfacCalibEnd || demandCalibEnd!;
+    const calibStart = cfacCalibStart || demandCalibStart!;
 
     // Create calibration directory
     const calibDir = join(this.config.outputDir, 'calibration', asOfDate);
@@ -422,11 +640,12 @@ export class ForecastSchedulerService {
     // ═══════════════════════════════════════════════════════════════════════
     // CAPACITY FACTOR CALIBRATION - Iterate until wind AND solar converge
     // ═══════════════════════════════════════════════════════════════════════
-    if (verbose) {
-      console.log('\n   🌬️☀️ Calibrating capacity factors...');
-    }
+    if (cfacCalibStart && cfacCalibEnd) {
+      if (verbose) {
+        console.log('\n   🌬️☀️ Calibrating capacity factors...');
+      }
 
-    while (cfacIteration < maxIterations) {
+      while (cfacIteration < maxIterations) {
       cfacIteration++;
 
       if (verbose) {
@@ -438,9 +657,10 @@ export class ForecastSchedulerService {
       const calibForecastFile = join(calibDir, `cfac_calib_iter${cfacIteration}.csv`);
 
       try {
+        // Use 'cache' mode for calibration since it's always historical data
         await this.generateCfacForecast(
-          calibStart, calibEnd, calibForecastFile,
-          windScale, solarScale, false
+          cfacCalibStart!, cfacCalibEnd!, calibForecastFile,
+          windScale, solarScale, false, 'cache'
         );
       } catch (error: any) {
         if (verbose) {
@@ -495,38 +715,45 @@ export class ForecastSchedulerService {
       }
     }
 
-    if (!cfacConverged && verbose) {
-      console.log(`\n   ⚠️  CFAC calibration did not fully converge after ${cfacIteration} iterations`);
-      console.log(`      Final: Wind ${windDeviation >= 0 ? '+' : ''}${windDeviation.toFixed(1)}%, Solar ${solarDeviation >= 0 ? '+' : ''}${solarDeviation.toFixed(1)}%`);
+      if (!cfacConverged && verbose) {
+        console.log(`\n   ⚠️  CFAC calibration did not fully converge after ${cfacIteration} iterations`);
+        console.log(`      Final: Wind ${windDeviation >= 0 ? '+' : ''}${windDeviation.toFixed(1)}%, Solar ${solarDeviation >= 0 ? '+' : ''}${solarDeviation.toFixed(1)}%`);
+      }
+    } else {
+      if (verbose) {
+        console.log('\n   ⏭️  Skipping CFAC calibration (no CFAC data available)');
+      }
+      cfacConverged = true; // Mark as converged so we don't fail the overall calibration
     }
 
     // ═══════════════════════════════════════════════════════════════════════
     // DEMAND CALIBRATION - Iterate until peak AND off-peak converge
     // ═══════════════════════════════════════════════════════════════════════
-    if (verbose) {
-      console.log('\n   ⚡ Calibrating demand forecast...');
-    }
-
     let demandIteration = 0;
     let demandConverged = false;
     const maxDemandIterations = 5;
 
-    while (demandIteration < maxDemandIterations) {
-      demandIteration++;
-
-      if (verbose && demandIteration > 1) {
-        console.log(`\n   📊 Demand Iteration ${demandIteration}/${maxDemandIterations}`);
-        console.log(`      Scaling: Peak ${demandPeakScale > 0 ? '+' : ''}${demandPeakScale}%, Off-peak ${demandOffpeakScale > 0 ? '+' : ''}${demandOffpeakScale}%`);
+    if (demandCalibStart && demandCalibEnd) {
+      if (verbose) {
+        console.log('\n   ⚡ Calibrating demand forecast...');
       }
 
-      const demandCalibFile = join(calibDir, `demand_calib_iter${demandIteration}.csv`);
+      while (demandIteration < maxDemandIterations) {
+        demandIteration++;
 
-      try {
-        await this.generateDemandForecast(
-          calibStart, calibEnd, demandCalibFile, false,
-          demandIteration > 1 ? demandPeakScale : undefined,
-          demandIteration > 1 ? demandOffpeakScale : undefined
-        );
+        if (verbose && demandIteration > 1) {
+          console.log(`\n   📊 Demand Iteration ${demandIteration}/${maxDemandIterations}`);
+          console.log(`      Scaling: Peak ${demandPeakScale > 0 ? '+' : ''}${demandPeakScale}%, Off-peak ${demandOffpeakScale > 0 ? '+' : ''}${demandOffpeakScale}%`);
+        }
+
+        const demandCalibFile = join(calibDir, `demand_calib_iter${demandIteration}.csv`);
+
+        try {
+          await this.generateDemandForecast(
+            demandCalibStart, demandCalibEnd, demandCalibFile, false,
+            demandIteration > 1 ? demandPeakScale : undefined,
+            demandIteration > 1 ? demandOffpeakScale : undefined
+          );
 
         const demandAnalysis = this.analyzeDemandForecast(demandCalibFile);
         demandMape = demandAnalysis.mape;
@@ -570,10 +797,16 @@ export class ForecastSchedulerService {
         }
         break;
       }
-    }
+      }
 
-    if (!demandConverged && verbose) {
-      console.log(`\n   ⚠️  Demand calibration did not fully converge after ${demandIteration} iterations`);
+      if (!demandConverged && verbose) {
+        console.log(`\n   ⚠️  Demand calibration did not fully converge after ${demandIteration} iterations`);
+      }
+    } else {
+      if (verbose) {
+        console.log('\n   ⏭️  Skipping demand calibration (no demand data available)');
+      }
+      demandConverged = true; // Mark as converged so we don't fail the overall calibration
     }
 
     const withinThreshold = cfacConverged && demandConverged;
@@ -589,6 +822,9 @@ export class ForecastSchedulerService {
       demandPeakScale,
       demandOffpeakScale,
       calibrationPeriod: { start: calibStart, end: calibEnd },
+      demandCalibrationPeriod: demandCalibStart && demandCalibEnd
+        ? { start: demandCalibStart, end: demandCalibEnd }
+        : undefined,
       withinThreshold,
       stationScales
     };
@@ -672,6 +908,71 @@ export class ForecastSchedulerService {
     }
 
     return outages;
+  }
+
+  /**
+   * Find the most recent actual data date from data files
+   * Scans all CSV files and finds the latest DateTimeEnding value
+   *
+   * @param dataPath - Path to the data directory (defaults to CFAC data path)
+   * @returns ISO date string (YYYY-MM-DD) of the most recent actual data, or null if not found
+   */
+  findMostRecentActualDate(dataPath?: string): string | null {
+    try {
+      const actualsDir = dataPath || this.config.cfacDataPath;
+
+      if (!existsSync(actualsDir)) {
+        return null;
+      }
+
+      const actualFiles = readdirSync(actualsDir).filter(f => f.endsWith('.csv'));
+
+      if (actualFiles.length === 0) {
+        return null;
+      }
+
+      let mostRecentDate: DateTime | null = null;
+
+      for (const file of actualFiles) {
+        try {
+          const content = readFileSync(join(actualsDir, file), 'utf-8');
+          const data = parse(content, { columns: true, skip_empty_lines: true });
+
+          for (const row of data) {
+            const dtStr = row.DateTimeEnding;
+            if (!dtStr) continue;
+
+            // Parse datetime from format "M/D/YYYY HH:mm" or "YYYY-MM-DD HH:mm"
+            let rowDate: DateTime;
+
+            if (dtStr.includes('/')) {
+              // M/D/YYYY HH:mm format
+              const parts = dtStr.split(' ');
+              const dateParts = parts[0].split('/');
+              const month = parseInt(dateParts[0]);
+              const day = parseInt(dateParts[1]);
+              const year = parseInt(dateParts[2]);
+              rowDate = DateTime.fromObject({ year, month, day });
+            } else {
+              // ISO format YYYY-MM-DD
+              rowDate = DateTime.fromISO(dtStr.split(' ')[0]);
+            }
+
+            if (rowDate.isValid && (!mostRecentDate || rowDate > mostRecentDate)) {
+              mostRecentDate = rowDate;
+            }
+          }
+        } catch (e) {
+          // Skip files that can't be parsed
+          continue;
+        }
+      }
+
+      return mostRecentDate ? mostRecentDate.toISODate() : null;
+
+    } catch (error) {
+      return null;
+    }
   }
 
   /**
@@ -882,7 +1183,8 @@ export class ForecastSchedulerService {
 
         const isPeak = isPeakHour(dt);
 
-        for (const region of ['CLUZ', 'CVIS', 'CMIN']) {
+        // Use the appropriate columns based on data format (zonal or regional)
+        for (const region of this.getDemandColumns()) {
           const fcVal = parseFloat(fcRow[region]);
           const actVal = parseFloat(actRow[region]);
           if (!isNaN(fcVal) && !isNaN(actVal) && actVal > 0) {
@@ -918,6 +1220,7 @@ export class ForecastSchedulerService {
 
   /**
    * Generate CFAC forecast (internal helper)
+   * @param weatherRefreshMode - Override weather refresh mode ('cache' for historical dates)
    */
   private async generateCfacForecast(
     startDate: string,
@@ -925,7 +1228,8 @@ export class ForecastSchedulerService {
     outputFile: string,
     scaleWind: number,
     scaleSolar: number,
-    verbose: boolean
+    verbose: boolean,
+    weatherRefreshMode?: 'cache' | 'refresh' | 'force-refresh'
   ): Promise<void> {
     const args = [
       this.cliPath,
@@ -936,6 +1240,14 @@ export class ForecastSchedulerService {
       '-o', outputFile,
       '--cache', './weather_cache'
     ];
+
+    // Add database source flag if enabled
+    if (this.config.useDb) {
+      args.push('--use-db');
+      if (this.config.dataDbPath) {
+        args.push('--db', this.config.dataDbPath);
+      }
+    }
 
     // When using manual scaling, disable auto-calibration to prevent override
     if (scaleWind !== 0 || scaleSolar !== 0) {
@@ -967,6 +1279,14 @@ export class ForecastSchedulerService {
       args.push('--weather-max-age', this.config.weatherMaxAgeHours.toString());
     }
 
+    // Add weather refresh mode - use 'cache' for historical dates to avoid unnecessary API calls
+    const refreshMode = weatherRefreshMode || this.config.weatherRefreshMode || 'refresh';
+    if (refreshMode !== 'refresh') {
+      // Map config values to CLI values
+      const cliMode = refreshMode === 'never' ? 'cache' : refreshMode === 'always' ? 'force-refresh' : refreshMode;
+      args.push('--weather-refresh-mode', cliMode);
+    }
+
     execSync(`"${this.nodeCmd}" ${args.map(a => `"${a}"`).join(' ')}`, {
       cwd: this.projectRoot,
       encoding: 'utf-8',
@@ -984,18 +1304,35 @@ export class ForecastSchedulerService {
     outputFile: string,
     verbose: boolean,
     scalePeak?: number,
-    scaleOffpeak?: number
+    scaleOffpeak?: number,
+    loadCalibratorPath?: string
   ): Promise<void> {
+    // Determine data source path: database or CSV
+    // When useDb is true, -d should point to the database file, not CSV directory
+    const dataSourcePath = this.config.useDb && this.config.dataDbPath
+      ? this.config.dataDbPath
+      : this.config.demandDataPath;
+
     const args = [
       this.cliPath,
       'forecast',
-      '-d', this.config.demandDataPath,
+      '-d', dataSourcePath,
       '-s', startDate,
       '-e', endDate,
       '-o', outputFile,
       '--model', this.config.demandModel || 'hybrid',
       '--cache', './weather_cache'
     ];
+
+    // Add database source flag if enabled
+    if (this.config.useDb) {
+      args.push('--use-db');
+    }
+
+    // Add --zonal flag if demand data is in zonal format
+    if (this.detectDemandDataFormat()) {
+      args.push('--zonal');
+    }
 
     // Add peak/off-peak scaling if provided
     if (scalePeak !== undefined && scalePeak !== 0) {
@@ -1008,6 +1345,11 @@ export class ForecastSchedulerService {
     // Add weather max age if configured
     if (this.config.weatherMaxAgeHours !== undefined) {
       args.push('--weather-max-age', this.config.weatherMaxAgeHours.toString());
+    }
+
+    // Add calibrator path if provided (uses saved model instead of auto-training)
+    if (loadCalibratorPath) {
+      args.push('--load-calibrator', loadCalibratorPath);
     }
 
     execSync(`"${this.nodeCmd}" ${args.map(a => `"${a}"`).join(' ')}`, {
@@ -1027,17 +1369,24 @@ export class ForecastSchedulerService {
     endDate: string,
     horizon: 'daily' | 'weekly',
     calibration: CalibrationResult,
-    verbose: boolean
+    verbose: boolean,
+    suffix?: string,
+    overwrite?: boolean
   ): Promise<ForecastRun> {
     const startTime = Date.now();
     const runTime = DateTime.now().toISO()!;
 
-    // New folder structure: {outputDir}/{horizon}/CFAC/cfac_{startDate}_{endDate}.csv
+    // New folder structure: {outputDir}/{horizon}/CFAC/{horizon_prefix}_mhcf_{dates}.csv
     const outputDir = join(this.config.outputDir, horizon, 'CFAC');
     if (!existsSync(outputDir)) {
       mkdirSync(outputDir, { recursive: true });
     }
-    const outputFile = join(outputDir, `cfac_${startDate}_${endDate}.csv`);
+    // Use consistent naming: da_mhcf_YYYY-MM-DD.csv or wa_mhcf_YYYY-MM-DD_YYYY-MM-DD.csv
+    const horizonPrefix = horizon === 'daily' ? 'da' : 'wa';
+    const outputFilename = horizon === 'daily'
+      ? `${horizonPrefix}_mhcf_${startDate}.csv`
+      : `${horizonPrefix}_mhcf_${startDate}_${endDate}.csv`;
+    const outputFile = join(outputDir, outputFilename);
 
     const insertRun = this.db.prepare(`
       INSERT INTO forecast_runs
@@ -1056,10 +1405,16 @@ export class ForecastSchedulerService {
         console.log(`   ☀️  Solar scale: ${calibration.solarScale > 0 ? '+' : ''}${calibration.solarScale}%`);
       }
 
+      // Use 'cache' mode for historical dates (backfill) to avoid unnecessary API calls
+      const forecastEnd = DateTime.fromISO(endDate);
+      const today = DateTime.now().startOf('day');
+      const isHistoricalForecast = forecastEnd < today;
+      const weatherMode = isHistoricalForecast ? 'cache' : undefined;
+
       await this.generateCfacForecast(
         startDate, endDate, outputFile,
         calibration.windScale, calibration.solarScale,
-        verbose
+        verbose, weatherMode
       );
 
       // Apply per-station scaling to the forecast output
@@ -1094,7 +1449,7 @@ export class ForecastSchedulerService {
       // Archive forecast if enabled
       let archivePath: string | null = null;
       if (this.config.archiveEnabled !== false) {  // Default: enabled
-        archivePath = this.archiveForecast(outputFile, asOfDate, horizon, 'cfac');
+        archivePath = this.archiveForecast(outputFile, asOfDate, horizon, 'cfac', suffix, overwrite);
         if (archivePath && verbose) {
           console.log(`   📦 Archived: ${archivePath}`);
         }
@@ -1236,17 +1591,25 @@ export class ForecastSchedulerService {
     endDate: string,
     horizon: 'daily' | 'weekly',
     verbose: boolean,
-    calibration?: CalibrationResult
+    calibration?: CalibrationResult,
+    loadCalibratorPath?: string,
+    suffix?: string,
+    overwrite?: boolean
   ): Promise<ForecastRun> {
     const startTime = Date.now();
     const runTime = DateTime.now().toISO()!;
 
-    // New folder structure: {outputDir}/{horizon}/Demand/demand_{startDate}_{endDate}.csv
+    // New folder structure: {outputDir}/{horizon}/Demand/{horizon_prefix}_demand_{dates}.csv
     const outputDir = join(this.config.outputDir, horizon, 'Demand');
     if (!existsSync(outputDir)) {
       mkdirSync(outputDir, { recursive: true });
     }
-    const outputFile = join(outputDir, `demand_${startDate}_${endDate}.csv`);
+    // Use consistent naming: da_demand_YYYY-MM-DD.csv or wa_demand_YYYY-MM-DD_YYYY-MM-DD.csv
+    const horizonPrefix = horizon === 'daily' ? 'da' : 'wa';
+    const outputFilename = horizon === 'daily'
+      ? `${horizonPrefix}_demand_${startDate}.csv`
+      : `${horizonPrefix}_demand_${startDate}_${endDate}.csv`;
+    const outputFile = join(outputDir, outputFilename);
 
     const insertRun = this.db.prepare(`
       INSERT INTO forecast_runs (run_date, run_time, forecast_type, horizon, forecast_start, forecast_end, status, output_file)
@@ -1265,7 +1628,7 @@ export class ForecastSchedulerService {
         console.log(`   📊 Off-peak scale: ${scaleOffpeak && scaleOffpeak > 0 ? '+' : ''}${scaleOffpeak || 0}%`);
       }
 
-      await this.generateDemandForecast(startDate, endDate, outputFile, verbose, scalePeak, scaleOffpeak);
+      await this.generateDemandForecast(startDate, endDate, outputFile, verbose, scalePeak, scaleOffpeak, loadCalibratorPath);
 
       let recordCount = 0;
       if (existsSync(outputFile)) {
@@ -1301,7 +1664,7 @@ export class ForecastSchedulerService {
       // Archive forecast if enabled
       let archivePath: string | null = null;
       if (this.config.archiveEnabled !== false) {  // Default: enabled
-        archivePath = this.archiveForecast(outputFile, asOfDate, horizon, 'demand');
+        archivePath = this.archiveForecast(outputFile, asOfDate, horizon, 'demand', suffix, overwrite);
         if (archivePath && verbose) {
           console.log(`   📦 Archived: ${archivePath}`);
         }
@@ -1417,12 +1780,113 @@ export class ForecastSchedulerService {
   }
 
   /**
-   * Get calibration history
+   * Get calibration history with formatted display info
    */
   getCalibrationHistory(limit: number = 10): any[] {
     return this.db.prepare(`
       SELECT * FROM calibration_history ORDER BY created_at DESC LIMIT ?
     `).all(limit) as any[];
+  }
+
+  /**
+   * Get calibration by ID
+   */
+  getCalibrationById(id: number): CalibrationResult | null {
+    const row = this.db.prepare(`
+      SELECT * FROM calibration_history WHERE id = ?
+    `).get(id) as any;
+
+    if (!row) return null;
+
+    return {
+      windScale: row.wind_scale,
+      solarScale: row.solar_scale,
+      windDeviation: row.wind_deviation,
+      solarDeviation: row.solar_deviation,
+      demandMape: row.demand_mape || 0,
+      demandPeakDeviation: row.demand_peak_deviation || 0,
+      demandOffpeakDeviation: row.demand_offpeak_deviation || 0,
+      demandPeakScale: row.demand_peak_scale || 0,
+      demandOffpeakScale: row.demand_offpeak_scale || 0,
+      calibrationPeriod: {
+        start: row.calibration_start,
+        end: row.calibration_end
+      },
+      withinThreshold: row.within_threshold === 1,
+      stationScales: {}
+    };
+  }
+
+  /**
+   * Get the most recent successful calibration
+   */
+  getMostRecentCalibration(): { id: number; calibration: CalibrationResult; createdAt: string } | null {
+    const row = this.db.prepare(`
+      SELECT * FROM calibration_history
+      WHERE within_threshold = 1
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get() as any;
+
+    if (!row) {
+      // Fall back to any calibration if no converged ones exist
+      const anyRow = this.db.prepare(`
+        SELECT * FROM calibration_history ORDER BY created_at DESC LIMIT 1
+      `).get() as any;
+
+      if (!anyRow) return null;
+
+      return {
+        id: anyRow.id,
+        createdAt: anyRow.created_at,
+        calibration: {
+          windScale: anyRow.wind_scale,
+          solarScale: anyRow.solar_scale,
+          windDeviation: anyRow.wind_deviation,
+          solarDeviation: anyRow.solar_deviation,
+          demandMape: anyRow.demand_mape || 0,
+          demandPeakDeviation: anyRow.demand_peak_deviation || 0,
+          demandOffpeakDeviation: anyRow.demand_offpeak_deviation || 0,
+          demandPeakScale: anyRow.demand_peak_scale || 0,
+          demandOffpeakScale: anyRow.demand_offpeak_scale || 0,
+          calibrationPeriod: { start: anyRow.calibration_start, end: anyRow.calibration_end },
+          withinThreshold: anyRow.within_threshold === 1,
+          stationScales: {}
+        }
+      };
+    }
+
+    return {
+      id: row.id,
+      createdAt: row.created_at,
+      calibration: {
+        windScale: row.wind_scale,
+        solarScale: row.solar_scale,
+        windDeviation: row.wind_deviation,
+        solarDeviation: row.solar_deviation,
+        demandMape: row.demand_mape || 0,
+        demandPeakDeviation: row.demand_peak_deviation || 0,
+        demandOffpeakDeviation: row.demand_offpeak_deviation || 0,
+        demandPeakScale: row.demand_peak_scale || 0,
+        demandOffpeakScale: row.demand_offpeak_scale || 0,
+        calibrationPeriod: { start: row.calibration_start, end: row.calibration_end },
+        withinThreshold: row.within_threshold === 1,
+        stationScales: {}
+      }
+    };
+  }
+
+  /**
+   * Format calibration for display
+   */
+  formatCalibrationForDisplay(row: any): string {
+    const date = new Date(row.created_at).toLocaleDateString();
+    const time = new Date(row.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const windSign = row.wind_scale >= 0 ? '+' : '';
+    const solarSign = row.solar_scale >= 0 ? '+' : '';
+    const converged = row.within_threshold ? '✓' : '○';
+
+    return `[${row.id}] ${date} ${time} | Wind: ${windSign}${row.wind_scale}%, Solar: ${solarSign}${row.solar_scale}% | ${row.calibration_start} to ${row.calibration_end} ${converged}`;
   }
 
   /**
@@ -1517,6 +1981,7 @@ export class ForecastSchedulerService {
       run_days: row.run_days,
       forecast_types: row.forecast_types,
       horizons: row.horizons,
+      demand_geography: row.demand_geography || 'regional',  // Default to regional for backward compatibility
       weather_max_age_hours: row.weather_max_age_hours,
       auto_push_gateway: row.auto_push_gateway === 1,
       archive_retention_days: row.archive_retention_days,
@@ -1561,6 +2026,10 @@ export class ForecastSchedulerService {
       fields.push('horizons = ?');
       values.push(config.horizons);
     }
+    if (config.demand_geography !== undefined) {
+      fields.push('demand_geography = ?');
+      values.push(config.demand_geography);
+    }
     if (config.weather_max_age_hours !== undefined) {
       fields.push('weather_max_age_hours = ?');
       values.push(config.weather_max_age_hours);
@@ -1599,19 +2068,33 @@ export class ForecastSchedulerService {
   getGatewayFilename(config: {
     horizon: 'daily' | 'weekly';
     type: 'demand' | 'cfac';
-    targetDate: string;
+    startDate: string;
+    endDate?: string;  // Required for weekly, optional for daily
     naming?: 'gateway' | 'legacy';
   }): string {
-    const { horizon, type, targetDate, naming = 'gateway' } = config;
+    const { horizon, type, startDate, endDate, naming = 'gateway' } = config;
 
-    // Gateway naming: DA_DEM_YYYY-MM-DD.csv, WA_DEM_YYYY-MM-DD.csv
-    // Legacy naming: FC_DEM_YYYY-MM-DD.csv (kept for backwards compatibility)
-    const prefix = naming === 'gateway'
-      ? (horizon === 'daily' ? 'DA_' : 'WA_')
-      : 'FC_';
+    // Type code: demand or mhcf
+    const typeCode = type === 'demand' ? 'demand' : 'mhcf';
 
-    const typeCode = type === 'demand' ? 'DEM' : 'MHCF';
-    return `${prefix}${typeCode}_${targetDate}.csv`;
+    if (naming === 'legacy') {
+      // Legacy naming: FC_DEM_YYYY-MM-DD.csv (backwards compatibility)
+      const legacyTypeCode = type === 'demand' ? 'DEM' : 'MHCF';
+      return `FC_${legacyTypeCode}_${startDate}.csv`;
+    }
+
+    // Gateway naming with distinct horizon prefixes:
+    // Day-ahead: da_demand_YYYY-MM-DD.csv, da_mhcf_YYYY-MM-DD.csv
+    // Week-ahead: wa_demand_YYYY-MM-DD_YYYY-MM-DD.csv, wa_mhcf_YYYY-MM-DD_YYYY-MM-DD.csv
+    const horizonPrefix = horizon === 'daily' ? 'da' : 'wa';
+
+    if (horizon === 'daily') {
+      return `${horizonPrefix}_${typeCode}_${startDate}.csv`;
+    } else {
+      // Week-ahead includes both start and end dates
+      const end = endDate || DateTime.fromISO(startDate).plus({ days: 6 }).toISODate()!;
+      return `${horizonPrefix}_${typeCode}_${startDate}_${end}.csv`;
+    }
   }
 
   /**
@@ -1643,13 +2126,17 @@ export class ForecastSchedulerService {
    * @param asOfDate - As-of date (YYYY-MM-DD)
    * @param horizon - 'daily' or 'weekly'
    * @param type - 'demand' or 'cfac'
+   * @param suffix - Optional suffix to append to filename (e.g., "_v2")
+   * @param overwrite - If true, overwrite existing archive files
    * @returns Archive file path
    */
   archiveForecast(
     outputFile: string,
     asOfDate: string,
     horizon: 'daily' | 'weekly',
-    type: 'demand' | 'cfac'
+    type: 'demand' | 'cfac',
+    suffix?: string,
+    overwrite?: boolean
   ): string | null {
     if (!existsSync(outputFile)) {
       return null;
@@ -1666,15 +2153,28 @@ export class ForecastSchedulerService {
         mkdirSync(archiveDir, { recursive: true });
       }
 
-      // Get target date (start of forecast period)
-      const targetDate = horizon === 'daily'
-        ? asOf.plus({ days: 1 }).toISODate()!
-        : asOf.plus({ days: 1 }).toISODate()!;  // Week-ahead also starts next day
+      // Get start and end dates for forecast period
+      const startDate = asOf.plus({ days: 1 }).toISODate()!;
+      const endDate = horizon === 'daily'
+        ? startDate  // Day-ahead: single day
+        : asOf.plus({ days: 7 }).toISODate()!;  // Week-ahead: 7 days
 
       // Generate gateway-compatible filename
       const naming = this.config.gatewayNaming || 'gateway';
-      const archiveFilename = this.getGatewayFilename({ horizon, type, targetDate, naming });
+      let archiveFilename = this.getGatewayFilename({ horizon, type, startDate, endDate, naming });
+
+      // Apply suffix if provided (insert before .csv extension)
+      if (suffix) {
+        archiveFilename = archiveFilename.replace('.csv', `${suffix}.csv`);
+      }
+
       const archivePath = join(archiveDir, archiveFilename);
+
+      // Check if archive already exists
+      if (existsSync(archivePath) && !overwrite) {
+        // Skip archiving if file exists and overwrite is not enabled
+        return archivePath;  // Return existing path without overwriting
+      }
 
       // Copy file to archive
       const content = readFileSync(outputFile);
@@ -1783,22 +2283,32 @@ export class ForecastSchedulerService {
         VALUES (?, ?, ?, ?)
       `);
 
-      // Use transaction for bulk insert
-      const transaction = this.db.transaction(() => {
-        for (const row of data) {
-          const datetime = row.DateTimeEnding;
+      // Flatten data into batch array to avoid stack overflow
+      const BATCH_SIZE = 1000;
+      const batchItems: Array<{ datetime: string; region: string; forecastMW: number }> = [];
 
-          for (const region of regions) {
-            const forecastMW = parseFloat(row[region]);
-            if (!isNaN(forecastMW)) {
-              insertStmt.run(runId, datetime, region, forecastMW);
-              stored++;
-            }
+      for (const row of data) {
+        const datetime = row.DateTimeEnding;
+        for (const region of regions) {
+          const forecastMW = parseFloat(row[region]);
+          if (!isNaN(forecastMW)) {
+            batchItems.push({ datetime, region, forecastMW });
           }
         }
-      });
+      }
 
-      transaction();
+      // Process in batches to avoid stack overflow
+      for (let i = 0; i < batchItems.length; i += BATCH_SIZE) {
+        const batch = batchItems.slice(i, i + BATCH_SIZE);
+        const batchTransaction = this.db.transaction(() => {
+          for (const item of batch) {
+            insertStmt.run(runId, item.datetime, item.region, item.forecastMW);
+          }
+        });
+        batchTransaction();
+        stored += batch.length;
+      }
+
       return { stored };
 
     } catch (error) {
@@ -1850,23 +2360,33 @@ export class ForecastSchedulerService {
         VALUES (?, ?, ?, ?, ?)
       `);
 
-      // Use transaction for bulk insert
-      const transaction = this.db.transaction(() => {
-        for (const row of data) {
-          const datetime = row.DateTimeEnding;
+      // Flatten data into batch array to avoid stack overflow
+      const BATCH_SIZE = 1000;
+      const batchItems: Array<{ datetime: string; station: string; stationType: string; forecastCF: number }> = [];
 
-          for (const station of stations) {
-            const forecastCF = parseFloat(row[station]);
-            if (!isNaN(forecastCF)) {
-              const stationType = getStationType(station);
-              insertStmt.run(runId, datetime, station, stationType, forecastCF);
-              stored++;
-            }
+      for (const row of data) {
+        const datetime = row.DateTimeEnding;
+        for (const station of stations) {
+          const forecastCF = parseFloat(row[station]);
+          if (!isNaN(forecastCF)) {
+            const stationType = getStationType(station);
+            batchItems.push({ datetime, station, stationType, forecastCF });
           }
         }
-      });
+      }
 
-      transaction();
+      // Process in batches to avoid stack overflow
+      for (let i = 0; i < batchItems.length; i += BATCH_SIZE) {
+        const batch = batchItems.slice(i, i + BATCH_SIZE);
+        const batchTransaction = this.db.transaction(() => {
+          for (const item of batch) {
+            insertStmt.run(runId, item.datetime, item.station, item.stationType, item.forecastCF);
+          }
+        });
+        batchTransaction();
+        stored += batch.length;
+      }
+
       return { stored };
 
     } catch (error) {

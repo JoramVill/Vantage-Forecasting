@@ -73,8 +73,51 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getRecentRuns: (limit: number) =>
     ipcRenderer.invoke('get-recent-runs', limit),
 
-  runSchedulerManual: (date: string, type: string, horizon: string) =>
-    ipcRenderer.invoke('run-scheduler-manual', date, type, horizon),
+  getCalibrations: (limit: number = 10) =>
+    ipcRenderer.invoke('get-calibrations', limit),
+
+  runSchedulerManual: (options: {
+    date: string;
+    type: string;
+    horizon: string;
+    calibratorPath?: string | null;
+    trainingDays?: number;
+    endDate?: string | null;
+    verbose?: boolean;
+    pushGateway?: boolean;
+    useCalibrationId?: number | null;
+    useDb?: boolean;
+    dataDbPath?: string | null;
+    maxIterations?: number;
+    refreshWeather?: boolean;
+    overwrite?: boolean;
+    suffix?: string | null;
+    outputDir?: string;
+    useXgboost?: boolean;
+    asymmetricLoss?: boolean;
+    biasCorrection?: boolean;
+    weatherCacheDir?: string;
+  }) => ipcRenderer.invoke('run-scheduler-manual', options),
+
+  // Gateway configuration management
+  loadGatewayConfig: () =>
+    ipcRenderer.invoke('load-gateway-config'),
+
+  saveGatewayConfig: (config: { host: string; port: number; username: string; password: string }) =>
+    ipcRenderer.invoke('save-gateway-config', config),
+
+  testGatewayConnection: () =>
+    ipcRenderer.invoke('test-gateway-connection'),
+
+  // Gateway storage management
+  getGatewayStorage: () =>
+    ipcRenderer.invoke('get-gateway-storage'),
+
+  archiveGatewayFiles: (options: { olderThanDays: number; deleteAfterArchive?: boolean }) =>
+    ipcRenderer.invoke('archive-gateway-files', options),
+
+  clearGatewayFiles: (options: { olderThanDays: number; confirm: string }) =>
+    ipcRenderer.invoke('clear-gateway-files', options),
 });
 
 // Type declaration for window.electronAPI
@@ -151,10 +194,98 @@ declare global {
         pushed_to_gateway: boolean;
         created_at: string;
       }>>;
-      runSchedulerManual: (date: string, type: string, horizon: string) => Promise<{
+      getCalibrations: (limit?: number) => Promise<Array<{
+        id: number;
+        date: string;
+        periodStart: string;
+        periodEnd: string;
+        windScale: number;
+        solarScale: number;
+        windDeviation: number;
+        solarDeviation: number;
+        demandMape: number;
+        demandPeakScale: number;
+        demandOffpeakScale: number;
+        converged: boolean;
+        iterations: number;
+        createdAt: string;
+      }>>;
+      runSchedulerManual: (options: {
+        date: string;
+        type: string;
+        horizon: string;
+        calibratorPath?: string | null;
+        trainingDays?: number;
+        endDate?: string | null;
+        verbose?: boolean;
+        pushGateway?: boolean;
+        useCalibrationId?: number | null;
+        useDb?: boolean;
+        dataDbPath?: string | null;
+        maxIterations?: number;
+        refreshWeather?: boolean;
+        overwrite?: boolean;
+        suffix?: string | null;
+        outputDir?: string;
+        useXgboost?: boolean;
+        asymmetricLoss?: boolean;
+        biasCorrection?: boolean;
+        weatherCacheDir?: string;
+      }) => Promise<{
         success: boolean;
         output?: string;
         error?: string;
+      }>;
+      loadGatewayConfig: () => Promise<{
+        host: string;
+        port: number;
+        username: string;
+        password: string;
+      }>;
+      saveGatewayConfig: (config: { host: string; port: number; username: string; password: string }) => Promise<{
+        success: boolean;
+        error?: string;
+      }>;
+      testGatewayConnection: () => Promise<{
+        connected: boolean;
+        directories?: { path: string; accessible: boolean; error?: string }[];
+        error?: string;
+      }>;
+      getGatewayStorage: () => Promise<{
+        success: boolean;
+        error?: string;
+        categories?: Record<string, {
+          files: number;
+          size: number;
+          sizeFormatted: string;
+          oldest: string;
+          newest: string;
+        }>;
+        totalFiles?: number;
+        totalSize?: number;
+        totalSizeFormatted?: string;
+        oldestFile?: string;
+        newestFile?: string;
+      }>;
+      archiveGatewayFiles: (options: { olderThanDays: number; deleteAfterArchive?: boolean }) => Promise<{
+        success: boolean;
+        error?: string;
+        message?: string;
+        cutoffDate?: string;
+        results?: {
+          archived: { file: string; date: string; action: string }[];
+          errors: string[];
+        };
+      }>;
+      clearGatewayFiles: (options: { olderThanDays: number; confirm: string }) => Promise<{
+        success: boolean;
+        error?: string;
+        message?: string;
+        cutoffDate?: string;
+        results?: {
+          deleted: { file: string; date: string }[];
+          errors: string[];
+        };
       }>;
     };
   }

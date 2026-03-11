@@ -77,10 +77,98 @@ interface Window {
       pushed_to_gateway: boolean;
       created_at: string;
     }>>;
-    runSchedulerManual: (date: string, type: string, horizon: string) => Promise<{
+    getCalibrations: (limit?: number) => Promise<Array<{
+      id: number;
+      date: string;
+      periodStart: string;
+      periodEnd: string;
+      windScale: number;
+      solarScale: number;
+      windDeviation: number;
+      solarDeviation: number;
+      demandMape: number;
+      demandPeakScale: number;
+      demandOffpeakScale: number;
+      converged: boolean;
+      iterations: number;
+      createdAt: string;
+    }>>;
+    runSchedulerManual: (options: {
+      date: string;
+      type: string;
+      horizon: string;
+      calibratorPath?: string | null;
+      trainingDays?: number;
+      endDate?: string | null;
+      verbose?: boolean;
+      pushGateway?: boolean;
+      useCalibrationId?: number | null;
+      useDb?: boolean;
+      dataDbPath?: string | null;
+      maxIterations?: number;
+      refreshWeather?: boolean;
+      overwrite?: boolean;
+      suffix?: string | null;
+      outputDir?: string;
+      useXgboost?: boolean;
+      asymmetricLoss?: boolean;
+      biasCorrection?: boolean;
+      weatherCacheDir?: string;
+    }) => Promise<{
       success: boolean;
       output?: string;
       error?: string;
+    }>;
+    loadGatewayConfig: () => Promise<{
+      host: string;
+      port: number;
+      username: string;
+      password: string;
+    }>;
+    saveGatewayConfig: (config: { host: string; port: number; username: string; password: string }) => Promise<{
+      success: boolean;
+      error?: string;
+    }>;
+    testGatewayConnection: () => Promise<{
+      connected: boolean;
+      directories?: { path: string; accessible: boolean; error?: string }[];
+      error?: string;
+    }>;
+    getGatewayStorage: () => Promise<{
+      success: boolean;
+      error?: string;
+      categories?: Record<string, {
+        files: number;
+        size: number;
+        sizeFormatted: string;
+        oldest: string;
+        newest: string;
+      }>;
+      totalFiles?: number;
+      totalSize?: number;
+      totalSizeFormatted?: string;
+      oldestFile?: string;
+      newestFile?: string;
+    }>;
+    archiveGatewayFiles: (options: { olderThanDays: number; deleteAfterArchive?: boolean }) => Promise<{
+      success: boolean;
+      error?: string;
+      message?: string;
+      cutoffDate?: string;
+      results?: {
+        archived: { file: string; date: string; action: string }[];
+        errors: string[];
+      };
+    }>;
+    clearGatewayFiles: (options: { olderThanDays: number; confirm: string }) => Promise<{
+      success: boolean;
+      error?: string;
+      message?: string;
+      cutoffDate?: string;
+      results?: {
+        deleted: { file: string; date: string }[];
+        errors: string[];
+      };
     }>;
   };
 }

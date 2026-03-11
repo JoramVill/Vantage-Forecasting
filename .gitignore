@@ -58,6 +58,14 @@ test_*.cjs
 # GUI build artifacts
 /gui/release/
 /gui/dist/
+/gui/dist-electron/
 
 # Forecast database
 forecast.db
+
+# Portable builds
+portable-build/
+portable-build-*/
+
+# Claude Code settings
+.claude/

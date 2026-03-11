@@ -93,7 +93,10 @@ export function parseDemandCsv(pathOrFolder: string): ParsedDemandData {
 
     for (const file of files) {
       const { records, regions, minDate, maxDate } = parseSingleCsv(file);
-      allRecords.push(...records);
+      // Use loop instead of spread to avoid stack overflow with large arrays
+      for (const record of records) {
+        allRecords.push(record);
+      }
       regions.forEach(r => allRegions.add(r));
 
       if (minDate && (!globalMinDate || minDate < globalMinDate)) {

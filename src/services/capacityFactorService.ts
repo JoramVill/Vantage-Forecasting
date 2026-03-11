@@ -241,7 +241,10 @@ export class CapacityFactorService {
 
     for (const file of files) {
       const records = await this.parseCapacityFactorCSV(file, progressCallback);
-      allRecords.push(...records);
+      // Use loop instead of spread to avoid stack overflow with large arrays
+      for (const record of records) {
+        allRecords.push(record);
+      }
     }
 
     // Remove duplicates (same datetime + station) - keep latest
