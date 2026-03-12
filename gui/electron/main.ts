@@ -1324,6 +1324,7 @@ ipcMain.handle('run-scheduler-manual', async (_event, options: {
   }
 
   // Note: --cache is not supported by scheduler commands (it uses its own weather cache logic)
+  // Note: Geography is read from forecast_config.json (demand.geography) - ensure config is saved before running
   // The weatherCacheDir setting is used by manual forecast commands instead
   // Note: Model options (--use-xgboost, --asymmetric-loss, --bias-correction) are read from forecast_config.json
 

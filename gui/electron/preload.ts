@@ -93,9 +93,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     overwrite?: boolean;
     suffix?: string | null;
     outputDir?: string;
-    useXgboost?: boolean;
-    asymmetricLoss?: boolean;
-    biasCorrection?: boolean;
     weatherCacheDir?: string;
   }) => ipcRenderer.invoke('run-scheduler-manual', options),
 

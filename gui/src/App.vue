@@ -968,6 +968,10 @@ async function loadGlobalConfig() {
   configLoading.value = true;
   try {
     globalConfig.value = await window.electronAPI.loadGlobalConfig();
+    // Sync scheduler tab geography dropdown from global config (single source of truth)
+    if (globalConfig.value?.demand?.geography) {
+      schedulerConfig.value.demandGeography = globalConfig.value.demand.geography as 'regional' | 'zonal' | 'both';
+    }
     addSchedulerStatus('Global config loaded successfully', 'success');
   } catch (e: any) {
     console.error('Failed to load global config:', e);
@@ -980,6 +984,16 @@ async function loadGlobalConfig() {
 // Mark global config as dirty (unsaved changes)
 function markConfigDirty() {
   configDirty.value = true;
+}
+
+// Sync scheduler demand geography to global config and save
+// This ensures CLI reads the correct value from forecast_config.json
+async function syncDemandGeographyToConfig() {
+  if (!globalConfig.value) return;
+  // Sync scheduler tab selection to global config
+  globalConfig.value.demand.geography = schedulerConfig.value.demandGeography;
+  // Save immediately so CLI can read it
+  await saveGlobalConfig();
 }
 
 // Save global config to forecast_config.json
@@ -2436,7 +2450,7 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
               <!-- Geography dropdown for demand forecasts -->
               <div v-if="schedulerConfig.forecastDemand" class="form-group compact" style="margin-top: 12px;">
                 <label>Demand Mode</label>
-                <select v-model="schedulerConfig.demandGeography" class="geography-dropdown">
+                <select v-model="schedulerConfig.demandGeography" @change="syncDemandGeographyToConfig" class="geography-dropdown">
                   <option value="regional">Regional (3)</option>
                   <option value="zonal">Zonal (14)</option>
                   <option value="both">Both</option>
