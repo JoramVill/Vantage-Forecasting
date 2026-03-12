@@ -71,3 +71,4 @@ portable-build-*/
 .claude/
 *.db-shm
 *.db-wal
+model_cache/

@@ -40,6 +40,7 @@ import {
   ForecastCategory
 } from './services/sftpPushService.js';
 import { CapacityUpdateService } from './services/capacityUpdateService.js';
+import { getModelCache } from './services/modelCacheService.js';
 import { mergeZonalData, MergedRecord } from './utils/index.js';
 import { extractZonalFeatures } from './features/featureEngineering.js';
 import { ZONAL_LOCATIONS, getZonalLocationsByZone, WeatherService } from './services/index.js';
@@ -9744,6 +9745,55 @@ configCommand
       if (!result.valid) {
         process.exit(1);
       }
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+// ═══════════════════════════════════════════════════════════════
+// CACHE COMMAND GROUP - Model cache management
+// ═══════════════════════════════════════════════════════════════
+
+const cacheCommand = program
+  .command('cache')
+  .description('Model cache management');
+
+cacheCommand
+  .command('status')
+  .description('Show cache statistics')
+  .action(() => {
+    try {
+      const cache = getModelCache();
+      const stats = cache.getStats();
+      console.log('\n📦 Model Cache Status:');
+      console.log(`   Entries: ${stats.entries}`);
+      console.log(`   Total size: ${stats.totalSizeKB} KB`);
+      console.log(`   Oldest entry: ${stats.oldestAge} hours ago`);
+      console.log('');
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      process.exit(1);
+    }
+  });
+
+cacheCommand
+  .command('clear')
+  .description('Clear all cached models')
+  .option('--force', 'Skip confirmation prompt')
+  .action((options: any) => {
+    try {
+      const cache = getModelCache();
+      const stats = cache.getStats();
+
+      if (!options.force && stats.entries > 0) {
+        console.log(`\n⚠️  About to clear ${stats.entries} cached models (${stats.totalSizeKB} KB)`);
+        console.log('   Use --force to skip this check');
+        process.exit(0);
+      }
+
+      cache.clearAll();
+      console.log('✅ Model cache cleared');
     } catch (error: any) {
       console.error(`\n❌ Error: ${error.message}`);
       process.exit(1);
