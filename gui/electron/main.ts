@@ -71,6 +71,290 @@ function getCliScriptPath(): string {
   return path.join(appRoot, 'dist', 'index.js');
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// GLOBAL CONFIG SERVICE (Local implementation to avoid ESM/CJS compatibility issues)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Global Forecast Configuration interfaces
+ * Mirrors the CLI types in src/types/config.ts
+ */
+interface GlobalForecastConfig {
+  version: number;
+  paths: {
+    demandTraining: string;
+    cfacTraining: string;
+    output: string;
+    archive: string;
+    weatherCache: string;
+  };
+  databases: {
+    scheduler: string;
+    regionalDemand: string;
+    zonalDemand: string;
+  };
+  calibration: {
+    enabled: boolean;
+    days: number;
+    threshold: number;
+    maxIterations: number;
+  };
+  cfac: {
+    useXgboost: boolean;
+    asymmetricLoss: boolean;
+    biasCorrection: boolean;
+  };
+  demand: {
+    model: 'hybrid' | 'regression' | 'xgboost';
+    geography: 'regional' | 'zonal';
+    growthRate: number;
+  };
+  weather: {
+    maxAgeHours: number;
+    refreshMode: 'auto' | 'always' | 'never';
+  };
+  output: {
+    archiveEnabled: boolean;
+    retentionDays: number;
+    naming: 'gateway' | 'legacy';
+  };
+  gateway: {
+    enabled: boolean;
+    autoPush: boolean;
+  };
+  scheduler: {
+    enabled: boolean;
+    runTimes: string[];
+    runDays: number[];
+    forecastTypes: ('demand' | 'cfac')[];
+    horizons: ('daily' | 'weekly')[];
+  };
+}
+
+interface ConfigValidationResult {
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+}
+
+/**
+ * Local config service that doesn't require importing ESM modules
+ * Handles forecast_config.json directly in the Electron main process
+ */
+class LocalConfigService {
+  private configPath: string;
+  private config: GlobalForecastConfig | null = null;
+
+  constructor() {
+    // Use project root for config path
+    this.configPath = path.join(getAppRoot(), 'forecast_config.json');
+  }
+
+  /**
+   * Get default configuration values
+   */
+  static getDefaults(): GlobalForecastConfig {
+    return {
+      version: 1,
+      paths: {
+        demandTraining: 'Data Samples/Demand',
+        cfacTraining: 'Data Samples/Capacity Factor',
+        output: './output',
+        archive: './output/archive',
+        weatherCache: './weather_cache'
+      },
+      databases: {
+        scheduler: './forecast.db',
+        regionalDemand: './data/iload.db',
+        zonalDemand: './data/iload_zonal.db'
+      },
+      calibration: {
+        enabled: true,
+        days: 7,
+        threshold: 5,
+        maxIterations: 10
+      },
+      cfac: {
+        useXgboost: false,
+        asymmetricLoss: false,
+        biasCorrection: false
+      },
+      demand: {
+        model: 'hybrid',
+        geography: 'regional',
+        growthRate: 0
+      },
+      weather: {
+        maxAgeHours: 6,
+        refreshMode: 'auto'
+      },
+      output: {
+        archiveEnabled: true,
+        retentionDays: 90,
+        naming: 'gateway'
+      },
+      gateway: {
+        enabled: false,
+        autoPush: false
+      },
+      scheduler: {
+        enabled: false,
+        runTimes: ['06:00'],
+        runDays: [1, 2, 3, 4, 5, 6, 7],
+        forecastTypes: ['demand', 'cfac'],
+        horizons: ['daily', 'weekly']
+      }
+    };
+  }
+
+  /**
+   * Load configuration from JSON file
+   */
+  load(): GlobalForecastConfig {
+    if (this.config !== null) {
+      return this.config;
+    }
+
+    if (fs.existsSync(this.configPath)) {
+      try {
+        const content = fs.readFileSync(this.configPath, 'utf8');
+        const loaded = JSON.parse(content) as GlobalForecastConfig;
+        this.config = this.mergeWithDefaults(loaded);
+        return this.config;
+      } catch (error: any) {
+        throw new Error(`Failed to parse forecast_config.json: ${error.message}`);
+      }
+    }
+
+    // No existing config - use defaults
+    this.config = LocalConfigService.getDefaults();
+    return this.config;
+  }
+
+  /**
+   * Save configuration to JSON file
+   */
+  save(config?: GlobalForecastConfig): void {
+    const toSave = config || this.config;
+    if (!toSave) {
+      throw new Error('No configuration to save');
+    }
+
+    const dir = path.dirname(this.configPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    const content = JSON.stringify(toSave, null, 2);
+    fs.writeFileSync(this.configPath, content, 'utf8');
+    this.config = toSave;
+  }
+
+  /**
+   * Reset configuration to defaults
+   */
+  reset(): void {
+    this.config = LocalConfigService.getDefaults();
+    this.save();
+  }
+
+  /**
+   * Validate configuration
+   */
+  validate(config?: GlobalForecastConfig): ConfigValidationResult {
+    const toValidate = config || this.load();
+    const errors: string[] = [];
+    const warnings: string[] = [];
+
+    // Check version
+    if (typeof toValidate.version !== 'number' || toValidate.version < 1) {
+      errors.push('version must be a positive number');
+    }
+
+    // Validate paths
+    if (!toValidate.paths || typeof toValidate.paths !== 'object') {
+      errors.push('paths section is required');
+    } else {
+      const requiredPaths = ['demandTraining', 'cfacTraining', 'output', 'archive', 'weatherCache'];
+      for (const p of requiredPaths) {
+        if (!toValidate.paths[p as keyof typeof toValidate.paths]) {
+          errors.push(`paths.${p} is required`);
+        }
+      }
+    }
+
+    // Validate databases
+    if (!toValidate.databases || typeof toValidate.databases !== 'object') {
+      errors.push('databases section is required');
+    }
+
+    // Validate calibration
+    if (toValidate.calibration) {
+      if (typeof toValidate.calibration.enabled !== 'boolean') {
+        errors.push('calibration.enabled must be boolean');
+      }
+      if (toValidate.calibration.days < 1 || toValidate.calibration.days > 365) {
+        errors.push('calibration.days must be between 1 and 365');
+      }
+    } else {
+      errors.push('calibration section is required');
+    }
+
+    // Validate demand
+    if (toValidate.demand) {
+      const validModels = ['hybrid', 'regression', 'xgboost'];
+      if (!validModels.includes(toValidate.demand.model)) {
+        errors.push(`demand.model must be one of: ${validModels.join(', ')}`);
+      }
+      const validGeography = ['regional', 'zonal'];
+      if (!validGeography.includes(toValidate.demand.geography)) {
+        errors.push(`demand.geography must be one of: ${validGeography.join(', ')}`);
+      }
+    } else {
+      errors.push('demand section is required');
+    }
+
+    // Validate weather
+    if (toValidate.weather) {
+      const validRefreshModes = ['auto', 'always', 'never'];
+      if (!validRefreshModes.includes(toValidate.weather.refreshMode)) {
+        errors.push(`weather.refreshMode must be one of: ${validRefreshModes.join(', ')}`);
+      }
+    } else {
+      errors.push('weather section is required');
+    }
+
+    return {
+      valid: errors.length === 0,
+      errors,
+      warnings
+    };
+  }
+
+  /**
+   * Merge loaded config with defaults to handle missing fields
+   */
+  private mergeWithDefaults(loaded: Partial<GlobalForecastConfig>): GlobalForecastConfig {
+    const defaults = LocalConfigService.getDefaults();
+
+    return {
+      version: loaded.version ?? defaults.version,
+      paths: { ...defaults.paths, ...loaded.paths },
+      databases: { ...defaults.databases, ...loaded.databases },
+      calibration: { ...defaults.calibration, ...loaded.calibration },
+      cfac: { ...defaults.cfac, ...loaded.cfac },
+      demand: { ...defaults.demand, ...loaded.demand },
+      weather: { ...defaults.weather, ...loaded.weather },
+      output: { ...defaults.output, ...loaded.output },
+      gateway: { ...defaults.gateway, ...loaded.gateway },
+      scheduler: { ...defaults.scheduler, ...loaded.scheduler }
+    };
+  }
+}
+
+// Singleton instance for the local config service
+const localConfigService = new LocalConfigService();
+
 // Settings store with encryption
 const store = new Store({
   name: 'vantage-forecaster-settings',
@@ -1278,34 +1562,26 @@ ipcMain.handle('test-gateway-connection', async () => {
 // GLOBAL CONFIG IPC HANDLERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// Load global config
+// Load global config (uses local service to avoid ESM/CJS compatibility issues)
 ipcMain.handle('load-global-config', async () => {
-  const { ConfigService } = await import('../../dist/services/configService.js');
-  const configService = new ConfigService();
-  return configService.load();
+  return localConfigService.load();
 });
 
 // Save global config
 ipcMain.handle('save-global-config', async (_event, config) => {
-  const { ConfigService } = await import('../../dist/services/configService.js');
-  const configService = new ConfigService();
-  configService.save(config);
+  localConfigService.save(config);
   return { success: true };
 });
 
 // Validate config
 ipcMain.handle('validate-global-config', async (_event, config) => {
-  const { ConfigService } = await import('../../dist/services/configService.js');
-  const configService = new ConfigService();
-  return configService.validate(config);
+  return localConfigService.validate(config);
 });
 
 // Reset config to defaults
 ipcMain.handle('reset-global-config', async () => {
-  const { ConfigService } = await import('../../dist/services/configService.js');
-  const configService = new ConfigService();
-  configService.reset();
-  return configService.load();
+  localConfigService.reset();
+  return localConfigService.load();
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
