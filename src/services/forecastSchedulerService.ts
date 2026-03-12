@@ -70,8 +70,11 @@ interface SchedulerConfig {
   maxCalibrationIterations?: number; // Max iterations to converge (default: 3)
   // Demand options
   demandModel?: 'hybrid' | 'regression' | 'xgboost';
+  demandGeography?: 'regional' | 'zonal' | 'both';  // Geography mode for demand forecasts
   useDb?: boolean;       // Use database as training data source
   dataDbPath?: string;   // Database path for training data (different from dbPath which is scheduler db)
+  regionalDbPath?: string;  // Regional demand database path (iload.db)
+  zonalDbPath?: string;     // Zonal demand database path (iload_zonal.db)
   trainDays?: number;
   demandScale?: number;
   demandGrowth?: number;
@@ -142,12 +145,15 @@ export class ForecastSchedulerService {
     this.db = new Database(config.dbPath);
     this.ensureTables();
 
-    // Load stored scheduler config from database if pushToGateway not explicitly set
-    // This connects the GUI's "Auto-push to Gateway" setting to the scheduler service
-    if (this.config.pushToGateway === undefined) {
-      const storedConfig = this.loadSchedulerConfig();
-      if (storedConfig && storedConfig.auto_push_gateway) {
+    // Load stored scheduler config from database if not explicitly set
+    // This connects the GUI settings to the scheduler service
+    const storedConfig = this.loadSchedulerConfig();
+    if (storedConfig) {
+      if (this.config.pushToGateway === undefined && storedConfig.auto_push_gateway) {
         this.config.pushToGateway = true;
+      }
+      if (this.config.demandGeography === undefined) {
+        this.config.demandGeography = storedConfig.demand_geography;
       }
     }
 
@@ -749,8 +755,10 @@ export class ForecastSchedulerService {
         const demandCalibFile = join(calibDir, `demand_calib_iter${demandIteration}.csv`);
 
         try {
+          // For calibration, use regional format (or primary geography if not 'both')
+          const calibGeography = this.config.demandGeography === 'zonal' ? 'zonal' : 'regional';
           await this.generateDemandForecast(
-            demandCalibStart, demandCalibEnd, demandCalibFile, false,
+            demandCalibStart, demandCalibEnd, demandCalibFile, calibGeography, false,
             demandIteration > 1 ? demandPeakScale : undefined,
             demandIteration > 1 ? demandOffpeakScale : undefined
           );
@@ -1302,16 +1310,29 @@ export class ForecastSchedulerService {
     startDate: string,
     endDate: string,
     outputFile: string,
+    geography: 'regional' | 'zonal',
     verbose: boolean,
     scalePeak?: number,
     scaleOffpeak?: number,
     loadCalibratorPath?: string
   ): Promise<void> {
-    // Determine data source path: database or CSV
-    // When useDb is true, -d should point to the database file, not CSV directory
-    const dataSourcePath = this.config.useDb && this.config.dataDbPath
-      ? this.config.dataDbPath
-      : this.config.demandDataPath;
+    // Determine data source path based on geography and database configuration
+    let dataSourcePath: string;
+
+    if (this.config.useDb) {
+      // Use database source - select appropriate database based on geography
+      if (geography === 'zonal' && this.config.zonalDbPath) {
+        dataSourcePath = this.config.zonalDbPath;
+      } else if (geography === 'regional' && this.config.regionalDbPath) {
+        dataSourcePath = this.config.regionalDbPath;
+      } else {
+        // Fallback to generic dataDbPath
+        dataSourcePath = this.config.dataDbPath || this.config.demandDataPath;
+      }
+    } else {
+      // Use CSV source
+      dataSourcePath = this.config.demandDataPath;
+    }
 
     const args = [
       this.cliPath,
@@ -1329,8 +1350,8 @@ export class ForecastSchedulerService {
       args.push('--use-db');
     }
 
-    // Add --zonal flag if demand data is in zonal format
-    if (this.detectDemandDataFormat()) {
+    // Add --zonal flag based on geography parameter (not file detection)
+    if (geography === 'zonal') {
       args.push('--zonal');
     }
 
@@ -1584,6 +1605,7 @@ export class ForecastSchedulerService {
 
   /**
    * Run demand forecast with optional calibrated peak/off-peak scaling
+   * Handles both regional and zonal forecasts based on config.demandGeography
    */
   private async runDemandForecast(
     asOfDate: string,
@@ -1596,20 +1618,71 @@ export class ForecastSchedulerService {
     suffix?: string,
     overwrite?: boolean
   ): Promise<ForecastRun> {
+    const geography = this.config.demandGeography || 'regional';
+
+    // If geography is "both", generate both regional and zonal forecasts
+    if (geography === 'both') {
+      if (verbose) {
+        console.log(`   🌍 Generating both regional and zonal forecasts`);
+      }
+
+      // Generate regional forecast
+      const regionalRun = await this.runSingleDemandForecast(
+        asOfDate, startDate, endDate, horizon, 'regional',
+        verbose, calibration, loadCalibratorPath, suffix, overwrite
+      );
+
+      // Generate zonal forecast
+      await this.runSingleDemandForecast(
+        asOfDate, startDate, endDate, horizon, 'zonal',
+        verbose, calibration, loadCalibratorPath, suffix, overwrite
+      );
+
+      // Return the regional run as the primary result (for backward compatibility)
+      return regionalRun;
+    } else {
+      // Generate single forecast (regional or zonal)
+      return await this.runSingleDemandForecast(
+        asOfDate, startDate, endDate, horizon, geography,
+        verbose, calibration, loadCalibratorPath, suffix, overwrite
+      );
+    }
+  }
+
+  /**
+   * Run a single demand forecast (either regional or zonal)
+   * Internal helper method called by runDemandForecast()
+   */
+  private async runSingleDemandForecast(
+    asOfDate: string,
+    startDate: string,
+    endDate: string,
+    horizon: 'daily' | 'weekly',
+    geography: 'regional' | 'zonal',
+    verbose: boolean,
+    calibration?: CalibrationResult,
+    loadCalibratorPath?: string,
+    suffix?: string,
+    overwrite?: boolean
+  ): Promise<ForecastRun> {
     const startTime = Date.now();
     const runTime = DateTime.now().toISO()!;
 
-    // New folder structure: {outputDir}/{horizon}/Demand/{horizon_prefix}_demand_{dates}.csv
-    const outputDir = join(this.config.outputDir, horizon, 'Demand');
+    // New folder structure: {outputDir}/{horizon}/Demand/{geography}/{horizon_prefix}_demand_{dates}.csv
+    const outputDir = join(this.config.outputDir, horizon, 'Demand', geography);
     if (!existsSync(outputDir)) {
       mkdirSync(outputDir, { recursive: true });
     }
-    // Use consistent naming: da_demand_YYYY-MM-DD.csv or wa_demand_YYYY-MM-DD_YYYY-MM-DD.csv
+    // Use consistent naming with geography: da_demand_regional_YYYY-MM-DD.csv or da_demand_zonal_YYYY-MM-DD.csv
     const horizonPrefix = horizon === 'daily' ? 'da' : 'wa';
     const outputFilename = horizon === 'daily'
-      ? `${horizonPrefix}_demand_${startDate}.csv`
-      : `${horizonPrefix}_demand_${startDate}_${endDate}.csv`;
+      ? `${horizonPrefix}_demand_${geography}_${startDate}.csv`
+      : `${horizonPrefix}_demand_${geography}_${startDate}_${endDate}.csv`;
     const outputFile = join(outputDir, outputFilename);
+
+    if (verbose) {
+      console.log(`   🌐 Geography: ${geography}`);
+    }
 
     const insertRun = this.db.prepare(`
       INSERT INTO forecast_runs (run_date, run_time, forecast_type, horizon, forecast_start, forecast_end, status, output_file)
@@ -1628,7 +1701,7 @@ export class ForecastSchedulerService {
         console.log(`   📊 Off-peak scale: ${scaleOffpeak && scaleOffpeak > 0 ? '+' : ''}${scaleOffpeak || 0}%`);
       }
 
-      await this.generateDemandForecast(startDate, endDate, outputFile, verbose, scalePeak, scaleOffpeak, loadCalibratorPath);
+      await this.generateDemandForecast(startDate, endDate, outputFile, geography, verbose, scalePeak, scaleOffpeak, loadCalibratorPath);
 
       let recordCount = 0;
       if (existsSync(outputFile)) {

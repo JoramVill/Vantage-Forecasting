@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import { DateTime } from 'luxon';
+import * as cliProgress from 'cli-progress';
 import fs, { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join, dirname, basename } from 'path';
 import { parse } from 'csv-parse/sync';
@@ -8434,6 +8435,10 @@ scheduler
   .option('--training-days <days>', 'Number of days for auto-calibration training period', '30')
   .action(async (options) => {
     try {
+      // Load global config for database paths
+      const configService = getConfigService();
+      const globalConfig = configService.get();
+
       const service = new ForecastSchedulerService({
         demandDataPath: options.demandPath,
         cfacDataPath: options.cfacPath,
@@ -8445,6 +8450,8 @@ scheduler
         maxCalibrationIterations: parseInt(options.maxIterations) || 3,
         // Demand options
         demandModel: options.demandModel,
+        regionalDbPath: globalConfig.databases.regionalDemand,
+        zonalDbPath: globalConfig.databases.zonalDemand,
         // CFAC options
         useXgboost: options.useXgboost || false,
         asymmetricLoss: options.asymmetricLoss || false,
@@ -8516,12 +8523,18 @@ scheduler
   // Output options
   .option('-v, --verbose', 'Show detailed progress for each date (default: true)')
   .option('-q, --quiet', 'Minimal output, only show errors and summary')
+  .option('--log-level <level>', 'Filter output by level: error, warn, info, debug', 'info')
+  .option('--summary-only', 'Only show final summary (quietest option)')
   // Enhanced Phase 3A options
   .option('--push-gateway', 'Push forecast to gateway after completion')
   .option('--overwrite', 'Overwrite existing archives')
   .option('--suffix <text>', 'Add suffix to filenames (e.g., "_v2")')
   .action(async (options) => {
     try {
+      // Load global config for database paths
+      const configService = getConfigService();
+      const globalConfig = configService.get();
+
       const service = new ForecastSchedulerService({
         demandDataPath: options.demandPath,
         cfacDataPath: options.cfacPath,
@@ -8531,7 +8544,9 @@ scheduler
         pushToGateway: options.pushGateway || false,
         // Database source options
         useDb: options.useDb || false,
-        dataDbPath: options.dataDb
+        dataDbPath: options.dataDb,
+        regionalDbPath: globalConfig.databases.regionalDemand,
+        zonalDbPath: globalConfig.databases.zonalDemand
       });
 
       let horizon: 'daily' | 'weekly' | 'both' = 'both';
@@ -8547,44 +8562,78 @@ scheduler
       let current = start;
       let runCount = 0;
 
+      // Determine output mode early (needed before first console.log)
+      const summaryOnly = options.summaryOnly || false;
+      const logLevel = options.logLevel?.toLowerCase() || 'info';
+      const validLevels = ['error', 'warn', 'info', 'debug'];
+      if (!validLevels.includes(logLevel)) {
+        console.error(`Invalid log level: ${logLevel}. Use: error, warn, info, debug`);
+        process.exit(1);
+      }
+
       // Determine calibration mode
       const useCalibrationId = options.useCalibration ? parseInt(options.useCalibration) : undefined;
       const useMostRecentCalibration = options.useSavedCalibration || false;
 
-      console.log(`\n🔄 Backfilling calibrated forecasts from ${options.start} to ${options.end}`);
+      if (!summaryOnly) {
+        console.log(`\n🔄 Backfilling calibrated forecasts from ${options.start} to ${options.end}`);
 
-      // Show calibration info
-      if (useCalibrationId) {
-        const cal = service.getCalibrationById(useCalibrationId);
-        if (cal) {
-          console.log(`   📋 Using saved calibration #${useCalibrationId}`);
-          console.log(`      Wind: ${cal.windScale >= 0 ? '+' : ''}${cal.windScale}%, Solar: ${cal.solarScale >= 0 ? '+' : ''}${cal.solarScale}%`);
+        // Show calibration info
+        if (useCalibrationId) {
+          const cal = service.getCalibrationById(useCalibrationId);
+          if (cal) {
+            console.log(`   📋 Using saved calibration #${useCalibrationId}`);
+            console.log(`      Wind: ${cal.windScale >= 0 ? '+' : ''}${cal.windScale}%, Solar: ${cal.solarScale >= 0 ? '+' : ''}${cal.solarScale}%`);
+          }
+        } else if (useMostRecentCalibration) {
+          const recent = service.getMostRecentCalibration();
+          if (recent) {
+            console.log(`   📋 Using most recent calibration #${recent.id}`);
+            console.log(`      Wind: ${recent.calibration.windScale >= 0 ? '+' : ''}${recent.calibration.windScale}%, Solar: ${recent.calibration.solarScale >= 0 ? '+' : ''}${recent.calibration.solarScale}%`);
+          }
+        } else {
+          console.log(`   ⚠️  No saved calibration specified - will recalibrate for EACH date`);
+          console.log(`      TIP: Use --use-saved-calibration for faster backfill`);
         }
-      } else if (useMostRecentCalibration) {
-        const recent = service.getMostRecentCalibration();
-        if (recent) {
-          console.log(`   📋 Using most recent calibration #${recent.id}`);
-          console.log(`      Wind: ${recent.calibration.windScale >= 0 ? '+' : ''}${recent.calibration.windScale}%, Solar: ${recent.calibration.solarScale >= 0 ? '+' : ''}${recent.calibration.solarScale}%`);
+
+        if (options.pushGateway) {
+          console.log(`   📤 Gateway push: ENABLED`);
         }
-      } else {
-        console.log(`   ⚠️  No saved calibration specified - will recalibrate for EACH date`);
-        console.log(`      TIP: Use --use-saved-calibration for faster backfill`);
       }
 
-      if (options.pushGateway) {
-        console.log(`   📤 Gateway push: ENABLED`);
+      // Calculate total dates for progress bar
+      const totalDates = end.diff(start, 'days').days + 1;
+      let processedDates = 0;
+
+      // Create progress bar (only if not in verbose mode and not summary-only)
+      const showProgress = (options.quiet || !options.verbose) && !summaryOnly;
+      const progressBar = showProgress ? new cliProgress.SingleBar({
+        format: 'Progress |{bar}| {percentage}% | {value}/{total} dates | Current: {date} | ETA: {eta}s',
+        barCompleteChar: '\u2588',
+        barIncompleteChar: '\u2591',
+        hideCursor: true
+      }) : null;
+
+      if (progressBar) {
+        progressBar.start(totalDates, 0, { date: start.toISODate() });
       }
+
+      // Track errors for summary
+      const errors: { date: string; message: string }[] = [];
 
       while (current <= end) {
         const dateStr = current.toISODate()!;
-        console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-        console.log(`Processing: ${dateStr}`);
+
+        if (!showProgress && !summaryOnly) {
+          console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+          console.log(`Processing: ${dateStr}`);
+        }
 
         try {
           await service.runCalibratedForecasts(dateStr, {
             horizon,
             forecastType,
-            verbose: !options.quiet,  // Verbose by default, use --quiet to suppress
+            verbose: !options.quiet && !showProgress && !summaryOnly,  // Suppress verbose if using progress bar or summary-only
             trainingDays: parseInt(options.trainingDays) || 30,
             loadCalibratorPath: options.loadCalibrator,
             suffix: options.suffix,
@@ -8593,15 +8642,42 @@ scheduler
             useMostRecentCalibration
           });
           runCount++;
-          console.log(`   ✓ ${dateStr} complete`);
+          if (!showProgress && !summaryOnly && logLevel !== 'error') {
+            console.log(`   ✓ ${dateStr} complete`);
+          }
         } catch (error: any) {
-          console.log(`   ✗ ${dateStr}: ${error.message}`);
+          errors.push({ date: dateStr, message: error.message });
+          if (progressBar) {
+            progressBar.stop();
+          }
+          if (!summaryOnly) {
+            console.log(`   ✗ ${dateStr}: ${error.message}`);
+          }
+          if (progressBar) {
+            progressBar.start(totalDates, processedDates, { date: dateStr });
+          }
+        }
+
+        processedDates++;
+        if (progressBar) {
+          progressBar.update(processedDates, { date: dateStr });
         }
 
         current = current.plus({ days: 1 });
       }
 
+      if (progressBar) {
+        progressBar.stop();
+      }
+
+      // Always show summary
       console.log(`\n✅ Backfill complete: ${runCount} days processed`);
+      if (errors.length > 0) {
+        console.log(`❌ Errors: ${errors.length}`);
+        if (logLevel !== 'error') {
+          errors.forEach(e => console.log(`   • ${e.date}: ${e.message}`));
+        }
+      }
 
       service.close();
     } catch (error: any) {
@@ -8874,6 +8950,10 @@ scheduler
   .option('--bias-correction', 'Enable station-specific bias correction')
   .action(async (options) => {
     try {
+      // Load global config for database paths
+      const configService = getConfigService();
+      const globalConfig = configService.get();
+
       const service = new ForecastSchedulerService({
         demandDataPath: options.demandPath,
         cfacDataPath: options.cfacPath,
@@ -8884,7 +8964,9 @@ scheduler
         calibrationThreshold: parseFloat(options.calibThreshold) || 5,
         maxCalibrationIterations: parseInt(options.maxIterations) || 3,
         useXgboost: options.useXgboost || false,
-        biasCorrection: options.biasCorrection || false
+        biasCorrection: options.biasCorrection || false,
+        regionalDbPath: globalConfig.databases.regionalDemand,
+        zonalDbPath: globalConfig.databases.zonalDemand
       });
 
       // Run as service (blocks indefinitely)
