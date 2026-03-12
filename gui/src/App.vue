@@ -75,16 +75,7 @@ const globalSchedulerOutputDir = ref('./output/forecasts');
 const autoImportBeforeRun = ref(true);
 const autoFetchWeather = ref(true);
 const schedulerDemandModel = ref<'hybrid' | 'regression' | 'xgboost'>('hybrid');
-// CFAC Model Settings - per station type (Wind and Solar have different optimal settings)
-// Wind defaults: OFF (4-Tier Hybrid achieves ~73% MAPE with defaults)
-const windUseXgboost = ref(false);
-const windAsymmetricLoss = ref(false);
-const windBiasCorrection = ref(false);
-// Solar defaults: XGBoost + Asymmetric ON (43% bias reduction, ~16% MAPE)
-const solarUseXgboost = ref(true);
-const solarAsymmetricLoss = ref(true);
-const solarBiasCorrection = ref(false);
-// Note: Model options (useXgboost, asymmetricLoss, biasCorrection) are now read from forecast_config.json
+// Note: CFAC model options (useXgboost, asymmetricLoss, biasCorrection) are now managed in globalConfig (forecast_config.json)
 const schedulerCalibDays = ref(7);
 const schedulerCalibThreshold = ref(5);
 const schedulerMaxIterations = ref(3);
@@ -212,6 +203,7 @@ const schedulerSuffix = ref(''); // Custom suffix for backfill filenames
 const globalConfig = ref<any>(null);
 const configLoading = ref(false);
 const configSaveStatus = ref<'idle' | 'saving' | 'saved' | 'error'>('idle');
+const configDirty = ref(false);
 
 // Saved calibrations (for 'reuse' mode - skip recalibration)
 interface SavedCalibration {
@@ -347,13 +339,6 @@ function saveSettings() {
     autoImportBeforeRun: autoImportBeforeRun.value,
     autoFetchWeather: autoFetchWeather.value,
     schedulerDemandModel: schedulerDemandModel.value,
-    // Per-type CFAC settings (Wind and Solar have different optimal configurations)
-    windUseXgboost: windUseXgboost.value,
-    windAsymmetricLoss: windAsymmetricLoss.value,
-    windBiasCorrection: windBiasCorrection.value,
-    solarUseXgboost: solarUseXgboost.value,
-    solarAsymmetricLoss: solarAsymmetricLoss.value,
-    solarBiasCorrection: solarBiasCorrection.value,
     schedulerCalibDays: schedulerCalibDays.value,
     schedulerCalibThreshold: schedulerCalibThreshold.value,
     schedulerMaxIterations: schedulerMaxIterations.value,
@@ -388,7 +373,7 @@ function saveSettings() {
 }
 
 // Watch for settings changes and persist them
-watch([dataSource, databasePath, demandDataDir, cfacDataDir, weatherDataDir, demandOutputDir, cfacOutputDir, enableDemand, enableCfac, enableZonal, scalingPercent, scalingWind, scalingSolar, usePerTypeScaling, cfacModel, demandModel, pushToGateway, demandGrowthRate, trainingEndDate, calibrationMode, selectedCalibrator, saveCalibrator, demandPrefix, demandZonalPrefix, cfacPrefix, outputSuffix, useCustomName, customDemandName, customCfacName, activeTab, schedulerDailyEnabled, schedulerWeeklyEnabled, schedulerDemandEnabled, schedulerCfacEnabled, schedulerDemandGeography, schedulerOutputDir, schedulerDemandModel, windUseXgboost, windAsymmetricLoss, windBiasCorrection, solarUseXgboost, solarAsymmetricLoss, solarBiasCorrection, schedulerCalibDays, schedulerCalibThreshold, schedulerMaxIterations, schedulerCalibrationMode, schedulerCalibrationPeriod, schedulerRefreshWeather, schedulerOverwrite, schedulerSuffix, globalRegionalDemandDb, globalZonalDemandDb, globalSchedulerDb, globalDemandCsvPath, globalCfacCsvPath, globalWeatherCacheDir, globalSchedulerOutputDir, autoImportBeforeRun, autoFetchWeather], () => {
+watch([dataSource, databasePath, demandDataDir, cfacDataDir, weatherDataDir, demandOutputDir, cfacOutputDir, enableDemand, enableCfac, enableZonal, scalingPercent, scalingWind, scalingSolar, usePerTypeScaling, cfacModel, demandModel, pushToGateway, demandGrowthRate, trainingEndDate, calibrationMode, selectedCalibrator, saveCalibrator, demandPrefix, demandZonalPrefix, cfacPrefix, outputSuffix, useCustomName, customDemandName, customCfacName, activeTab, schedulerDailyEnabled, schedulerWeeklyEnabled, schedulerDemandEnabled, schedulerCfacEnabled, schedulerDemandGeography, schedulerOutputDir, schedulerDemandModel, schedulerCalibDays, schedulerCalibThreshold, schedulerMaxIterations, schedulerCalibrationMode, schedulerCalibrationPeriod, schedulerRefreshWeather, schedulerOverwrite, schedulerSuffix, globalRegionalDemandDb, globalZonalDemandDb, globalSchedulerDb, globalDemandCsvPath, globalCfacCsvPath, globalWeatherCacheDir, globalSchedulerOutputDir, autoImportBeforeRun, autoFetchWeather], () => {
   saveSettings();
 });
 
@@ -474,28 +459,7 @@ onMounted(async () => {
       globalSchedulerDb.value = settings.schedulerDbPath;
     }
     if (settings.schedulerDemandModel) schedulerDemandModel.value = settings.schedulerDemandModel;
-    // Load per-type CFAC settings (Wind and Solar)
-    if (typeof settings.windUseXgboost === 'boolean') windUseXgboost.value = settings.windUseXgboost;
-    if (typeof settings.windAsymmetricLoss === 'boolean') windAsymmetricLoss.value = settings.windAsymmetricLoss;
-    if (typeof settings.windBiasCorrection === 'boolean') windBiasCorrection.value = settings.windBiasCorrection;
-    if (typeof settings.solarUseXgboost === 'boolean') solarUseXgboost.value = settings.solarUseXgboost;
-    if (typeof settings.solarAsymmetricLoss === 'boolean') solarAsymmetricLoss.value = settings.solarAsymmetricLoss;
-    if (typeof settings.solarBiasCorrection === 'boolean') solarBiasCorrection.value = settings.solarBiasCorrection;
-    // Backward compatibility: migrate old global settings to per-type settings
-    // If no per-type settings exist but old global settings do, apply them as defaults
-    if (settings.windUseXgboost === undefined && typeof settings.schedulerUseXgboost === 'boolean') {
-      // Old global settings exist - wind defaults to OFF, solar gets the old setting
-      windUseXgboost.value = false;
-      solarUseXgboost.value = settings.schedulerUseXgboost;
-    }
-    if (settings.windAsymmetricLoss === undefined && typeof settings.schedulerAsymmetricLoss === 'boolean') {
-      windAsymmetricLoss.value = false;
-      solarAsymmetricLoss.value = settings.schedulerAsymmetricLoss;
-    }
-    if (settings.windBiasCorrection === undefined && typeof settings.schedulerBiasCorrection === 'boolean') {
-      windBiasCorrection.value = settings.schedulerBiasCorrection;
-      solarBiasCorrection.value = settings.schedulerBiasCorrection;
-    }
+    // Note: CFAC model options are now managed in globalConfig (forecast_config.json) instead of local settings
     if (typeof settings.schedulerCalibDays === 'number') schedulerCalibDays.value = settings.schedulerCalibDays;
     if (typeof settings.schedulerCalibThreshold === 'number') schedulerCalibThreshold.value = settings.schedulerCalibThreshold;
     if (typeof settings.schedulerMaxIterations === 'number') schedulerMaxIterations.value = settings.schedulerMaxIterations;
@@ -951,6 +915,11 @@ async function loadGlobalConfig() {
   }
 }
 
+// Mark global config as dirty (unsaved changes)
+function markConfigDirty() {
+  configDirty.value = true;
+}
+
 // Save global config to forecast_config.json
 async function saveGlobalConfig() {
   if (!globalConfig.value) return;
@@ -958,6 +927,7 @@ async function saveGlobalConfig() {
   try {
     await window.electronAPI.saveGlobalConfig(globalConfig.value);
     configSaveStatus.value = 'saved';
+    configDirty.value = false;
     addSchedulerStatus('Global config saved successfully', 'success');
     setTimeout(() => configSaveStatus.value = 'idle', 2000);
   } catch (e: any) {
@@ -973,6 +943,7 @@ async function resetGlobalConfig() {
   try {
     globalConfig.value = await window.electronAPI.resetGlobalConfig();
     configSaveStatus.value = 'saved';
+    configDirty.value = false;
     addSchedulerStatus('Global config reset to defaults', 'success');
     setTimeout(() => configSaveStatus.value = 'idle', 2000);
   } catch (e: any) {
@@ -2738,79 +2709,36 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
             </div>
           </section>
 
-          <!-- CFAC Model Options - Wind -->
+          <!-- CFAC Model Options -->
           <section class="card settings-section">
-            <h2>Wind Model Options</h2>
-            <p class="section-description">Optimal: Default settings (4-Tier Hybrid achieves ~73% MAPE)</p>
-            <div class="preset-buttons">
-              <button @click="windUseXgboost = false; windAsymmetricLoss = false; windBiasCorrection = false" class="btn btn-sm btn-outline">
-                Use Recommended
-              </button>
-            </div>
+            <h2>CFAC Model Options</h2>
+            <p class="section-description">Configure capacity factor forecasting models (applies to all station types)</p>
 
-            <div class="toggle-group">
+            <div class="toggle-group" v-if="globalConfig">
               <label class="toggle">
-                <input type="checkbox" v-model="windUseXgboost" />
+                <input type="checkbox" v-model="globalConfig.cfac.useXgboost" @change="markConfigDirty" />
                 <span class="toggle-slider"></span>
                 <span class="toggle-label">Use XGBoost for ML layer</span>
               </label>
-              <p class="field-hint">Not recommended for wind - 4-Tier Hybrid performs better with defaults</p>
+              <p class="field-hint">Better for solar (non-linear patterns), neutral for wind</p>
             </div>
 
-            <div class="toggle-group">
+            <div class="toggle-group" v-if="globalConfig">
               <label class="toggle">
-                <input type="checkbox" v-model="windAsymmetricLoss" />
+                <input type="checkbox" v-model="globalConfig.cfac.asymmetricLoss" @change="markConfigDirty" />
                 <span class="toggle-slider"></span>
-                <span class="toggle-label">Asymmetric loss</span>
+                <span class="toggle-label">Asymmetric loss (penalize under-predictions 2x)</span>
               </label>
-              <p class="field-hint">Not recommended for wind - can cause overcorrection</p>
+              <p class="field-hint">Recommended for solar to reduce under-forecasting bias</p>
             </div>
 
-            <div class="toggle-group">
+            <div class="toggle-group" v-if="globalConfig">
               <label class="toggle">
-                <input type="checkbox" v-model="windBiasCorrection" />
-                <span class="toggle-slider"></span>
-                <span class="toggle-label">Station-specific bias correction</span>
-              </label>
-              <p class="field-hint">Disabled by default - wind patterns too variable between seasons</p>
-            </div>
-          </section>
-
-          <!-- CFAC Model Options - Solar -->
-          <section class="card settings-section">
-            <h2>Solar Model Options</h2>
-            <p class="section-description">Optimal: XGBoost + Asymmetric Loss (~16% MAPE, 43% bias reduction)</p>
-            <div class="preset-buttons">
-              <button @click="solarUseXgboost = true; solarAsymmetricLoss = true; solarBiasCorrection = false" class="btn btn-sm btn-outline">
-                Use Recommended
-              </button>
-            </div>
-
-            <div class="toggle-group">
-              <label class="toggle">
-                <input type="checkbox" v-model="solarUseXgboost" />
-                <span class="toggle-slider"></span>
-                <span class="toggle-label">Use XGBoost for ML layer</span>
-              </label>
-              <p class="field-hint">Recommended for solar - better non-linear learning for irradiance patterns</p>
-            </div>
-
-            <div class="toggle-group">
-              <label class="toggle">
-                <input type="checkbox" v-model="solarAsymmetricLoss" />
-                <span class="toggle-slider"></span>
-                <span class="toggle-label">Asymmetric loss</span>
-              </label>
-              <p class="field-hint">Recommended - penalizes under-predictions 2x (43% bias reduction)</p>
-            </div>
-
-            <div class="toggle-group">
-              <label class="toggle">
-                <input type="checkbox" v-model="solarBiasCorrection" />
+                <input type="checkbox" v-model="globalConfig.cfac.biasCorrection" @change="markConfigDirty" />
                 <span class="toggle-slider"></span>
                 <span class="toggle-label">Station-specific bias correction</span>
               </label>
-              <p class="field-hint">Per-station calibration enabled by default in forecast2 command</p>
+              <p class="field-hint">Learn per-station bias from training data</p>
             </div>
           </section>
 
@@ -2898,51 +2826,141 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
             </div>
           </section>
 
-          <!-- Global Config Section (forecast_config.json) -->
+          <!-- Global Forecast Configuration (forecast_config.json) -->
           <section class="card settings-section full-width">
             <h2>Global Forecast Configuration</h2>
-            <p class="section-description">Edit global config from forecast_config.json</p>
+            <p class="section-description">Settings are saved to forecast_config.json and apply to all forecast operations</p>
 
             <div v-if="configLoading" class="config-loading">
               <span class="spinner"></span>
               Loading configuration...
             </div>
 
-            <div v-else-if="globalConfig" class="config-editor">
-              <!-- Calibration Settings -->
-              <div class="form-group">
-                <label>Calibration Days</label>
-                <p class="field-hint">Number of days used for calibration (default: 14)</p>
-                <input type="number" v-model.number="globalConfig.calibration.days" min="7" max="60" class="path-input" />
+            <div v-else-if="globalConfig" class="config-editor-grid">
+              <!-- Paths Section -->
+              <div class="config-section">
+                <h3>Paths</h3>
+                <div class="form-group">
+                  <label>Demand Training Path</label>
+                  <input type="text" v-model="globalConfig.paths.demandTraining" @input="markConfigDirty" class="path-input" />
+                </div>
+                <div class="form-group">
+                  <label>CFAC Training Path</label>
+                  <input type="text" v-model="globalConfig.paths.cfacTraining" @input="markConfigDirty" class="path-input" />
+                </div>
+                <div class="form-group">
+                  <label>Output Directory</label>
+                  <input type="text" v-model="globalConfig.paths.output" @input="markConfigDirty" class="path-input" />
+                </div>
+                <div class="form-group">
+                  <label>Weather Cache</label>
+                  <input type="text" v-model="globalConfig.paths.weatherCache" @input="markConfigDirty" class="path-input" />
+                </div>
               </div>
 
-              <div class="form-group">
-                <label>Calibration Threshold (%)</label>
-                <p class="field-hint">MAPE threshold for calibration convergence (default: 5%)</p>
-                <input type="number" v-model.number="globalConfig.calibration.threshold" min="1" max="20" step="0.1" class="path-input" />
+              <!-- Calibration Section -->
+              <div class="config-section">
+                <h3>Calibration</h3>
+                <div class="toggle-group">
+                  <label class="toggle">
+                    <input type="checkbox" v-model="globalConfig.calibration.enabled" @change="markConfigDirty" />
+                    <span class="toggle-slider"></span>
+                    <span class="toggle-label">Enable Calibration</span>
+                  </label>
+                </div>
+                <div class="form-group">
+                  <label>Calibration Days</label>
+                  <input type="number" v-model.number="globalConfig.calibration.days" @input="markConfigDirty" min="7" max="60" class="path-input" />
+                </div>
+                <div class="form-group">
+                  <label>Threshold (%)</label>
+                  <input type="number" v-model.number="globalConfig.calibration.threshold" @input="markConfigDirty" min="1" max="20" step="0.5" class="path-input" />
+                </div>
+                <div class="form-group">
+                  <label>Max Iterations</label>
+                  <input type="number" v-model.number="globalConfig.calibration.maxIterations" @input="markConfigDirty" min="1" max="10" class="path-input" />
+                </div>
               </div>
 
-              <div class="form-group">
-                <label>Max Calibration Iterations</label>
-                <p class="field-hint">Maximum iterations for calibration (default: 5)</p>
-                <input type="number" v-model.number="globalConfig.calibration.maxIterations" min="1" max="10" class="path-input" />
+              <!-- Demand Section -->
+              <div class="config-section">
+                <h3>Demand Options</h3>
+                <div class="form-group">
+                  <label>Model</label>
+                  <select v-model="globalConfig.demand.model" @change="markConfigDirty" class="path-input">
+                    <option value="hybrid">Hybrid (Recommended)</option>
+                    <option value="regression">Regression</option>
+                    <option value="xgboost">XGBoost</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>Geography</label>
+                  <select v-model="globalConfig.demand.geography" @change="markConfigDirty" class="path-input">
+                    <option value="regional">Regional (3 regions)</option>
+                    <option value="zonal">Zonal (14 zones)</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>Growth Rate (%)</label>
+                  <input type="number" v-model.number="globalConfig.demand.growthRate" @input="markConfigDirty" min="0" max="5" step="0.1" class="path-input" />
+                </div>
               </div>
 
-              <!-- Save/Reset Buttons -->
-              <div class="config-actions">
-                <button @click="saveGlobalConfig" class="btn btn-primary" :disabled="configSaveStatus === 'saving'">
-                  <span v-if="configSaveStatus === 'saving'" class="btn-content">
-                    <span class="spinner"></span>
-                    Saving...
-                  </span>
-                  <span v-else-if="configSaveStatus === 'saved'">Saved!</span>
-                  <span v-else>Save Config</span>
-                </button>
-                <button @click="resetGlobalConfig" class="btn btn-outline">Reset to Defaults</button>
+              <!-- Output Section -->
+              <div class="config-section">
+                <h3>Output</h3>
+                <div class="toggle-group">
+                  <label class="toggle">
+                    <input type="checkbox" v-model="globalConfig.output.archiveEnabled" @change="markConfigDirty" />
+                    <span class="toggle-slider"></span>
+                    <span class="toggle-label">Archive Forecasts</span>
+                  </label>
+                </div>
+                <div class="form-group">
+                  <label>Retention Days</label>
+                  <input type="number" v-model.number="globalConfig.output.retentionDays" @input="markConfigDirty" min="7" max="365" class="path-input" />
+                </div>
+                <div class="form-group">
+                  <label>Naming Convention</label>
+                  <select v-model="globalConfig.output.naming" @change="markConfigDirty" class="path-input">
+                    <option value="gateway">Gateway Standard</option>
+                    <option value="legacy">Legacy</option>
+                  </select>
+                </div>
+              </div>
+
+              <!-- Gateway Section -->
+              <div class="config-section">
+                <h3>Gateway</h3>
+                <div class="toggle-group">
+                  <label class="toggle">
+                    <input type="checkbox" v-model="globalConfig.gateway.enabled" @change="markConfigDirty" />
+                    <span class="toggle-slider"></span>
+                    <span class="toggle-label">Enable Gateway</span>
+                  </label>
+                </div>
+                <div class="toggle-group">
+                  <label class="toggle">
+                    <input type="checkbox" v-model="globalConfig.gateway.autoPush" @change="markConfigDirty" />
+                    <span class="toggle-slider"></span>
+                    <span class="toggle-label">Auto-push after runs</span>
+                  </label>
+                </div>
               </div>
             </div>
 
-            <div v-else class="config-error">
+            <!-- Save/Reset Buttons -->
+            <div v-if="globalConfig" class="config-actions">
+              <button @click="saveGlobalConfig" class="btn btn-primary" :disabled="configSaveStatus === 'saving'">
+                <span v-if="configSaveStatus === 'saving'">Saving...</span>
+                <span v-else-if="configSaveStatus === 'saved'">Saved!</span>
+                <span v-else>Save Configuration</span>
+              </button>
+              <button @click="resetGlobalConfig" class="btn btn-outline">Reset to Defaults</button>
+              <span v-if="configDirty" class="config-dirty-indicator">Unsaved changes</span>
+            </div>
+
+            <div v-if="!globalConfig && !configLoading" class="config-error">
               Failed to load global config. Check console for errors.
             </div>
           </section>
@@ -5769,10 +5787,39 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
   gap: 20px;
 }
 
+.config-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+.config-section {
+  background: var(--bg-tertiary);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.config-section h3 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 12px 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.config-dirty-indicator {
+  color: var(--warning);
+  font-size: 12px;
+  margin-left: 12px;
+}
+
 .config-actions {
   display: flex;
   gap: 12px;
   margin-top: 12px;
+  align-items: center;
 }
 
 .config-actions .btn {
