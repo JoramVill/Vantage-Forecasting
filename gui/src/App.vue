@@ -85,8 +85,21 @@ const calibrationIterations = ref(3);
 const schedulerDataSource = ref<'database' | 'csv'>('database');
 const schedulerIsRunning = ref(false);
 const schedulerProgress = ref(0);
-const schedulerStatusHistory = ref<Array<{ time: string; message: string; type: 'info' | 'success' | 'error' }>>([]);
+const schedulerStatusHistory = ref<Array<{ time: string; message: string; type: 'info' | 'success' | 'error' | 'warn' | 'debug' }>>([]);
 const schedulerCurrentStatus = ref('');
+
+// Enhanced progress tracking
+const schedulerProgressTotal = ref(0);
+const schedulerProgressCurrent = ref(0);
+const schedulerProgressEta = ref('');
+const schedulerCurrentDate = ref('');
+
+// Terminal filtering
+const terminalFilterError = ref(true);
+const terminalFilterWarn = ref(true);
+const terminalFilterInfo = ref(true);
+const terminalFilterDebug = ref(true);
+const terminalSearchQuery = ref('');
 
 // Scheduler schedule times (for automatic runs)
 const schedulerTimes = ref<string[]>(['06:00']);
@@ -265,6 +278,42 @@ const terminalHeight = ref(300); // Default expanded height in pixels
 const isResizing = ref(false);
 const minTerminalHeight = 100;
 const maxTerminalHeight = 600;
+
+// Computed filtered scheduler history
+const filteredSchedulerHistory = computed(() => {
+  let filtered = schedulerStatusHistory.value;
+
+  // Apply type filters
+  filtered = filtered.filter(item => {
+    if (item.type === 'error') return terminalFilterError.value;
+    if (item.type === 'warn') return terminalFilterWarn.value;
+    if (item.type === 'info' || item.type === 'success') return terminalFilterInfo.value;
+    if (item.type === 'debug') return terminalFilterDebug.value;
+    return true;
+  });
+
+  // Apply search filter
+  if (terminalSearchQuery.value.trim()) {
+    const query = terminalSearchQuery.value.toLowerCase();
+    filtered = filtered.filter(item =>
+      item.message.toLowerCase().includes(query) ||
+      item.time.toLowerCase().includes(query)
+    );
+  }
+
+  return filtered;
+});
+
+// Helper to highlight search matches
+function highlightMatch(text: string): string {
+  if (!terminalSearchQuery.value.trim()) return text;
+
+  const query = terminalSearchQuery.value;
+  // Escape regex special characters
+  const escapedQuery = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const regex = new RegExp(`(${escapedQuery})`, 'gi');
+  return text.replace(regex, '<mark>$1</mark>');
+}
 
 // Terminal resize handlers
 function startTerminalResize(e: MouseEvent) {
@@ -598,6 +647,19 @@ function parseSchedulerOutput(text: string, isError: boolean) {
     // Clean line for display (remove emoji prefixes for cleaner look)
     const cleanLine = line.trim();
 
+    // === PROGRESS TRACKING ===
+    // Parse structured progress data: "[PROGRESS] 5/7 dates | Current: 2026-01-05 | ETA: 2m 15s"
+    const progressMatch = line.match(/\[PROGRESS\]\s+(\d+)\/(\d+)\s+dates\s+\|\s+Current:\s+(\S+)\s+\|\s+ETA:\s+(.+)/);
+    if (progressMatch) {
+      const [, current, total, date, eta] = progressMatch;
+      schedulerProgressCurrent.value = parseInt(current);
+      schedulerProgressTotal.value = parseInt(total);
+      schedulerCurrentDate.value = date;
+      schedulerProgressEta.value = eta;
+      schedulerProgress.value = (parseInt(current) / parseInt(total)) * 100;
+      continue; // Don't add to history
+    }
+
     // === DETAILED CALIBRATION INFO (show these!) ===
     // Calibration iteration progress
     if (line.includes('Iteration') && (line.includes('CFAC') || line.includes('Demand'))) {
@@ -685,7 +747,7 @@ function parseSchedulerOutput(text: string, isError: boolean) {
     }
     // Show warnings
     else if (line.includes('⚠️') || line.includes('warning') || line.includes('Warning')) {
-      addSchedulerStatus(cleanLine, 'error');
+      addSchedulerStatus(cleanLine, 'warn');
     }
   }
 }
@@ -1271,7 +1333,7 @@ function resetProgress() {
 // }
 
 // Add scheduler status message
-function addSchedulerStatus(message: string, type: 'info' | 'success' | 'error' = 'info') {
+function addSchedulerStatus(message: string, type: 'info' | 'success' | 'error' | 'warn' | 'debug' = 'info') {
   schedulerCurrentStatus.value = message;
   schedulerStatusHistory.value.push({
     time: formatTime(new Date()),
@@ -3093,7 +3155,14 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
                 :style="{ width: schedulerProgress + '%' }"
               ></div>
             </div>
-            <div class="progress-text">{{ Math.round(schedulerProgress) }}%</div>
+            <div class="progress-details">
+              <div class="progress-text">{{ Math.round(schedulerProgress) }}%</div>
+              <div class="progress-info" v-if="schedulerProgressTotal > 0">
+                <span class="progress-date" v-if="schedulerCurrentDate">Processing: {{ schedulerCurrentDate }}</span>
+                <span class="progress-count">{{ schedulerProgressCurrent }}/{{ schedulerProgressTotal }} dates</span>
+                <span class="progress-eta" v-if="schedulerProgressEta">ETA: {{ schedulerProgressEta }}</span>
+              </div>
+            </div>
           </div>
 
           <div class="current-status" v-if="schedulerCurrentStatus">
@@ -3101,20 +3170,76 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
             {{ schedulerCurrentStatus }}
           </div>
 
-          <div class="history-list" v-if="schedulerStatusHistory.length > 0">
+          <!-- Terminal Filters and Search -->
+          <div class="terminal-filters">
+            <div class="filter-toggles">
+              <button
+                class="filter-toggle"
+                :class="{ active: terminalFilterError }"
+                @click="terminalFilterError = !terminalFilterError"
+              >
+                <span class="filter-icon error">✕</span> Error
+              </button>
+              <button
+                class="filter-toggle"
+                :class="{ active: terminalFilterWarn }"
+                @click="terminalFilterWarn = !terminalFilterWarn"
+              >
+                <span class="filter-icon warn">⚠</span> Warn
+              </button>
+              <button
+                class="filter-toggle"
+                :class="{ active: terminalFilterInfo }"
+                @click="terminalFilterInfo = !terminalFilterInfo"
+              >
+                <span class="filter-icon info">ℹ</span> Info
+              </button>
+              <button
+                class="filter-toggle"
+                :class="{ active: terminalFilterDebug }"
+                @click="terminalFilterDebug = !terminalFilterDebug"
+              >
+                <span class="filter-icon debug">🔍</span> Debug
+              </button>
+            </div>
+
+            <div class="search-box">
+              <input
+                type="text"
+                v-model="terminalSearchQuery"
+                placeholder="Search messages..."
+                class="search-input"
+              />
+              <button
+                v-if="terminalSearchQuery"
+                @click="terminalSearchQuery = ''"
+                class="search-clear"
+                title="Clear search"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+
+          <div class="history-list" v-if="filteredSchedulerHistory.length > 0">
             <div
-              v-for="(item, i) in schedulerStatusHistory"
+              v-for="(item, i) in filteredSchedulerHistory"
               :key="i"
               class="history-item"
               :class="item.type"
             >
               <span class="history-time">{{ item.time }}</span>
-              <span class="history-message">{{ item.message }}</span>
+              <span class="history-message" v-html="highlightMatch(item.message)"></span>
             </div>
           </div>
 
-          <div v-if="!schedulerIsRunning && schedulerStatusHistory.length === 0" class="terminal-empty">
-            Ready. Configure options above and click Run Now to begin.
+          <div v-if="!schedulerIsRunning && filteredSchedulerHistory.length === 0" class="terminal-empty">
+            <template v-if="schedulerStatusHistory.length > 0">
+              No messages match the current filters or search.
+            </template>
+            <template v-else>
+              Ready. Configure options above and click Run Now to begin.
+            </template>
           </div>
         </template>
 
@@ -4323,33 +4448,71 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
   margin-bottom: 6px;
 }
 
+/* Enhanced Progress Section */
+.progress-section {
+  margin-bottom: 16px;
+  padding: 12px;
+  background: var(--bg-card);
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+}
+
 .progress-bar-container {
-  height: 6px;
-  background: var(--bg-primary);
-  border-radius: 3px;
+  height: 8px;
+  background: #0f172a;
+  border-radius: 4px;
   overflow: hidden;
+  margin-bottom: 8px;
 }
 
 .progress-bar {
   height: 100%;
-  background: var(--accent-primary);
-  border-radius: 3px;
+  background: linear-gradient(90deg, #3b82f6 0%, #2563eb 100%);
+  border-radius: 4px;
   transition: width 0.3s ease;
 }
 
 .progress-bar.complete {
-  background: var(--accent-success);
+  background: linear-gradient(90deg, #10b981 0%, #059669 100%);
 }
 
 .progress-bar.error {
   background: var(--accent-danger);
 }
 
+.progress-details {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+}
+
 .progress-text {
-  text-align: right;
-  font-size: 0.65rem;
-  color: var(--text-muted);
-  margin-top: 4px;
+  font-weight: 600;
+  color: var(--accent-primary);
+  min-width: 40px;
+}
+
+.progress-info {
+  display: flex;
+  gap: 16px;
+  color: var(--text-secondary);
+  flex: 1;
+}
+
+.progress-date {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.progress-count {
+  color: var(--text-secondary);
+}
+
+.progress-eta {
+  color: var(--accent-warning);
+  margin-left: auto;
 }
 
 .terminal-history {
@@ -4387,6 +4550,112 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 
 .history-item.error .history-message {
   color: var(--accent-danger);
+}
+
+.history-item.warn .history-message {
+  color: var(--accent-warning);
+}
+
+.history-item.debug .history-message {
+  color: var(--text-muted);
+}
+
+/* Highlight search matches */
+.history-message mark {
+  background: #fbbf24;
+  color: #000;
+  padding: 1px 2px;
+  border-radius: 2px;
+}
+
+/* Terminal Filters and Search */
+.terminal-filters {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  background: var(--bg-card);
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+}
+
+.filter-toggles {
+  display: flex;
+  gap: 8px;
+}
+
+.filter-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.filter-toggle:hover {
+  background: var(--bg-secondary);
+}
+
+.filter-toggle.active {
+  background: var(--bg-secondary);
+  border-color: var(--accent-primary);
+  color: var(--text-primary);
+}
+
+.filter-icon {
+  font-size: 14px;
+}
+
+.filter-icon.error { color: var(--accent-danger); }
+.filter-icon.warn { color: var(--accent-warning); }
+.filter-icon.info { color: var(--accent-primary); }
+.filter-icon.debug { color: var(--text-muted); }
+
+.search-box {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  position: relative;
+  flex: 0 0 250px;
+}
+
+.search-input {
+  flex: 1;
+  padding: 6px 32px 6px 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.search-input:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+}
+
+.search-clear {
+  position: absolute;
+  right: 8px;
+  padding: 4px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.search-clear:hover {
+  color: var(--text-primary);
 }
 
 .terminal-empty {
