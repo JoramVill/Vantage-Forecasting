@@ -644,6 +644,7 @@ program
   .option('--save-calibrator <path>', 'Save trained calibrator model to file')
   .option('--load-calibrator <path>', 'Load calibrator model from file (skips training)')
   .option('--push', 'Push generated forecast to Vantage-Gateway server')
+  .option('--horizons <type>', 'Forecast horizons: daily, weekly, or both (generates multiple outputs from single training)', 'daily')
   .action(async (options) => {
     try {
       // Check for zonal mode
@@ -1828,6 +1829,7 @@ cfacCommand
   .option('--db <path>', 'Database path when using --use-db (default: ./forecast.db)')
   .option('--push', 'Push generated forecast to Vantage-Gateway server')
   .option('--weather-refresh-mode <mode>', 'Weather refresh mode: cache (no downloads), refresh (smart), force-refresh (always download)', 'refresh')
+  .option('--horizons <type>', 'Forecast horizons: daily, weekly, or both (generates multiple outputs from single training)', 'daily')
   // NOTE: LSTM model option removed from production - experimental only via direct code modification
   .action(async (options) => {
     try {

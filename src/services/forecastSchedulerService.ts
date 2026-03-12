@@ -471,72 +471,62 @@ export class ForecastSchedulerService {
       console.log('───────────────────────────────────────────────────────────────────────────────');
     }
 
-    // Daily forecasts
-    if (horizon === 'daily' || horizon === 'both') {
-      const targetDate = asOf.plus({ days: 1 }).toISODate()!;
+    // PHASE 1 OPTIMIZATION: When running both horizons, daily runs first to populate weather cache,
+    // then weekly reuses the cached data. This reduces API calls and speeds up the second forecast.
 
-      if (verbose) {
-        console.log(`\n📅 Daily forecast: ${targetDate}`);
-      }
+    // Determine horizons to generate
+    const horizonsToRun = horizon === 'both' ? ['daily', 'weekly'] as const : [horizon] as const;
 
-      if (forecastType === 'demand' || forecastType === 'both') {
-        try {
-          const run = await this.runDemandForecast(asOfDate, targetDate, targetDate, 'daily', verbose, calibration, options?.loadCalibratorPath, options?.suffix, options?.overwrite);
-          forecasts.demand!.push(run);
-        } catch (error: any) {
-          errors.push(`Daily demand: ${error.message}`);
-          if (verbose) {
-            console.log(`   ⚠️  Daily demand forecast failed: ${error.message}`);
-          }
-        }
-      }
+    // Track if we've already fetched weather for this date (for cache reuse optimization)
+    let demandWeatherFetched = false;
+    let cfacWeatherFetched = false;
 
-      if (forecastType === 'cfac' || forecastType === 'both') {
-        try {
-          const run = await this.runCfacForecastWithCalibration(
-            asOfDate, targetDate, targetDate, 'daily', calibration, verbose, options?.suffix, options?.overwrite
-          );
-          forecasts.cfac!.push(run);
-        } catch (error: any) {
-          errors.push(`Daily CFAC: ${error.message}`);
-          if (verbose) {
-            console.log(`   ⚠️  Daily CFAC forecast failed: ${error.message}`);
-          }
-        }
-      }
-    }
-
-    // Weekly forecasts
-    if (horizon === 'weekly' || horizon === 'both') {
+    for (const currentHorizon of horizonsToRun) {
       const startDate = asOf.plus({ days: 1 }).toISODate()!;
-      const endDate = asOf.plus({ days: 7 }).toISODate()!;
+      const endDate = currentHorizon === 'daily'
+        ? startDate
+        : asOf.plus({ days: 7 }).toISODate()!;
 
       if (verbose) {
-        console.log(`\n📅 Weekly forecast: ${startDate} to ${endDate}`);
+        if (currentHorizon === 'daily') {
+          console.log(`\n📅 Daily forecast: ${startDate}`);
+        } else {
+          console.log(`\n📅 Weekly forecast: ${startDate} to ${endDate}`);
+        }
       }
 
+      // Generate demand forecast
       if (forecastType === 'demand' || forecastType === 'both') {
         try {
-          const run = await this.runDemandForecast(asOfDate, startDate, endDate, 'weekly', verbose, calibration, options?.loadCalibratorPath, options?.suffix, options?.overwrite);
+          const run = await this.runDemandForecast(
+            asOfDate, startDate, endDate, currentHorizon, verbose, calibration,
+            options?.loadCalibratorPath, options?.suffix, options?.overwrite,
+            demandWeatherFetched // Pass flag to indicate if weather cache can be reused
+          );
           forecasts.demand!.push(run);
+          demandWeatherFetched = true; // Mark weather as fetched for next horizon
         } catch (error: any) {
-          errors.push(`Weekly demand: ${error.message}`);
+          errors.push(`${currentHorizon === 'daily' ? 'Daily' : 'Weekly'} demand: ${error.message}`);
           if (verbose) {
-            console.log(`   ⚠️  Weekly demand forecast failed: ${error.message}`);
+            console.log(`   ⚠️  ${currentHorizon === 'daily' ? 'Daily' : 'Weekly'} demand forecast failed: ${error.message}`);
           }
         }
       }
 
+      // Generate CFAC forecast
       if (forecastType === 'cfac' || forecastType === 'both') {
         try {
           const run = await this.runCfacForecastWithCalibration(
-            asOfDate, startDate, endDate, 'weekly', calibration, verbose, options?.suffix, options?.overwrite
+            asOfDate, startDate, endDate, currentHorizon, calibration, verbose,
+            options?.suffix, options?.overwrite,
+            cfacWeatherFetched // Pass flag to indicate if weather cache can be reused
           );
           forecasts.cfac!.push(run);
+          cfacWeatherFetched = true; // Mark weather as fetched for next horizon
         } catch (error: any) {
-          errors.push(`Weekly CFAC: ${error.message}`);
+          errors.push(`${currentHorizon === 'daily' ? 'Daily' : 'Weekly'} CFAC: ${error.message}`);
           if (verbose) {
-            console.log(`   ⚠️  Weekly CFAC forecast failed: ${error.message}`);
+            console.log(`   ⚠️  ${currentHorizon === 'daily' ? 'Daily' : 'Weekly'} CFAC forecast failed: ${error.message}`);
           }
         }
       }
@@ -1314,7 +1304,8 @@ export class ForecastSchedulerService {
     verbose: boolean,
     scalePeak?: number,
     scaleOffpeak?: number,
-    loadCalibratorPath?: string
+    loadCalibratorPath?: string,
+    weatherCacheAvailable?: boolean  // PHASE 1: Skip weather fetch if cache available
   ): Promise<void> {
     // Determine data source path based on geography and database configuration
     let dataSourcePath: string;
@@ -1373,6 +1364,14 @@ export class ForecastSchedulerService {
       args.push('--load-calibrator', loadCalibratorPath);
     }
 
+    // PHASE 1 OPTIMIZATION: Use cache mode if weather already fetched (e.g., by daily forecast)
+    if (weatherCacheAvailable) {
+      args.push('--weather-refresh-mode', 'cache');
+      if (verbose) {
+        console.log('   ♻️  Reusing weather cache from previous forecast');
+      }
+    }
+
     execSync(`"${this.nodeCmd}" ${args.map(a => `"${a}"`).join(' ')}`, {
       cwd: this.projectRoot,
       encoding: 'utf-8',
@@ -1392,7 +1391,8 @@ export class ForecastSchedulerService {
     calibration: CalibrationResult,
     verbose: boolean,
     suffix?: string,
-    overwrite?: boolean
+    overwrite?: boolean,
+    weatherCacheAvailable?: boolean  // PHASE 1: Indicates weather already fetched by previous horizon
   ): Promise<ForecastRun> {
     const startTime = Date.now();
     const runTime = DateTime.now().toISO()!;
@@ -1426,11 +1426,21 @@ export class ForecastSchedulerService {
         console.log(`   ☀️  Solar scale: ${calibration.solarScale > 0 ? '+' : ''}${calibration.solarScale}%`);
       }
 
-      // Use 'cache' mode for historical dates (backfill) to avoid unnecessary API calls
+      // PHASE 1 OPTIMIZATION: Determine weather refresh mode
+      // Priority: 1) Cache available from previous horizon, 2) Historical forecast, 3) Normal refresh
       const forecastEnd = DateTime.fromISO(endDate);
       const today = DateTime.now().startOf('day');
       const isHistoricalForecast = forecastEnd < today;
-      const weatherMode = isHistoricalForecast ? 'cache' : undefined;
+
+      let weatherMode: 'cache' | 'refresh' | 'force-refresh' | undefined;
+      if (weatherCacheAvailable) {
+        weatherMode = 'cache'; // Reuse weather from previous horizon (daily->weekly optimization)
+        if (verbose) {
+          console.log('   ♻️  Reusing weather cache from previous forecast');
+        }
+      } else if (isHistoricalForecast) {
+        weatherMode = 'cache'; // Historical dates should use cached data
+      }
 
       await this.generateCfacForecast(
         startDate, endDate, outputFile,
@@ -1616,7 +1626,8 @@ export class ForecastSchedulerService {
     calibration?: CalibrationResult,
     loadCalibratorPath?: string,
     suffix?: string,
-    overwrite?: boolean
+    overwrite?: boolean,
+    weatherCacheAvailable?: boolean  // PHASE 1: Indicates weather already fetched by previous horizon
   ): Promise<ForecastRun> {
     const geography = this.config.demandGeography || 'regional';
 
@@ -1626,16 +1637,16 @@ export class ForecastSchedulerService {
         console.log(`   🌍 Generating both regional and zonal forecasts`);
       }
 
-      // Generate regional forecast
+      // Generate regional forecast (fetches weather)
       const regionalRun = await this.runSingleDemandForecast(
         asOfDate, startDate, endDate, horizon, 'regional',
-        verbose, calibration, loadCalibratorPath, suffix, overwrite
+        verbose, calibration, loadCalibratorPath, suffix, overwrite, weatherCacheAvailable
       );
 
-      // Generate zonal forecast
+      // Generate zonal forecast (reuses weather cache from regional)
       await this.runSingleDemandForecast(
         asOfDate, startDate, endDate, horizon, 'zonal',
-        verbose, calibration, loadCalibratorPath, suffix, overwrite
+        verbose, calibration, loadCalibratorPath, suffix, overwrite, true // Weather already fetched
       );
 
       // Return the regional run as the primary result (for backward compatibility)
@@ -1644,7 +1655,7 @@ export class ForecastSchedulerService {
       // Generate single forecast (regional or zonal)
       return await this.runSingleDemandForecast(
         asOfDate, startDate, endDate, horizon, geography,
-        verbose, calibration, loadCalibratorPath, suffix, overwrite
+        verbose, calibration, loadCalibratorPath, suffix, overwrite, weatherCacheAvailable
       );
     }
   }
@@ -1663,7 +1674,8 @@ export class ForecastSchedulerService {
     calibration?: CalibrationResult,
     loadCalibratorPath?: string,
     suffix?: string,
-    overwrite?: boolean
+    overwrite?: boolean,
+    weatherCacheAvailable?: boolean  // PHASE 1: Indicates weather already fetched
   ): Promise<ForecastRun> {
     const startTime = Date.now();
     const runTime = DateTime.now().toISO()!;
@@ -1701,7 +1713,7 @@ export class ForecastSchedulerService {
         console.log(`   📊 Off-peak scale: ${scaleOffpeak && scaleOffpeak > 0 ? '+' : ''}${scaleOffpeak || 0}%`);
       }
 
-      await this.generateDemandForecast(startDate, endDate, outputFile, geography, verbose, scalePeak, scaleOffpeak, loadCalibratorPath);
+      await this.generateDemandForecast(startDate, endDate, outputFile, geography, verbose, scalePeak, scaleOffpeak, loadCalibratorPath, weatherCacheAvailable);
 
       let recordCount = 0;
       if (existsSync(outputFile)) {
