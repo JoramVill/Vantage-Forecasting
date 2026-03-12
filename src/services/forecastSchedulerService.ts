@@ -18,7 +18,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync, statSync } from 'fs';
 import { parse } from 'csv-parse/sync';
-import { pushFileToGateway, isGatewayEnabled, type ForecastCategory, type PushResult } from './sftpPushService.js';
+import { pushFileToGateway, isGatewayEnabled, type ForecastCategory, type PushResult, type Geography } from './sftpPushService.js';
 import { createHash } from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1487,6 +1487,7 @@ export class ForecastSchedulerService {
       }
 
       // Push to gateway if enabled (respects global VANTAGE_GATEWAY_ENABLED and config.pushToGateway)
+      // CFAC forecasts don't use geography parameter (only demand files do)
       let gatewayPath: string | null = null;
       let gatewayCategory: ForecastCategory | null = null;
       if (this.config.pushToGateway || isGatewayEnabled()) {
@@ -1495,11 +1496,13 @@ export class ForecastSchedulerService {
         }
         try {
           gatewayCategory = this.getForecastCategory(horizon, 'cfac');
-          const pushResult: PushResult = await pushFileToGateway(outputFile, gatewayCategory);
+          // CFAC files don't use geography - pass undefined
+          const pushResult: PushResult = await pushFileToGateway(outputFile, gatewayCategory, undefined);
           if (pushResult.success) {
             gatewayPath = pushResult.remotePath;
             if (verbose) {
-              console.log(`   ✅ Pushed to gateway: ${gatewayPath}`);
+              const method = pushResult.httpUpload ? 'HTTP' : 'SFTP';
+              console.log(`   ✅ Pushed to gateway (${method}): ${gatewayPath}`);
             }
           } else if (verbose) {
             console.log(`   ⚠️  Gateway push failed: ${pushResult.error}`);
@@ -1756,19 +1759,22 @@ export class ForecastSchedulerService {
       }
 
       // Push to gateway if enabled (respects global VANTAGE_GATEWAY_ENABLED and config.pushToGateway)
+      // PHASE 2: Pass explicit geography from forecast context to gateway
       let gatewayPath: string | null = null;
       let gatewayCategory: ForecastCategory | null = null;
       if (this.config.pushToGateway || isGatewayEnabled()) {
         if (verbose) {
-          console.log(`   📤 Pushing to gateway...`);
+          console.log(`   📤 Pushing to gateway (${geography})...`);
         }
         try {
           gatewayCategory = this.getForecastCategory(horizon, 'demand');
-          const pushResult: PushResult = await pushFileToGateway(outputFile, gatewayCategory);
+          // Pass explicit geography from forecast context - no filename parsing needed!
+          const pushResult: PushResult = await pushFileToGateway(outputFile, gatewayCategory, geography as Geography);
           if (pushResult.success) {
             gatewayPath = pushResult.remotePath;
             if (verbose) {
-              console.log(`   ✅ Pushed to gateway: ${gatewayPath}`);
+              const method = pushResult.httpUpload ? 'HTTP' : 'SFTP';
+              console.log(`   ✅ Pushed to gateway (${method}): ${gatewayPath}`);
             }
           } else if (verbose) {
             console.log(`   ⚠️  Gateway push failed: ${pushResult.error}`);

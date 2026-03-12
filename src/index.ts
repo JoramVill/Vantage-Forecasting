@@ -8532,11 +8532,15 @@ scheduler
   .option('--push-gateway', 'Push forecast to gateway after completion')
   .option('--overwrite', 'Overwrite existing archives')
   .option('--suffix <text>', 'Add suffix to filenames (e.g., "_v2")')
+  .option('--geography <type>', 'Geography mode for demand: regional, zonal, or both', 'both')
   .action(async (options) => {
     try {
       // Load global config for database paths
       const configService = getConfigService();
       const globalConfig = configService.get();
+
+      // Determine geography mode: CLI option > config file > default 'both'
+      const geographyOption = options.geography || globalConfig.demand?.geography || 'both';
 
       const service = new ForecastSchedulerService({
         demandDataPath: options.demandPath,
@@ -8545,6 +8549,7 @@ scheduler
         dbPath: options.db,
         calibrationDays: parseInt(options.calibDays) || 7,
         pushToGateway: options.pushGateway || false,
+        demandGeography: geographyOption as 'regional' | 'zonal' | 'both',
         // Database source options
         useDb: options.useDb || false,
         dataDbPath: options.dataDb,

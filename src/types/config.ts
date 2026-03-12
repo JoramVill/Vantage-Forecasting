@@ -97,12 +97,35 @@ export interface OutputConfig {
 
 /**
  * Gateway integration configuration
+ *
+ * PHASE 2 UPDATE (Gateway v2.5.0):
+ * - NEW: HTTP-based uploads with explicit geography parameter
+ * - NEW: License-based JWT authentication
+ * - DEPRECATED: SFTP uploads (still available as fallback)
  */
 export interface GatewayConfig {
   /** Enable gateway integration */
   enabled: boolean;
   /** Automatically push forecasts after generation */
   autoPush: boolean;
+
+  // HTTP Gateway settings (v2.5.0+)
+  /** Gateway HTTP URL (e.g., https://vantage-gateway.taile437a5.ts.net) */
+  httpUrl?: string;
+  /** License ID for JWT authentication */
+  licenseId?: string;
+  /** Prefer HTTP upload over SFTP when both are available (default: true) */
+  preferHttp?: boolean;
+
+  // SFTP Gateway settings (legacy, used as fallback)
+  /** SFTP host address */
+  sftpHost?: string;
+  /** SFTP port (default: 22) */
+  sftpPort?: number;
+  /** SFTP username */
+  sftpUser?: string;
+  /** SFTP password */
+  sftpPassword?: string;
 }
 
 /**

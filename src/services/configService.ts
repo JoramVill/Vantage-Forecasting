@@ -77,7 +77,16 @@ export class ConfigService {
 
       gateway: {
         enabled: false,
-        autoPush: false
+        autoPush: false,
+        // HTTP Gateway (v2.5.0+) - preferred method
+        httpUrl: 'https://vantage-gateway.taile437a5.ts.net',
+        licenseId: '',  // Set via VANTAGE_LICENSE_ID env var
+        preferHttp: true,
+        // SFTP Gateway (legacy fallback)
+        sftpHost: '100.115.9.94',
+        sftpPort: 22,
+        sftpUser: 'vantage-upload',
+        sftpPassword: ''  // Set via VANTAGE_GATEWAY_PASSWORD env var
       },
 
       scheduler: {

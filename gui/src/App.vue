@@ -2960,6 +2960,7 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
                   <select v-model="globalConfig.demand.geography" @change="markConfigDirty" class="path-input">
                     <option value="regional">Regional (3 regions)</option>
                     <option value="zonal">Zonal (14 zones)</option>
+                    <option value="both">Both (Regional + Zonal)</option>
                   </select>
                 </div>
                 <div class="form-group">

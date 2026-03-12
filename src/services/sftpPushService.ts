@@ -1,22 +1,39 @@
 /**
- * SFTP Push Service for Vantage-Gateway
+ * Gateway Push Service for Vantage-Gateway
  *
- * Uploads forecast CSV files to the central gateway server via SFTP.
- * Files are automatically routed to the correct directory based on filename patterns.
+ * Uploads forecast CSV files to the central gateway server.
+ *
+ * PHASE 2 UPDATE (Gateway v2.5.0):
+ * - NEW: HTTP-based uploads with explicit geography parameter
+ * - NEW: License-based JWT authentication
+ * - DEPRECATED: SFTP uploads (still available as fallback)
+ * - DEPRECATED: Filename-based geography detection
  *
  * Configuration (in priority order):
- * 1. Environment variables: VANTAGE_GATEWAY_HOST, VANTAGE_GATEWAY_PASSWORD, etc.
+ * 1. Environment variables:
+ *    - HTTP mode: VANTAGE_GATEWAY_URL, VANTAGE_LICENSE_ID
+ *    - SFTP mode: VANTAGE_GATEWAY_HOST, VANTAGE_GATEWAY_PASSWORD, etc.
  * 2. Config file: config.json in project root
  * 3. Built-in defaults
  *
  * Enable auto-push globally via:
  * - Environment: VANTAGE_GATEWAY_ENABLED=true
  * - Config file: { "gateway": { "enabled": true } }
+ *
+ * @see VANTAGE_INTEGRATION_SPEC.md for HTTP upload API specification
  */
 
 import SftpClient from 'ssh2-sftp-client';
 import * as fs from 'fs';
 import * as path from 'path';
+import {
+  GatewayHttpService,
+  getGatewayHttpService,
+  isHttpGatewayConfigured as checkHttpGatewayConfigured,
+  type Geography,
+  type HttpPushResult,
+  type UploadConfig
+} from './gatewayHttpService.js';
 
 export interface PushResult {
   success: boolean;
@@ -24,7 +41,16 @@ export interface PushResult {
   remotePath: string;
   error?: string;
   bytesTransferred?: number;
+  /** Indicates if HTTP upload was used (vs SFTP fallback) */
+  httpUpload?: boolean;
 }
+
+/**
+ * Geography type for demand forecasts
+ * - 'regional': 3-region format (CLUZ, CVIS, CMIN)
+ * - 'zonal': 14-zone format (01NLUZ, 02METRO, etc.)
+ */
+export type { Geography } from './gatewayHttpService.js';
 
 export interface GatewayTestResult {
   connected: boolean;
@@ -42,6 +68,12 @@ export interface GatewayConfig {
   username: string;
   password: string;
   enabled: boolean;
+  /** HTTP gateway URL (for v2.5.0+ HTTP uploads) */
+  httpUrl?: string;
+  /** License ID for HTTP authentication */
+  licenseId?: string;
+  /** Prefer HTTP upload over SFTP when available */
+  preferHttp?: boolean;
 }
 
 export type ForecastCategory =
@@ -55,11 +87,16 @@ export type ForecastCategory =
 
 interface ConfigFile {
   gateway?: {
+    // SFTP settings (legacy)
     host?: string;
     port?: number;
     username?: string;
     password?: string;
     enabled?: boolean;
+    // HTTP settings (Gateway v2.5.0+)
+    httpUrl?: string;
+    licenseId?: string;
+    preferHttp?: boolean;
   };
 }
 
@@ -79,18 +116,23 @@ function loadConfigFile(): ConfigFile | null {
 }
 
 /**
- * Get SFTP configuration from environment variables or config file
+ * Get gateway configuration from environment variables or config file
  */
 export function getConfig(): GatewayConfig {
   const configFile = loadConfigFile();
   const gw = configFile?.gateway || {};
 
   return {
+    // SFTP settings
     host: process.env.VANTAGE_GATEWAY_HOST || gw.host || '100.115.9.94',
     port: parseInt(process.env.VANTAGE_GATEWAY_PORT || String(gw.port || 22)),
     username: process.env.VANTAGE_GATEWAY_USER || gw.username || 'vantage-upload',
     password: process.env.VANTAGE_GATEWAY_PASSWORD || gw.password || '',
-    enabled: process.env.VANTAGE_GATEWAY_ENABLED === 'true' || gw.enabled === true
+    enabled: process.env.VANTAGE_GATEWAY_ENABLED === 'true' || gw.enabled === true,
+    // HTTP settings (Gateway v2.5.0+)
+    httpUrl: process.env.VANTAGE_GATEWAY_URL || gw.httpUrl || 'https://vantage-gateway.taile437a5.ts.net',
+    licenseId: process.env.VANTAGE_LICENSE_ID || gw.licenseId || '',
+    preferHttp: process.env.VANTAGE_GATEWAY_PREFER_HTTP === 'true' || gw.preferHttp !== false
   };
 }
 
@@ -210,10 +252,24 @@ export function isGatewayEnabled(): boolean {
 }
 
 /**
- * Check if the gateway has been configured (password set)
+ * Check if the gateway has been configured for HTTP uploads (license ID set)
+ */
+export function isHttpGatewayConfigured(): boolean {
+  const config = getConfig();
+  return !!(config.licenseId && config.httpUrl);
+}
+
+/**
+ * Check if the gateway has been configured (password set for SFTP, or license for HTTP)
  */
 export function isGatewayConfigured(): boolean {
-  return getConfig().password !== '';
+  const config = getConfig();
+  // HTTP gateway takes precedence if license is configured
+  if (config.licenseId && config.preferHttp !== false) {
+    return true;
+  }
+  // Fall back to SFTP check
+  return config.password !== '';
 }
 
 /**
@@ -229,29 +285,223 @@ export function shouldPushToGateway(explicitPush?: boolean): boolean {
 /**
  * Auto-push a file if gateway is enabled. Non-blocking - logs errors but doesn't throw.
  * Use this after writing forecast files to automatically push when enabled.
+ *
+ * @param localPath - Path to the local file to push
+ * @param explicitPush - If true, force push even if not globally enabled
+ * @param geography - Optional explicit geography for demand files ('regional' or 'zonal')
  */
-export async function autoPushIfEnabled(localPath: string, explicitPush?: boolean): Promise<void> {
+export async function autoPushIfEnabled(
+  localPath: string,
+  explicitPush?: boolean,
+  geography?: Geography
+): Promise<void> {
   if (!shouldPushToGateway(explicitPush)) {
     return;
   }
 
   if (!isGatewayConfigured()) {
     if (explicitPush) {
-      console.warn('[SFTP] Gateway push requested but password not configured');
+      console.warn('[Gateway] Push requested but gateway not configured');
     }
     return;
   }
 
-  const result = await pushFileToGateway(localPath);
+  const result = await pushFileToGateway(localPath, undefined, geography);
   if (!result.success) {
-    console.warn(`[SFTP] Auto-push failed: ${result.error}`);
+    console.warn(`[Gateway] Auto-push failed: ${result.error}`);
   }
 }
 
 /**
- * Push a single file to the gateway server
+ * Push a single file to the gateway server using HTTP (preferred) or SFTP (fallback)
+ *
+ * PHASE 2 UPDATE: This function now supports explicit geography parameter for
+ * the HTTP upload endpoint (Gateway v2.5.0+). Geography is no longer inferred
+ * from filename patterns when using HTTP upload.
+ *
+ * @param localPath - Path to the local file to push
+ * @param category - Optional forecast category (used for SFTP fallback routing)
+ * @param geography - Optional explicit geography for demand files ('regional' or 'zonal')
  */
-export async function pushFileToGateway(localPath: string, category?: ForecastCategory): Promise<PushResult> {
+export async function pushFileToGateway(
+  localPath: string,
+  category?: ForecastCategory,
+  geography?: Geography
+): Promise<PushResult> {
+  const config = getConfig();
+  const filename = path.basename(localPath);
+
+  // Check if local file exists
+  if (!fs.existsSync(localPath)) {
+    return {
+      success: false,
+      localPath,
+      remotePath: '',
+      error: `Local file not found: ${localPath}`
+    };
+  }
+
+  // Try HTTP upload first if configured and preferred
+  if (config.licenseId && config.preferHttp !== false) {
+    const httpResult = await pushFileViaHttp(localPath, category, geography);
+    if (httpResult.success) {
+      return httpResult;
+    }
+    // Log HTTP failure and fall through to SFTP if available
+    console.warn(`[Gateway] HTTP upload failed: ${httpResult.error}`);
+    if (config.password) {
+      console.log('[Gateway] Falling back to SFTP upload...');
+    } else {
+      // No SFTP fallback available
+      return httpResult;
+    }
+  }
+
+  // SFTP fallback (or primary if HTTP not configured)
+  return pushFileViaSftp(localPath, category);
+}
+
+/**
+ * Push a file via HTTP upload (Gateway v2.5.0+ API)
+ *
+ * Uses the new explicit geography parameter, eliminating filename-based routing.
+ *
+ * @param localPath - Path to the local file
+ * @param category - Forecast category (for API endpoint routing)
+ * @param geography - Explicit geography for demand files
+ */
+async function pushFileViaHttp(
+  localPath: string,
+  category?: ForecastCategory,
+  geography?: Geography
+): Promise<PushResult> {
+  const config = getConfig();
+  const filename = path.basename(localPath);
+
+  try {
+    const gateway = new GatewayHttpService({
+      baseUrl: config.httpUrl || 'https://vantage-gateway.taile437a5.ts.net',
+      licenseId: config.licenseId || ''
+    });
+
+    // Determine upload config from category or filename
+    const uploadConfig = resolveUploadConfig(filename, category, geography);
+
+    console.log(`[Gateway/HTTP] Uploading ${filename} to ${uploadConfig.type}/${uploadConfig.category}` +
+      (uploadConfig.geography ? `?geography=${uploadConfig.geography}` : '') + '...');
+
+    const result = await gateway.pushForecast(localPath, uploadConfig);
+
+    if (result.success) {
+      console.log(`[Gateway/HTTP] Upload complete: ${result.remotePath}`);
+      return {
+        success: true,
+        localPath,
+        remotePath: result.remotePath || '',
+        bytesTransferred: result.size,
+        httpUpload: true
+      };
+    }
+
+    return {
+      success: false,
+      localPath,
+      remotePath: '',
+      error: result.error,
+      httpUpload: true
+    };
+  } catch (error: any) {
+    return {
+      success: false,
+      localPath,
+      remotePath: '',
+      error: error.message,
+      httpUpload: true
+    };
+  }
+}
+
+/**
+ * Resolve upload configuration from category/filename
+ * Maps ForecastCategory to HTTP API parameters
+ */
+function resolveUploadConfig(
+  filename: string,
+  category?: ForecastCategory,
+  geography?: Geography
+): UploadConfig {
+  const fn = filename.toUpperCase();
+
+  // If explicit category provided, use it
+  if (category) {
+    const typeMap: Record<string, 'day-ahead' | 'week-ahead'> = {
+      'day-ahead-demand': 'day-ahead',
+      'day-ahead-mhcf': 'day-ahead',
+      'week-ahead-demand': 'week-ahead',
+      'week-ahead-mhcf': 'week-ahead',
+      'historical-scenarios-weekly': 'week-ahead',
+      'historical-scenarios-monthly': 'week-ahead',
+      'historical-databases': 'day-ahead'
+    };
+    const catMap: Record<string, 'demand' | 'mhcf'> = {
+      'day-ahead-demand': 'demand',
+      'day-ahead-mhcf': 'mhcf',
+      'week-ahead-demand': 'demand',
+      'week-ahead-mhcf': 'mhcf',
+      'historical-scenarios-weekly': 'mhcf',
+      'historical-scenarios-monthly': 'mhcf',
+      'historical-databases': 'mhcf'
+    };
+
+    const uploadCat = catMap[category] || 'demand';
+
+    // Use explicit geography if provided, otherwise infer for demand files
+    let resolvedGeography = geography;
+    if (!resolvedGeography && uploadCat === 'demand') {
+      resolvedGeography = isZonalDemandFile(filename) ? 'zonal' : 'regional';
+    }
+
+    return {
+      type: typeMap[category] || 'day-ahead',
+      category: uploadCat,
+      geography: uploadCat === 'demand' ? resolvedGeography : undefined
+    };
+  }
+
+  // Auto-detect from filename (legacy behavior for backwards compatibility)
+  let type: 'day-ahead' | 'week-ahead' = 'day-ahead';
+  let cat: 'demand' | 'mhcf' = 'demand';
+
+  // Detect horizon
+  if (fn.startsWith('WA_') || fn.includes('WEEK_AHEAD') || fn.includes('WEEKLY')) {
+    type = 'week-ahead';
+  }
+
+  // Detect category
+  if (fn.includes('MHCF') || fn.includes('_CF_') || fn.includes('CFAC')) {
+    cat = 'mhcf';
+  }
+
+  // Resolve geography (only for demand)
+  let resolvedGeography = geography;
+  if (!resolvedGeography && cat === 'demand') {
+    resolvedGeography = isZonalDemandFile(filename) ? 'zonal' : 'regional';
+  }
+
+  return {
+    type,
+    category: cat,
+    geography: cat === 'demand' ? resolvedGeography : undefined
+  };
+}
+
+/**
+ * Push a file via SFTP (legacy method, used as fallback)
+ */
+async function pushFileViaSftp(
+  localPath: string,
+  category?: ForecastCategory
+): Promise<PushResult> {
   const config = getConfig();
   const sftp = new SftpClient();
   const filename = path.basename(localPath);
@@ -267,16 +517,6 @@ export async function pushFileToGateway(localPath: string, category?: ForecastCa
       localPath,
       remotePath,
       error: 'Gateway password not configured. Set VANTAGE_GATEWAY_PASSWORD or add to config.json'
-    };
-  }
-
-  // Check if local file exists
-  if (!fs.existsSync(localPath)) {
-    return {
-      success: false,
-      localPath,
-      remotePath,
-      error: `Local file not found: ${localPath}`
     };
   }
 
@@ -311,7 +551,8 @@ export async function pushFileToGateway(localPath: string, category?: ForecastCa
       success: true,
       localPath,
       remotePath,
-      bytesTransferred: stats.size
+      bytesTransferred: stats.size,
+      httpUpload: false
     };
   } catch (error: any) {
     console.error(`[SFTP] Upload failed: ${error.message}`);
@@ -319,7 +560,8 @@ export async function pushFileToGateway(localPath: string, category?: ForecastCa
       success: false,
       localPath,
       remotePath,
-      error: error.message
+      error: error.message,
+      httpUpload: false
     };
   } finally {
     try {
@@ -332,47 +574,106 @@ export async function pushFileToGateway(localPath: string, category?: ForecastCa
 
 /**
  * Push all CSV files from a directory that match forecast patterns
+ *
+ * @param outputDir - Directory containing forecast files to push
+ * @param defaultGeography - Default geography to use for demand files if not detected from filename
  */
-export async function pushAllForecasts(outputDir: string): Promise<PushResult[]> {
+export async function pushAllForecasts(
+  outputDir: string,
+  defaultGeography?: Geography
+): Promise<PushResult[]> {
   const results: PushResult[] = [];
 
   if (!fs.existsSync(outputDir)) {
-    console.error(`[SFTP] Output directory not found: ${outputDir}`);
+    console.error(`[Gateway] Output directory not found: ${outputDir}`);
     return results;
   }
 
   const files = fs.readdirSync(outputDir)
     .filter(f => f.endsWith('.csv') && (
       f.startsWith('FC_') ||
+      f.startsWith('DA_') ||
+      f.startsWith('WA_') ||
       f.includes('_DEM_') ||
       f.includes('_ZDEM_') ||
       f.includes('_CF_') ||
-      f.includes('CFAC')
+      f.includes('CFAC') ||
+      f.includes('MHCF')
     ));
 
-  console.log(`[SFTP] Found ${files.length} forecast files to push`);
+  console.log(`[Gateway] Found ${files.length} forecast files to push`);
 
   for (const file of files) {
     const localPath = path.join(outputDir, file);
-    const result = await pushFileToGateway(localPath);
+    // Use filename-based detection if explicit geography not provided
+    const geography = defaultGeography || (isZonalDemandFile(file) ? 'zonal' : 'regional');
+    const result = await pushFileToGateway(localPath, undefined, geography);
     results.push(result);
   }
 
   // Summary
   const successful = results.filter(r => r.success).length;
   const failed = results.filter(r => !r.success).length;
-  console.log(`[SFTP] Push complete: ${successful} succeeded, ${failed} failed`);
+  const httpCount = results.filter(r => r.httpUpload).length;
+  console.log(`[Gateway] Push complete: ${successful} succeeded, ${failed} failed` +
+    (httpCount > 0 ? ` (${httpCount} via HTTP)` : ''));
 
   return results;
 }
 
 /**
- * Test connection to the gateway and check directory access
+ * Extended test result including HTTP gateway status
  */
-export async function testGatewayConnection(): Promise<GatewayTestResult> {
-  const config = getConfig();
-  const sftp = new SftpClient();
+export interface GatewayTestResultExtended extends GatewayTestResult {
+  httpEnabled: boolean;
+  httpConnected?: boolean;
+  httpClientName?: string;
+  httpTier?: string;
+  httpError?: string;
+}
 
+/**
+ * Test connection to the gateway (both HTTP and SFTP)
+ *
+ * Tests HTTP gateway first if configured, then SFTP as fallback.
+ */
+export async function testGatewayConnection(): Promise<GatewayTestResultExtended> {
+  const config = getConfig();
+
+  const result: GatewayTestResultExtended = {
+    connected: false,
+    directories: [],
+    httpEnabled: !!(config.licenseId && config.httpUrl)
+  };
+
+  // Test HTTP gateway first if configured
+  if (config.licenseId && config.httpUrl) {
+    console.log(`[Gateway/HTTP] Testing connection to ${config.httpUrl}...`);
+    try {
+      const gateway = new GatewayHttpService({
+        baseUrl: config.httpUrl,
+        licenseId: config.licenseId
+      });
+
+      const httpTest = await gateway.testConnection();
+      result.httpConnected = httpTest.connected;
+      result.httpClientName = httpTest.clientName;
+      result.httpTier = httpTest.tier;
+      result.httpError = httpTest.error;
+
+      if (httpTest.connected) {
+        console.log(`[Gateway/HTTP] Connection successful (${httpTest.clientName}, ${httpTest.tier} tier)`);
+        result.connected = true;
+      } else {
+        console.warn(`[Gateway/HTTP] Connection failed: ${httpTest.error}`);
+      }
+    } catch (error: any) {
+      result.httpError = error.message;
+      console.warn(`[Gateway/HTTP] Connection error: ${error.message}`);
+    }
+  }
+
+  // Test SFTP connection if configured (even if HTTP worked, for completeness)
   const directories = [
     '/day-ahead/demand/regional',
     '/day-ahead/demand/zonal',
@@ -385,16 +686,15 @@ export async function testGatewayConnection(): Promise<GatewayTestResult> {
     '/other'
   ];
 
-  const result: GatewayTestResult = {
-    connected: false,
-    directories: []
-  };
-
-  // Check if password is configured
+  // Check if SFTP password is configured
   if (!config.password) {
-    result.error = 'VANTAGE_GATEWAY_PASSWORD environment variable not set';
+    if (!result.connected) {
+      result.error = 'Gateway not configured. Set VANTAGE_LICENSE_ID (HTTP) or VANTAGE_GATEWAY_PASSWORD (SFTP)';
+    }
     return result;
   }
+
+  const sftp = new SftpClient();
 
   try {
     console.log(`[SFTP] Testing connection to ${config.host}:${config.port}...`);
@@ -435,15 +735,18 @@ export async function testGatewayConnection(): Promise<GatewayTestResult> {
 
     return result;
   } catch (error: any) {
-    result.error = error.message;
+    // Only set error if HTTP also failed
+    if (!result.httpConnected) {
+      result.error = error.message;
 
-    // Provide helpful hints for common errors
-    if (error.message.includes('ECONNREFUSED')) {
-      result.error += ' - Check if Tailscale is connected';
-    } else if (error.message.includes('Authentication')) {
-      result.error += ' - Check VANTAGE_GATEWAY_PASSWORD';
-    } else if (error.message.includes('ETIMEDOUT')) {
-      result.error += ' - Network timeout, check Tailscale status';
+      // Provide helpful hints for common errors
+      if (error.message.includes('ECONNREFUSED')) {
+        result.error += ' - Check if Tailscale is connected';
+      } else if (error.message.includes('Authentication')) {
+        result.error += ' - Check VANTAGE_GATEWAY_PASSWORD';
+      } else if (error.message.includes('ETIMEDOUT')) {
+        result.error += ' - Network timeout, check Tailscale status';
+      }
     }
 
     return result;
@@ -459,7 +762,7 @@ export async function testGatewayConnection(): Promise<GatewayTestResult> {
 /**
  * Format test results for console output
  */
-export function formatTestResults(result: GatewayTestResult): string {
+export function formatTestResults(result: GatewayTestResult | GatewayTestResultExtended): string {
   const lines: string[] = [];
   const config = getConfig();
 
@@ -468,12 +771,30 @@ export function formatTestResults(result: GatewayTestResult): string {
   lines.push('         Vantage Gateway Connection Test');
   lines.push('═══════════════════════════════════════════════════════');
   lines.push('');
-  lines.push(`Host:     ${config.host}:${config.port}`);
-  lines.push(`User:     ${config.username}`);
-  lines.push(`Status:   ${result.connected ? '✓ Connected' : '✗ Failed'}`);
+
+  // HTTP Gateway status (if extended result)
+  const extResult = result as GatewayTestResultExtended;
+  if (extResult.httpEnabled !== undefined) {
+    lines.push('HTTP Gateway (v2.5.0+):');
+    lines.push(`  URL:      ${config.httpUrl || 'not configured'}`);
+    lines.push(`  License:  ${config.licenseId ? '********' + config.licenseId.slice(-4) : 'not configured'}`);
+    lines.push(`  Status:   ${extResult.httpConnected ? '✓ Connected' : '✗ Failed'}`);
+    if (extResult.httpConnected) {
+      lines.push(`  Client:   ${extResult.httpClientName} (${extResult.httpTier} tier)`);
+    } else if (extResult.httpError) {
+      lines.push(`  Error:    ${extResult.httpError}`);
+    }
+    lines.push('');
+  }
+
+  // SFTP Gateway status
+  lines.push('SFTP Gateway (legacy):');
+  lines.push(`  Host:     ${config.host}:${config.port}`);
+  lines.push(`  User:     ${config.username}`);
+  lines.push(`  Status:   ${result.directories.length > 0 ? '✓ Connected' : (config.password ? '✗ Failed' : '○ Not configured')}`);
 
   if (result.error) {
-    lines.push(`Error:    ${result.error}`);
+    lines.push(`  Error:    ${result.error}`);
   }
 
   if (result.directories.length > 0) {

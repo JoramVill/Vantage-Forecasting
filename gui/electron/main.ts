@@ -106,7 +106,7 @@ interface GlobalForecastConfig {
   };
   demand: {
     model: 'hybrid' | 'regression' | 'xgboost';
-    geography: 'regional' | 'zonal';
+    geography: 'regional' | 'zonal' | 'both';
     growthRate: number;
   };
   weather: {
@@ -306,7 +306,7 @@ class LocalConfigService {
       if (!validModels.includes(toValidate.demand.model)) {
         errors.push(`demand.model must be one of: ${validModels.join(', ')}`);
       }
-      const validGeography = ['regional', 'zonal'];
+      const validGeography = ['regional', 'zonal', 'both'];
       if (!validGeography.includes(toValidate.demand.geography)) {
         errors.push(`demand.geography must be one of: ${validGeography.join(', ')}`);
       }

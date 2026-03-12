@@ -184,15 +184,30 @@ See `Documents/DEPLOYMENT_GUIDE.md` for full deployment documentation.
 ### Gateway Integration
 | Command | Description |
 |---------|-------------|
-| `gateway push <file>` | Push forecast to Vantage Gateway via SFTP |
+| `gateway push <file>` | Push forecast to Vantage Gateway |
 | `gateway push --all` | Push all archived forecasts to gateway |
 | `gateway push --category <cat>` | Push specific category (day-ahead-demand, week-ahead-demand, etc.) |
+
+**Gateway Upload Methods (v2.5.0+):**
+- **HTTP (preferred)**: Uses explicit `geography` parameter, JWT authentication via license ID
+- **SFTP (fallback)**: Legacy method, uses filename pattern matching for geography routing
 
 **Gateway categories:**
 - `day-ahead-demand` - Next-day demand forecasts
 - `day-ahead-mhcf` - Next-day capacity factor forecasts
 - `week-ahead-demand` - 7-day demand forecasts
 - `week-ahead-mhcf` - 7-day capacity factor forecasts
+
+**Environment Variables:**
+```bash
+# HTTP Gateway (preferred - set license to enable)
+VANTAGE_GATEWAY_URL=https://vantage-gateway.taile437a5.ts.net
+VANTAGE_LICENSE_ID=your-license-id
+
+# SFTP Gateway (fallback)
+VANTAGE_GATEWAY_HOST=gateway-sftp.example.com
+VANTAGE_GATEWAY_PASSWORD=your-password
+```
 
 ### Other
 | Command | Description |
@@ -528,12 +543,15 @@ Settings are stored in `forecast_config.json` at project root. All paths and opt
 | | `weatherApiKey` | Visual Crossing API key | (built-in) |
 | **Output** | `outputDir` | Forecast output directory | `output` |
 | | `archiveDir` | Forecast archive directory | `output/archive` |
-| **Gateway** | `autoPushGateway` | Auto-push to Gateway | `false` |
-| | `sftpHost` | Gateway SFTP host | (empty) |
-| | `sftpPort` | Gateway SFTP port | `22` |
-| | `sftpUser` | Gateway SFTP username | (empty) |
-| | `sftpPassword` | Gateway SFTP password | (empty) |
-| | `sftpRemoteDir` | Gateway remote directory | `/forecasts` |
+| **Gateway** | `gateway.enabled` | Enable gateway integration | `false` |
+| | `gateway.autoPush` | Auto-push forecasts after generation | `false` |
+| | `gateway.httpUrl` | Gateway HTTP URL (v2.5.0+) | (empty) |
+| | `gateway.licenseId` | License ID for JWT auth | (empty) |
+| | `gateway.preferHttp` | Prefer HTTP over SFTP | `true` |
+| | `gateway.sftpHost` | Gateway SFTP host (fallback) | (empty) |
+| | `gateway.sftpPort` | Gateway SFTP port | `22` |
+| | `gateway.sftpUser` | Gateway SFTP username | (empty) |
+| | `gateway.sftpPassword` | Gateway SFTP password | (empty) |
 | **Models** | `demandModel` | Demand model type | `hybrid` |
 | | `cfacUseXGBoost` | Use XGBoost for CFAC | `false` |
 | | `cfacAsymmetricLoss` | Asymmetric loss for CFAC | `false` |
