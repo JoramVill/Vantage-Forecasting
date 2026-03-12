@@ -1245,9 +1245,6 @@ ipcMain.handle('run-scheduler-manual', async (_event, options: {
   overwrite?: boolean;
   suffix?: string | null;
   outputDir?: string;
-  useXgboost?: boolean;
-  asymmetricLoss?: boolean;
-  biasCorrection?: boolean;
   weatherCacheDir?: string;
 }) => {
   const cliPath = getCliPath();
@@ -1255,7 +1252,7 @@ ipcMain.handle('run-scheduler-manual', async (_event, options: {
 
   const { date, type, horizon, calibratorPath, trainingDays, endDate, verbose, pushGateway,
           useCalibrationId, useDb, dataDbPath, maxIterations, refreshWeather, overwrite,
-          suffix, outputDir, useXgboost, asymmetricLoss, biasCorrection, weatherCacheDir } = options;
+          suffix, outputDir, weatherCacheDir } = options;
 
   // Determine if this is a date range (backfill) or single date run
   const isBackfill = endDate && endDate !== date;
@@ -1326,20 +1323,9 @@ ipcMain.handle('run-scheduler-manual', async (_event, options: {
     args.push('--output', outputDir);
   }
 
-  if (useXgboost === true) {
-    args.push('--use-xgboost');
-  }
-
-  if (asymmetricLoss === true) {
-    args.push('--asymmetric-loss');
-  }
-
-  if (biasCorrection === true) {
-    args.push('--bias-correction');
-  }
-
   // Note: --cache is not supported by scheduler commands (it uses its own weather cache logic)
   // The weatherCacheDir setting is used by manual forecast commands instead
+  // Note: Model options (--use-xgboost, --asymmetric-loss, --bias-correction) are read from forecast_config.json
 
   const nodePath = getNodePath();
   console.log('Running scheduler:', nodePath, ...args);

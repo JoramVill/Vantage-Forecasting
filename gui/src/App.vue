@@ -84,10 +84,7 @@ const windBiasCorrection = ref(false);
 const solarUseXgboost = ref(true);
 const solarAsymmetricLoss = ref(true);
 const solarBiasCorrection = ref(false);
-// Legacy global settings (kept for backward compatibility, now computed from per-type)
-const schedulerUseXgboost = computed(() => windUseXgboost.value || solarUseXgboost.value);
-const schedulerAsymmetricLoss = computed(() => windAsymmetricLoss.value || solarAsymmetricLoss.value);
-const schedulerBiasCorrection = computed(() => windBiasCorrection.value || solarBiasCorrection.value);
+// Note: Model options (useXgboost, asymmetricLoss, biasCorrection) are now read from forecast_config.json
 const schedulerCalibDays = ref(7);
 const schedulerCalibThreshold = ref(5);
 const schedulerMaxIterations = ref(3);
@@ -1220,16 +1217,14 @@ async function runForecast() {
 
         cfacResult = await window.electronAPI.runCommand(cfacArgs);
       } else {
-        // Legacy model - use cfac forecast2 with XGBoost
+        // Legacy model - use cfac forecast2 (model options read from forecast_config.json)
         cfacArgs = [
           'cfac', 'forecast2',
           '-t', cfacDataDir.value,
           '-s', forecastStart.value,
           '-e', forecastEnd.value,
           '-o', `${cfacOutputDir.value}/${cfacFilename}`,
-          '--use-xgboost',
-          '--asymmetric-loss',
-          '--bias-correction',
+          // Note: --use-xgboost, --asymmetric-loss, --bias-correction removed - read from forecast_config.json
         ];
 
         // Add database mode flag if using database
@@ -1776,9 +1771,7 @@ async function runSchedulerManual() {
       overwrite: schedulerOverwrite.value,
       suffix: schedulerSuffix.value || null,
       outputDir: globalSchedulerOutputDir.value,
-      useXgboost: schedulerUseXgboost.value,
-      asymmetricLoss: schedulerAsymmetricLoss.value,
-      biasCorrection: schedulerBiasCorrection.value,
+      // Note: Model options (useXgboost, asymmetricLoss, biasCorrection) removed - read from forecast_config.json
       weatherCacheDir: globalWeatherCacheDir.value,
     });
     addSchedulerStatus(isDateRange ? 'Backfill completed' : 'Manual run completed', 'success');
