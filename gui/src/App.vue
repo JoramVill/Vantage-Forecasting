@@ -35,7 +35,24 @@ const activeTab = ref<'manual' | 'scheduler' | 'gateway' | 'settings'>('manual')
 // Forecast options
 const enableDemand = ref(true);
 const enableCfac = ref(true);
-const enableZonal = ref(false);
+// enableZonal is now a computed property that syncs with globalConfig.demand.geography
+// Manual tab checkbox: ON = zonal or both, OFF = regional
+const enableZonal = computed({
+  get: () => {
+    const geo = globalConfig.value?.demand?.geography;
+    return geo === 'zonal' || geo === 'both';
+  },
+  set: (val: boolean) => {
+    if (globalConfig.value?.demand) {
+      // When toggling checkbox: zonal/regional only (not both - that's scheduler-only)
+      globalConfig.value.demand.geography = val ? 'zonal' : 'regional';
+      // Also sync scheduler dropdown
+      schedulerConfig.value.demandGeography = globalConfig.value.demand.geography;
+      // Save config so CLI reads updated value
+      saveGlobalConfig();
+    }
+  }
+});
 const scalingPercent = ref(100);
 const scalingWind = ref(100); // Per-type scaling for wind
 const scalingSolar = ref(100); // Per-type scaling for solar
@@ -352,7 +369,7 @@ function saveSettings() {
     cfacOutputDir: cfacOutputDir.value,
     enableDemand: enableDemand.value,
     enableCfac: enableCfac.value,
-    enableZonal: enableZonal.value,
+    // enableZonal removed - now derived from globalConfig.demand.geography
     scalingPercent: scalingPercent.value,
     cfacModel: cfacModel.value,
     demandModel: demandModel.value,
@@ -454,7 +471,7 @@ onMounted(async () => {
     if (settings.cfacOutputDir) cfacOutputDir.value = settings.cfacOutputDir;
     if (typeof settings.enableDemand === 'boolean') enableDemand.value = settings.enableDemand;
     if (typeof settings.enableCfac === 'boolean') enableCfac.value = settings.enableCfac;
-    if (typeof settings.enableZonal === 'boolean') enableZonal.value = settings.enableZonal;
+    // enableZonal removed - now derived from globalConfig.demand.geography
     if (typeof settings.pushToGateway === 'boolean') pushToGateway.value = settings.pushToGateway;
     if (typeof settings.scalingPercent === 'number') scalingPercent.value = settings.scalingPercent;
     if (settings.cfacModel === 'hybrid' || settings.cfacModel === 'hybrid-lstm' || settings.cfacModel === 'legacy') cfacModel.value = settings.cfacModel;
@@ -1715,6 +1732,9 @@ async function runSchedulerManual() {
     addSchedulerStatus('Please select a start date', 'error');
     return;
   }
+
+  // Ensure config is saved before CLI runs (CLI reads from forecast_config.json)
+  await syncDemandGeographyToConfig();
 
   // Reset scheduler terminal state and expand terminal
   schedulerStatusHistory.value = [];
