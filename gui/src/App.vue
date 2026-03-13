@@ -1750,20 +1750,30 @@ async function runSchedulerManual() {
   if (autoImportBeforeRun.value) {
     addSchedulerStatus('Checking for new CSV data to import...');
     try {
-      // Determine which database to import to based on geography
-      const dbPath = schedulerDemandGeography.value === 'zonal'
-        ? globalZonalDemandDb.value
-        : globalRegionalDemandDb.value;
-
-      // Import demand data
+      // Import demand data based on geography setting
       if (globalDemandCsvPath.value) {
-        const demandResult = await window.electronAPI.importToDatabase({
-          dbPath: dbPath,
-          dataType: 'demand',
-          sourcePath: globalDemandCsvPath.value
-        });
-        if (demandResult.success) {
-          addSchedulerStatus(`Demand import: ${demandResult.message}`);
+        const geography = schedulerDemandGeography.value;
+
+        if (geography === 'regional' || geography === 'both') {
+          const regionalResult = await window.electronAPI.importToDatabase({
+            dbPath: globalRegionalDemandDb.value,
+            dataType: 'demand',
+            sourcePath: globalDemandCsvPath.value
+          });
+          if (regionalResult.success) {
+            addSchedulerStatus(`Regional demand import: ${regionalResult.message}`);
+          }
+        }
+
+        if (geography === 'zonal' || geography === 'both') {
+          const zonalResult = await window.electronAPI.importToDatabase({
+            dbPath: globalZonalDemandDb.value,
+            dataType: 'demand',
+            sourcePath: globalDemandCsvPath.value
+          });
+          if (zonalResult.success) {
+            addSchedulerStatus(`Zonal demand import: ${zonalResult.message}`);
+          }
         }
       }
 
