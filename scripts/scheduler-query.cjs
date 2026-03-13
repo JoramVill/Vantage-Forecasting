@@ -147,6 +147,74 @@ function getRecentRuns(limit, dbPath) {
   }
 }
 
+// Save scheduler configuration
+function saveConfig(configJson, dbPath) {
+  if (!dbPath) {
+    return { success: false, error: 'No database path provided' };
+  }
+
+  try {
+    const config = JSON.parse(configJson);
+    const db = new Database(dbPath);
+
+    // Ensure scheduler_config table exists
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS scheduler_config (
+        id INTEGER PRIMARY KEY DEFAULT 1,
+        enabled INTEGER DEFAULT 0,
+        run_time_morning TEXT DEFAULT '06:00',
+        run_time_evening TEXT,
+        run_days TEXT DEFAULT '1,2,3,4,5,6,7',
+        forecast_types TEXT DEFAULT 'demand,cfac',
+        horizons TEXT DEFAULT 'daily,weekly',
+        weather_max_age_hours INTEGER DEFAULT 6,
+        auto_push_gateway INTEGER DEFAULT 0,
+        archive_retention_days INTEGER DEFAULT 90
+      )
+    `);
+
+    // Convert runDays to database format (1-7)
+    const dayMap = {'Mon':'1','Tue':'2','Wed':'3','Thu':'4','Fri':'5','Sat':'6','Sun':'7'};
+    const runDays = (config.runDays || []).map(d => dayMap[d] || d).join(',');
+
+    // Build forecast types
+    const forecastTypes = [];
+    if (config.forecastDemand) forecastTypes.push('demand');
+    if (config.forecastCfac) forecastTypes.push('cfac');
+
+    // Build horizons
+    const horizons = [];
+    if (config.horizonDaily) horizons.push('daily');
+    if (config.horizonWeekly) horizons.push('weekly');
+
+    // Upsert configuration
+    db.exec('DELETE FROM scheduler_config WHERE id = 1');
+    db.prepare(`
+      INSERT INTO scheduler_config (
+        id, enabled, run_time_morning, run_time_evening, run_days,
+        forecast_types, horizons, weather_max_age_hours,
+        auto_push_gateway, archive_retention_days
+      ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      config.enabled ? 1 : 0,
+      config.runTimeMorning || '06:00',
+      config.secondRunEnabled ? (config.runTimeEvening || '18:00') : null,
+      runDays || '1,2,3,4,5,6,7',
+      forecastTypes.join(',') || 'demand,cfac',
+      horizons.join(',') || 'daily,weekly',
+      config.weatherMaxAge || 6,
+      config.autoPushGateway ? 1 : 0,
+      config.archiveRetention || 90
+    );
+
+    db.close();
+    return { success: true };
+  } catch (error) {
+    console.error('Error saving config:', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
 // Get calibration history
 function getCalibrations(limit, dbPath) {
   if (!dbPath) {
@@ -222,8 +290,14 @@ try {
       result = getCalibrations(limit, dbPath);
       break;
     }
+    case 'save-config': {
+      const configJson = arg1;
+      const dbPath = getDbPath(arg2);
+      result = saveConfig(configJson, dbPath);
+      break;
+    }
     default:
-      result = { error: `Unknown command: ${command}. Use: config, runs, calibrations` };
+      result = { error: `Unknown command: ${command}. Use: config, save-config, runs, calibrations` };
   }
 
   console.log(JSON.stringify(result));

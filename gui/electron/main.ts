@@ -1137,72 +1137,15 @@ ipcMain.handle('load-scheduler-config', async () => {
 
 // Save scheduler configuration to database
 ipcMain.handle('save-scheduler-config', async (_event, config) => {
-  // Use CLI to save scheduler config (avoids native module issues in dev)
-  const cliPath = getCliPath();
-  const projectRoot = getProjectRoot();
-  const nodePath = getNodePath();
-
-  // Build CLI arguments for scheduler config command
-  const args = [cliPath, 'scheduler', 'config'];
-
-  // Convert runDays to database format (1-7)
-  const dayMap: Record<string, string> = {'Mon':'1','Tue':'2','Wed':'3','Thu':'4','Fri':'5','Sat':'6','Sun':'7'};
-  const runDays = config.runDays.map((d: string) => dayMap[d] || d).join(',');
-
-  // Set times
-  const times = config.secondRunEnabled
-    ? `${config.runTimeMorning},${config.runTimeEvening}`
-    : config.runTimeMorning;
-  args.push('--set-times', times);
-
-  // Set days
-  args.push('--set-days', runDays);
-
-  // Set weather max age
-  args.push('--weather-max-age', String(config.weatherMaxAge));
-
-  // Set archive retention
-  args.push('--archive-retention', String(config.archiveRetention));
-
-  // Enable or disable
-  if (config.enabled) {
-    args.push('--enable');
-  } else {
-    args.push('--disable');
+  try {
+    // Use scheduler-query script to save config (same approach as load)
+    const configJson = JSON.stringify(config);
+    const result = await runSchedulerQuery('save-config', configJson);
+    return result || { success: false, error: 'No result from save operation' };
+  } catch (error: any) {
+    console.error('Failed to save scheduler config:', error);
+    return { success: false, error: error.message };
   }
-
-  return new Promise((resolve) => {
-    const child = spawn(nodePath, args, {
-      cwd: projectRoot,
-      shell: false,
-      env: { ...process.env }
-    });
-
-    let stdout = '';
-    let stderr = '';
-
-    child.stdout.on('data', (data: Buffer) => {
-      stdout += data.toString();
-    });
-
-    child.stderr.on('data', (data: Buffer) => {
-      stderr += data.toString();
-    });
-
-    child.on('close', (code: number | null) => {
-      if (code === 0) {
-        resolve({ success: true });
-      } else {
-        console.error('Failed to save scheduler config via CLI:', stderr);
-        resolve({ success: false, error: stderr || 'CLI command failed' });
-      }
-    });
-
-    child.on('error', (error: Error) => {
-      console.error('Failed to spawn CLI for scheduler config:', error);
-      resolve({ success: false, error: error.message });
-    });
-  });
 });
 
 // Get recent forecast runs from database
