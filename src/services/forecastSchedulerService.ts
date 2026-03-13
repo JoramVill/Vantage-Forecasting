@@ -1304,8 +1304,7 @@ export class ForecastSchedulerService {
     verbose: boolean,
     scalePeak?: number,
     scaleOffpeak?: number,
-    loadCalibratorPath?: string,
-    weatherCacheAvailable?: boolean  // PHASE 1: Skip weather fetch if cache available
+    loadCalibratorPath?: string
   ): Promise<void> {
     // Determine data source path based on geography and database configuration
     let dataSourcePath: string;
@@ -1354,23 +1353,14 @@ export class ForecastSchedulerService {
       args.push('--scale-offpeak', scaleOffpeak.toString());
     }
 
-    // Add weather max age if configured
-    if (this.config.weatherMaxAgeHours !== undefined) {
-      args.push('--weather-max-age', this.config.weatherMaxAgeHours.toString());
-    }
-
     // Add calibrator path if provided (uses saved model instead of auto-training)
     if (loadCalibratorPath) {
       args.push('--load-calibrator', loadCalibratorPath);
     }
 
-    // PHASE 1 OPTIMIZATION: Use cache mode if weather already fetched (e.g., by daily forecast)
-    if (weatherCacheAvailable) {
-      args.push('--weather-refresh-mode', 'cache');
-      if (verbose) {
-        console.log('   ♻️  Reusing weather cache from previous forecast');
-      }
-    }
+    // Note: Weather caching is handled automatically by the weatherService
+    // The demand forecast command uses --cache <dir> for cache directory (already set above)
+    // --weather-refresh-mode and --weather-max-age are only valid for cfac forecast2
 
     execSync(`"${this.nodeCmd}" ${args.map(a => `"${a}"`).join(' ')}`, {
       cwd: this.projectRoot,
@@ -1716,7 +1706,7 @@ export class ForecastSchedulerService {
         console.log(`   📊 Off-peak scale: ${scaleOffpeak && scaleOffpeak > 0 ? '+' : ''}${scaleOffpeak || 0}%`);
       }
 
-      await this.generateDemandForecast(startDate, endDate, outputFile, geography, verbose, scalePeak, scaleOffpeak, loadCalibratorPath, weatherCacheAvailable);
+      await this.generateDemandForecast(startDate, endDate, outputFile, geography, verbose, scalePeak, scaleOffpeak, loadCalibratorPath);
 
       let recordCount = 0;
       if (existsSync(outputFile)) {
