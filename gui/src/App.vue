@@ -985,9 +985,11 @@ async function loadGlobalConfig() {
   configLoading.value = true;
   try {
     globalConfig.value = await window.electronAPI.loadGlobalConfig();
-    // Sync scheduler tab geography dropdown from global config (single source of truth)
+    // Sync scheduler tab geography dropdown AND ref from global config (single source of truth)
     if (globalConfig.value?.demand?.geography) {
-      schedulerConfig.value.demandGeography = globalConfig.value.demand.geography as 'regional' | 'zonal' | 'both';
+      const geo = globalConfig.value.demand.geography as 'regional' | 'zonal' | 'both';
+      schedulerConfig.value.demandGeography = geo;
+      schedulerDemandGeography.value = geo;
     }
     addSchedulerStatus('Global config loaded successfully', 'success');
   } catch (e: any) {
@@ -1007,8 +1009,9 @@ function markConfigDirty() {
 // This ensures CLI reads the correct value from forecast_config.json
 async function syncDemandGeographyToConfig() {
   if (!globalConfig.value) return;
-  // Sync scheduler tab selection to global config
+  // Sync scheduler tab selection to global config AND the ref used by import
   globalConfig.value.demand.geography = schedulerConfig.value.demandGeography;
+  schedulerDemandGeography.value = schedulerConfig.value.demandGeography;
   // Save immediately so CLI can read it
   await saveGlobalConfig();
 }
