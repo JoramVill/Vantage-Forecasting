@@ -1018,7 +1018,9 @@ async function saveGlobalConfig() {
   if (!globalConfig.value) return;
   configSaveStatus.value = 'saving';
   try {
-    await window.electronAPI.saveGlobalConfig(globalConfig.value);
+    // Deep clone to plain object - Vue reactive proxies can't be sent via IPC
+    const plainConfig = JSON.parse(JSON.stringify(globalConfig.value));
+    await window.electronAPI.saveGlobalConfig(plainConfig);
     configSaveStatus.value = 'saved';
     configDirty.value = false;
     addSchedulerStatus('Global config saved successfully', 'success');
