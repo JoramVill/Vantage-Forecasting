@@ -70,6 +70,7 @@ function getConfig(dbPath) {
     forecastCfac: true,
     horizonDaily: true,
     horizonWeekly: true,
+    demandGeography: 'regional',
     weatherMaxAge: 6,
     autoPushGateway: false,
     archiveRetention: 90
@@ -107,6 +108,7 @@ function getConfig(dbPath) {
       forecastCfac: forecastTypes.includes('cfac'),
       horizonDaily: horizons.includes('daily'),
       horizonWeekly: horizons.includes('weekly'),
+      demandGeography: config.demand_geography || 'regional',
       weatherMaxAge: config.weather_max_age_hours || 6,
       autoPushGateway: config.auto_push_gateway === 1,
       archiveRetention: config.archive_retention_days || 90
@@ -167,11 +169,23 @@ function saveConfig(configJson, dbPath) {
         run_days TEXT DEFAULT '1,2,3,4,5,6,7',
         forecast_types TEXT DEFAULT 'demand,cfac',
         horizons TEXT DEFAULT 'daily,weekly',
+        demand_geography TEXT DEFAULT 'regional',
         weather_max_age_hours INTEGER DEFAULT 6,
         auto_push_gateway INTEGER DEFAULT 0,
         archive_retention_days INTEGER DEFAULT 90
       )
     `);
+
+    // Migration: Add demand_geography column if it doesn't exist (for existing databases)
+    try {
+      const tableInfo = db.prepare('PRAGMA table_info(scheduler_config)').all();
+      const hasGeographyColumn = tableInfo.some(col => col.name === 'demand_geography');
+      if (!hasGeographyColumn) {
+        db.exec("ALTER TABLE scheduler_config ADD COLUMN demand_geography TEXT DEFAULT 'regional'");
+      }
+    } catch (e) {
+      // Column likely already exists
+    }
 
     // Convert runDays to database format (1-7)
     const dayMap = {'Mon':'1','Tue':'2','Wed':'3','Thu':'4','Fri':'5','Sat':'6','Sun':'7'};
@@ -192,9 +206,9 @@ function saveConfig(configJson, dbPath) {
     db.prepare(`
       INSERT INTO scheduler_config (
         id, enabled, run_time_morning, run_time_evening, run_days,
-        forecast_types, horizons, weather_max_age_hours,
+        forecast_types, horizons, demand_geography, weather_max_age_hours,
         auto_push_gateway, archive_retention_days
-      ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       config.enabled ? 1 : 0,
       config.runTimeMorning || '06:00',
@@ -202,6 +216,7 @@ function saveConfig(configJson, dbPath) {
       runDays || '1,2,3,4,5,6,7',
       forecastTypes.join(',') || 'demand,cfac',
       horizons.join(',') || 'daily,weekly',
+      config.demandGeography || 'regional',
       config.weatherMaxAge || 6,
       config.autoPushGateway ? 1 : 0,
       config.archiveRetention || 90
