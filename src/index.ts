@@ -69,6 +69,40 @@ function getApiKey(): string {
   return DEFAULT_API_KEY;
 }
 
+// Zone to parent region mapping
+const ZONE_TO_REGION: Record<string, string> = {
+  '01NLUZ': 'CLUZ', '02METRO': 'CLUZ', '03SLUZ': 'CLUZ',
+  '04LEYTE': 'CVIS', '05CEBU': 'CVIS', '06NEGROS': 'CVIS', '07BOHOL': 'CVIS', '08PANAY': 'CVIS',
+  '09NWMIN': 'CMIN', '10LANAO': 'CMIN', '11NCMIN': 'CMIN', '12NEMIN': 'CMIN', '13SEMIN': 'CMIN', '14SWMIN': 'CMIN'
+};
+
+/**
+ * Parse zone/region scaling string into a Map
+ * Format: "ZONE1:percent,ZONE2:percent" e.g., "01NLUZ:5,02METRO:-3"
+ */
+function parseScaleString(scaleStr: string | undefined): Map<string, number> {
+  const scales = new Map<string, number>();
+  if (!scaleStr) return scales;
+
+  for (const pair of scaleStr.split(',')) {
+    const [key, value] = pair.split(':');
+    if (key && value) {
+      const parsedValue = parseFloat(value.trim());
+      if (!isNaN(parsedValue)) {
+        scales.set(key.trim().toUpperCase(), parsedValue);
+      }
+    }
+  }
+  return scales;
+}
+
+/**
+ * Get parent region for a zone code
+ */
+function getParentRegion(zoneOrRegion: string): string {
+  return ZONE_TO_REGION[zoneOrRegion.toUpperCase()] || zoneOrRegion.toUpperCase();
+}
+
 /**
  * Run zonal demand forecast for 14 sub-regions
  * Uses 42 weather cities (3 per zone) with city1 as representative for the hybrid model
@@ -347,7 +381,18 @@ async function runZonalForecast(options: any): Promise<void> {
   const scaleOffpeak = options.scaleOffpeak !== undefined ? 1 + (parseFloat(options.scaleOffpeak) / 100) : null;
   const isPeakHour = (hour: number): boolean => hour >= 9 && hour < 21;
 
-  const getScaleFactor = (dateTime: Date): number => {
+  // Parse zone and region specific scales
+  const zoneScales = parseScaleString(options.scaleZone);
+  const regionScales = parseScaleString(options.scaleRegion);
+
+  if (zoneScales.size > 0) {
+    console.log(`  📊 Zone scaling: ${[...zoneScales.entries()].map(([k, v]) => `${k}:${v > 0 ? '+' : ''}${v}%`).join(', ')}`);
+  }
+  if (regionScales.size > 0) {
+    console.log(`  📊 Region scaling: ${[...regionScales.entries()].map(([k, v]) => `${k}:${v > 0 ? '+' : ''}${v}%`).join(', ')}`);
+  }
+
+  const getScaleFactor = (dateTime: Date, region: string): number => {
     const dt = DateTime.fromJSDate(dateTime);
     const dateStr = dt.toFormat('yyyy-MM-dd');
     const dow = dt.weekday;
@@ -366,7 +411,23 @@ async function runZonalForecast(options: any): Promise<void> {
     } else if (scaleOffpeak !== null && !isPeakHour(hour)) {
       peakScale = scaleOffpeak;
     }
-    return dayTypeScale * peakScale;
+
+    // Apply zone-specific scaling (highest priority)
+    let zoneScale = 1.0;
+    const zoneScalePct = zoneScales.get(region.toUpperCase());
+    if (zoneScalePct !== undefined) {
+      zoneScale = 1 + (zoneScalePct / 100);
+    }
+
+    // Apply region-specific scaling (for zonal mode, map zone to parent region)
+    let regionScale = 1.0;
+    const parentRegion = getParentRegion(region);
+    const regionScalePct = regionScales.get(parentRegion) ?? regionScales.get(region.toUpperCase());
+    if (regionScalePct !== undefined) {
+      regionScale = 1 + (regionScalePct / 100);
+    }
+
+    return dayTypeScale * peakScale * zoneScale * regionScale;
   };
 
   // Generate forecasts
@@ -444,7 +505,7 @@ async function runZonalForecast(options: any): Promise<void> {
         };
         calibratedPrediction = model.applyCalibration(hybridPrediction, calibrationSample);
       }
-      const prediction = calibratedPrediction * getScaleFactor(datetime);
+      const prediction = calibratedPrediction * getScaleFactor(datetime, region);
 
       forecasts.push({
         datetime,
@@ -636,6 +697,8 @@ program
   .option('--scale-holiday <percent>', 'Scale holiday forecasts by percentage (highest priority, overrides other scales)')
   .option('--scale-peak <percent>', 'Scale peak hour (09:00-21:00) forecasts by percentage')
   .option('--scale-offpeak <percent>', 'Scale off-peak hour (21:00-09:00) forecasts by percentage')
+  .option('--scale-zone <scales>', 'Scale specific zones (e.g., "01NLUZ:5,02METRO:-3")')
+  .option('--scale-region <scales>', 'Scale specific regions (e.g., "CLUZ:2,CVIS:-1")')
   .option('--growth <percent>', 'Daily demand growth rate for hybrid model (e.g., 0.01 for 0.01%/day)', '0')
   .option('--cache <dir>', 'Weather cache directory', './weather_cache')
   .option('--use-db', 'Use demand data from database instead of file')
@@ -969,8 +1032,12 @@ program
       // Peak hours: 09:00-21:00 (hours 9-20 inclusive), Off-peak: 21:00-09:00 (hours 21-23, 0-8)
       const isPeakHour = (hour: number): boolean => hour >= 9 && hour < 21;
 
-      // Helper function to get the appropriate scale factor for a given date/time
-      const getScaleFactor = (dateTime: Date): number => {
+      // Parse zone and region specific scales
+      const zoneScales = parseScaleString(options.scaleZone);
+      const regionScales = parseScaleString(options.scaleRegion);
+
+      // Helper function to get the appropriate scale factor for a given date/time and region
+      const getScaleFactor = (dateTime: Date, region: string): number => {
         const dt = DateTime.fromJSDate(dateTime);
         const dateStr = dt.toFormat('yyyy-MM-dd');
         const dow = dt.weekday; // 1=Mon, 7=Sun
@@ -996,7 +1063,22 @@ program
           peakScale = scaleOffpeak;
         }
 
-        return dayTypeScale * peakScale;
+        // Apply zone-specific scaling (highest priority)
+        let zoneScale = 1.0;
+        const zoneScalePct = zoneScales.get(region.toUpperCase());
+        if (zoneScalePct !== undefined) {
+          zoneScale = 1 + (zoneScalePct / 100);
+        }
+
+        // Apply region-specific scaling (for zonal mode, map zone to parent region)
+        let regionScale = 1.0;
+        const parentRegion = getParentRegion(region);
+        const regionScalePct = regionScales.get(parentRegion) ?? regionScales.get(region.toUpperCase());
+        if (regionScalePct !== undefined) {
+          regionScale = 1 + (regionScalePct / 100);
+        }
+
+        return dayTypeScale * peakScale * zoneScale * regionScale;
       };
 
       console.log('\n🔮 Generating forecasts...');
@@ -1017,6 +1099,12 @@ program
       }
       if (scaleOffpeak !== null) {
         console.log(`  📈 Off-peak (21:00-09:00) scaling: ${scaleOffpeak.toFixed(4)} (${parseFloat(options.scaleOffpeak) > 0 ? '+' : ''}${options.scaleOffpeak}%)`);
+      }
+      if (zoneScales.size > 0) {
+        console.log(`  📊 Zone scaling: ${[...zoneScales.entries()].map(([k, v]) => `${k}:${v > 0 ? '+' : ''}${v}%`).join(', ')}`);
+      }
+      if (regionScales.size > 0) {
+        console.log(`  📊 Region scaling: ${[...regionScales.entries()].map(([k, v]) => `${k}:${v > 0 ? '+' : ''}${v}%`).join(', ')}`);
       }
       const forecasts: ForecastResult[] = [];
 
@@ -1120,7 +1208,7 @@ program
             const daysAhead = Math.max(0, currentDate.diff(forecastStart, 'days').days);
 
             const hybridPrediction = (model as HybridModel).predictForRegion(features, region, daysAhead);
-            prediction = (hybridPrediction ?? similarDaysDemand ?? lastKnownDemand.get(region)?.value ?? 0) * getScaleFactor(datetime);
+            prediction = (hybridPrediction ?? similarDaysDemand ?? lastKnownDemand.get(region)?.value ?? 0) * getScaleFactor(datetime, region);
           } else {
             // Regression/XGBoost model
             const basePrediction = (model as RegressionModel | XGBoostModel).predict(features);
@@ -1130,15 +1218,15 @@ program
 
             if (hasActualLag1h) {
               // Use model prediction directly when we have real lag data
-              prediction = basePrediction * getScaleFactor(datetime);
+              prediction = basePrediction * getScaleFactor(datetime, region);
             } else {
               // When lag1h is estimated (from similar days), blend model prediction with similar days
               // This prevents the cold start death spiral by anchoring to historical patterns
               const blendRatio = 0.5; // 50% model, 50% similar days
               if (similarDaysDemand !== undefined) {
-                prediction = (basePrediction * blendRatio + similarDaysDemand * (1 - blendRatio)) * getScaleFactor(datetime);
+                prediction = (basePrediction * blendRatio + similarDaysDemand * (1 - blendRatio)) * getScaleFactor(datetime, region);
               } else {
-                prediction = basePrediction * getScaleFactor(datetime);
+                prediction = basePrediction * getScaleFactor(datetime, region);
               }
             }
           }

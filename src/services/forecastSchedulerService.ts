@@ -78,6 +78,8 @@ interface SchedulerConfig {
   trainDays?: number;
   demandScale?: number;
   demandGrowth?: number;
+  zoneScales?: Record<string, number>;    // Per-zone scaling (e.g., { "01NLUZ": -5 })
+  regionScales?: Record<string, number>;  // Per-region scaling (e.g., { "CLUZ": 2 })
   // CFAC options
   useXgboost?: boolean;
   asymmetricLoss?: boolean;
@@ -1358,6 +1360,28 @@ export class ForecastSchedulerService {
       args.push('--load-calibrator', loadCalibratorPath);
     }
 
+    // Add zone-specific scaling from config
+    if (this.config.zoneScales && Object.keys(this.config.zoneScales).length > 0) {
+      const scaleStr = Object.entries(this.config.zoneScales)
+        .filter(([_, scale]) => scale !== 0)
+        .map(([zone, scale]) => `${zone}:${scale}`)
+        .join(',');
+      if (scaleStr) {
+        args.push('--scale-zone', scaleStr);
+      }
+    }
+
+    // Add region-specific scaling from config
+    if (this.config.regionScales && Object.keys(this.config.regionScales).length > 0) {
+      const scaleStr = Object.entries(this.config.regionScales)
+        .filter(([_, scale]) => scale !== 0)
+        .map(([region, scale]) => `${region}:${scale}`)
+        .join(',');
+      if (scaleStr) {
+        args.push('--scale-region', scaleStr);
+      }
+    }
+
     // Note: Weather caching is handled automatically by the weatherService
     // The demand forecast command uses --cache <dir> for cache directory (already set above)
     // --weather-refresh-mode and --weather-max-age are only valid for cfac forecast2
@@ -1678,11 +1702,12 @@ export class ForecastSchedulerService {
     if (!existsSync(outputDir)) {
       mkdirSync(outputDir, { recursive: true });
     }
-    // Use consistent naming with geography: da_demand_regional_YYYY-MM-DD.csv or da_demand_zonal_YYYY-MM-DD.csv
+    // Use consistent naming WITHOUT geography in filename (folder already differentiates)
+    // Filename: da_demand_YYYY-MM-DD.csv (same name in both regional/ and zonal/ folders)
     const horizonPrefix = horizon === 'daily' ? 'da' : 'wa';
     const outputFilename = horizon === 'daily'
-      ? `${horizonPrefix}_demand_${geography}_${startDate}.csv`
-      : `${horizonPrefix}_demand_${geography}_${startDate}_${endDate}.csv`;
+      ? `${horizonPrefix}_demand_${startDate}.csv`
+      : `${horizonPrefix}_demand_${startDate}_${endDate}.csv`;
     const outputFile = join(outputDir, outputFilename);
 
     if (verbose) {

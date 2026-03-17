@@ -200,6 +200,26 @@ const gatewayClearConfirm = ref(false);
 const gatewayActionMessage = ref('');
 const gatewayActionType = ref<'success' | 'error' | ''>('');
 
+// Gateway file listing state
+interface GatewayFile {
+  filename: string;
+  type: string;
+  category: string;
+  geography: string | null;
+  size: number;
+  sizeFormatted: string;
+  date: string;
+  modified: string;
+  path: string;
+}
+const gatewayFiles = ref<GatewayFile[]>([]);
+const gatewayFilesLoading = ref(false);
+const gatewayFileFilter = ref<{
+  type: string | null;
+  category: string | null;
+  geography: string | null;
+}>({ type: null, category: null, geography: null });
+
 const schedulerConfig = ref<SchedulerConfig>({
   enabled: false,
   runTimeMorning: '06:00',
@@ -234,6 +254,16 @@ const globalConfig = ref<any>(null);
 const configLoading = ref(false);
 const configSaveStatus = ref<'idle' | 'saving' | 'saved' | 'error'>('idle');
 const configDirty = ref(false);
+
+// Zone scaling UI state
+const showZoneScaling = ref(false);
+const ALL_ZONES = ['01NLUZ', '02METRO', '03SLUZ', '04LEYTE', '05CEBU', '06NEGROS', '07BOHOL', '08PANAY', '09NWMIN', '10LANAO', '11NCMIN', '12NEMIN', '13SEMIN', '14SWMIN'];
+const ALL_REGIONS = ['CLUZ', 'CVIS', 'CMIN'];
+const ZONE_TO_REGION: Record<string, string> = {
+  '01NLUZ': 'CLUZ', '02METRO': 'CLUZ', '03SLUZ': 'CLUZ',
+  '04LEYTE': 'CVIS', '05CEBU': 'CVIS', '06NEGROS': 'CVIS', '07BOHOL': 'CVIS', '08PANAY': 'CVIS',
+  '09NWMIN': 'CMIN', '10LANAO': 'CMIN', '11NCMIN': 'CMIN', '12NEMIN': 'CMIN', '13SEMIN': 'CMIN', '14SWMIN': 'CMIN'
+};
 
 // Saved calibrations (for 'reuse' mode - skip recalibration)
 interface SavedCalibration {
@@ -1016,6 +1046,58 @@ async function syncDemandGeographyToConfig() {
   await saveGlobalConfig();
 }
 
+// Get zone scale value from config (returns 0 if not set)
+function getZoneScale(zone: string): number {
+  if (!globalConfig.value?.demand?.scaling?.zones) return 0;
+  return globalConfig.value.demand.scaling.zones[zone] || 0;
+}
+
+// Set zone scale value in config
+function setZoneScale(zone: string, value: number) {
+  if (!globalConfig.value) return;
+  if (!globalConfig.value.demand.scaling) {
+    globalConfig.value.demand.scaling = { zones: {}, regions: {} };
+  }
+  if (!globalConfig.value.demand.scaling.zones) {
+    globalConfig.value.demand.scaling.zones = {};
+  }
+  if (value === 0 || value === null || value === undefined || isNaN(value)) {
+    delete globalConfig.value.demand.scaling.zones[zone];
+  } else {
+    globalConfig.value.demand.scaling.zones[zone] = value;
+  }
+}
+
+// Get region scale value from config (returns 0 if not set)
+function getRegionScale(region: string): number {
+  if (!globalConfig.value?.demand?.scaling?.regions) return 0;
+  return globalConfig.value.demand.scaling.regions[region] || 0;
+}
+
+// Set region scale value in config
+function setRegionScale(region: string, value: number) {
+  if (!globalConfig.value) return;
+  if (!globalConfig.value.demand.scaling) {
+    globalConfig.value.demand.scaling = { zones: {}, regions: {} };
+  }
+  if (!globalConfig.value.demand.scaling.regions) {
+    globalConfig.value.demand.scaling.regions = {};
+  }
+  if (value === 0 || value === null || value === undefined || isNaN(value)) {
+    delete globalConfig.value.demand.scaling.regions[region];
+  } else {
+    globalConfig.value.demand.scaling.regions[region] = value;
+  }
+}
+
+// Check if any zone/region scales are set
+function hasAnyZoneScales(): boolean {
+  if (!globalConfig.value?.demand?.scaling) return false;
+  const zones = globalConfig.value.demand.scaling.zones || {};
+  const regions = globalConfig.value.demand.scaling.regions || {};
+  return Object.keys(zones).length > 0 || Object.keys(regions).length > 0;
+}
+
 // Save global config to forecast_config.json
 async function saveGlobalConfig() {
   if (!globalConfig.value) return;
@@ -1644,6 +1726,30 @@ async function loadGatewayStorageStats() {
   }
 }
 
+async function loadGatewayFiles() {
+  gatewayFilesLoading.value = true;
+  try {
+    const filters: { type?: string; category?: string; geography?: string; limit?: number } = {};
+    if (gatewayFileFilter.value.type) filters.type = gatewayFileFilter.value.type;
+    if (gatewayFileFilter.value.category) filters.category = gatewayFileFilter.value.category;
+    if (gatewayFileFilter.value.geography) filters.geography = gatewayFileFilter.value.geography;
+    filters.limit = 100; // Default limit
+
+    const result = await window.electronAPI.getGatewayFiles(filters);
+    if (result.success) {
+      gatewayFiles.value = result.files || [];
+    } else {
+      console.error('Failed to load gateway files:', result.error);
+      gatewayFiles.value = [];
+    }
+  } catch (error: any) {
+    console.error('Error loading gateway files:', error);
+    gatewayFiles.value = [];
+  } finally {
+    gatewayFilesLoading.value = false;
+  }
+}
+
 async function archiveGatewayFiles() {
   gatewayArchiveLoading.value = true;
   gatewayActionMessage.value = '';
@@ -1961,7 +2067,7 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
         <button
           class="nav-item"
           :class="{ active: activeTab === 'gateway' }"
-          @click="activeTab = 'gateway'; loadGatewayStorageStats()"
+          @click="activeTab = 'gateway'; loadGatewayStorageStats(); loadGatewayFiles()"
           :disabled="isRunning || schedulerIsRunning"
         >
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -2491,6 +2597,94 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
                   <option value="both">Both</option>
                 </select>
               </div>
+
+              <!-- Zone Scaling Section -->
+              <div v-if="schedulerConfig.forecastDemand" class="zone-scaling-section" style="margin-top: 12px;">
+                <div class="zone-scaling-header" @click="showZoneScaling = !showZoneScaling">
+                  <span class="collapse-icon">{{ showZoneScaling ? '▼' : '▶' }}</span>
+                  <span>Zone Scaling</span>
+                  <span v-if="hasAnyZoneScales()" class="zone-scale-indicator">●</span>
+                </div>
+                <div v-if="showZoneScaling" class="zone-scaling-content">
+                  <p class="hint" style="margin-bottom: 8px;">Adjust forecasts for specific zones or regions (%)</p>
+
+                  <!-- Region scales -->
+                  <div class="zone-scale-group">
+                    <div class="zone-scale-group-header">Regions</div>
+                    <div class="zone-scale-row" v-for="region in ALL_REGIONS" :key="region">
+                      <label class="zone-label">{{ region }}</label>
+                      <input
+                        type="number"
+                        class="zone-scale-input"
+                        :value="getRegionScale(region)"
+                        @change="(e: Event) => { setRegionScale(region, parseFloat((e.target as HTMLInputElement).value) || 0); saveGlobalConfig(); }"
+                        placeholder="0"
+                        min="-50"
+                        max="50"
+                        step="0.5"
+                      />
+                      <span class="zone-scale-unit">%</span>
+                    </div>
+                  </div>
+
+                  <!-- Luzon zones -->
+                  <div class="zone-scale-group">
+                    <div class="zone-scale-group-header">Luzon Zones</div>
+                    <div class="zone-scale-row" v-for="zone in ALL_ZONES.filter(z => ZONE_TO_REGION[z] === 'CLUZ')" :key="zone">
+                      <label class="zone-label">{{ zone }}</label>
+                      <input
+                        type="number"
+                        class="zone-scale-input"
+                        :value="getZoneScale(zone)"
+                        @change="(e: Event) => { setZoneScale(zone, parseFloat((e.target as HTMLInputElement).value) || 0); saveGlobalConfig(); }"
+                        placeholder="0"
+                        min="-50"
+                        max="50"
+                        step="0.5"
+                      />
+                      <span class="zone-scale-unit">%</span>
+                    </div>
+                  </div>
+
+                  <!-- Visayas zones -->
+                  <div class="zone-scale-group">
+                    <div class="zone-scale-group-header">Visayas Zones</div>
+                    <div class="zone-scale-row" v-for="zone in ALL_ZONES.filter(z => ZONE_TO_REGION[z] === 'CVIS')" :key="zone">
+                      <label class="zone-label">{{ zone }}</label>
+                      <input
+                        type="number"
+                        class="zone-scale-input"
+                        :value="getZoneScale(zone)"
+                        @change="(e: Event) => { setZoneScale(zone, parseFloat((e.target as HTMLInputElement).value) || 0); saveGlobalConfig(); }"
+                        placeholder="0"
+                        min="-50"
+                        max="50"
+                        step="0.5"
+                      />
+                      <span class="zone-scale-unit">%</span>
+                    </div>
+                  </div>
+
+                  <!-- Mindanao zones -->
+                  <div class="zone-scale-group">
+                    <div class="zone-scale-group-header">Mindanao Zones</div>
+                    <div class="zone-scale-row" v-for="zone in ALL_ZONES.filter(z => ZONE_TO_REGION[z] === 'CMIN')" :key="zone">
+                      <label class="zone-label">{{ zone }}</label>
+                      <input
+                        type="number"
+                        class="zone-scale-input"
+                        :value="getZoneScale(zone)"
+                        @change="(e: Event) => { setZoneScale(zone, parseFloat((e.target as HTMLInputElement).value) || 0); saveGlobalConfig(); }"
+                        placeholder="0"
+                        min="-50"
+                        max="50"
+                        step="0.5"
+                      />
+                      <span class="zone-scale-unit">%</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
 
             <!-- Horizons Section -->
@@ -2662,6 +2856,82 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 
             <div v-else class="empty-state">
               Click "Refresh" to load storage statistics
+            </div>
+          </section>
+
+          <!-- Gateway Files Table -->
+          <section class="card">
+            <div class="card-header-row">
+              <h2>Gateway Files</h2>
+              <div class="filter-controls">
+                <!-- Type Filter -->
+                <select v-model="gatewayFileFilter.type" @change="loadGatewayFiles" class="form-select-sm">
+                  <option :value="null">All Types</option>
+                  <option value="day-ahead">Day-Ahead</option>
+                  <option value="week-ahead">Week-Ahead</option>
+                </select>
+                <!-- Category Filter -->
+                <select v-model="gatewayFileFilter.category" @change="loadGatewayFiles" class="form-select-sm">
+                  <option :value="null">All Categories</option>
+                  <option value="demand">Demand</option>
+                  <option value="mhcf">MHCF</option>
+                </select>
+                <!-- Geography Filter -->
+                <select v-model="gatewayFileFilter.geography" @change="loadGatewayFiles" class="form-select-sm">
+                  <option :value="null">All Geographies</option>
+                  <option value="regional">Regional (3)</option>
+                  <option value="zonal">Zonal (14)</option>
+                </select>
+                <!-- Refresh Button -->
+                <button @click="loadGatewayFiles" class="btn btn-sm btn-secondary" :disabled="gatewayFilesLoading">
+                  <span v-if="gatewayFilesLoading">Loading...</span>
+                  <span v-else>Refresh</span>
+                </button>
+              </div>
+            </div>
+
+            <div v-if="gatewayFilesLoading" class="loading-state">
+              <span class="spinner"></span>
+              <span>Loading files...</span>
+            </div>
+            <div v-else-if="gatewayFiles.length === 0" class="empty-state">
+              No files found matching filters
+            </div>
+            <div v-else class="files-table-container">
+              <table class="stats-table files-table">
+                <thead>
+                  <tr>
+                    <th>Filename</th>
+                    <th>Type</th>
+                    <th>Category</th>
+                    <th>Geography</th>
+                    <th class="text-right">Size</th>
+                    <th>Date</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="file in gatewayFiles" :key="file.path">
+                    <td><code class="filename">{{ file.filename }}</code></td>
+                    <td>
+                      <span class="badge" :class="file.type === 'day-ahead' ? 'badge-primary' : 'badge-info'">
+                        {{ file.type === 'day-ahead' ? 'DA' : 'WA' }}
+                      </span>
+                    </td>
+                    <td>{{ file.category }}</td>
+                    <td>
+                      <span v-if="file.geography" class="badge" :class="file.geography === 'regional' ? 'badge-success' : 'badge-warning'">
+                        {{ file.geography === 'regional' ? 'REG (3)' : 'ZONAL (14)' }}
+                      </span>
+                      <span v-else class="text-muted">-</span>
+                    </td>
+                    <td class="text-right">{{ file.sizeFormatted }}</td>
+                    <td>{{ file.date }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="card-footer">
+              Showing {{ gatewayFiles.length }} files
             </div>
           </section>
 
@@ -4051,6 +4321,106 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
   min-width: 280px;
 }
 
+/* Zone Scaling Styles */
+.zone-scaling-section {
+  border-top: 1px solid var(--border-color);
+  padding-top: 8px;
+}
+
+.zone-scaling-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  padding: 4px 0;
+}
+
+.zone-scaling-header:hover {
+  color: var(--text-primary);
+}
+
+.zone-scaling-header .collapse-icon {
+  font-size: 0.65rem;
+  width: 12px;
+}
+
+.zone-scale-indicator {
+  color: var(--accent-primary);
+  font-size: 0.5rem;
+}
+
+.zone-scaling-content {
+  margin-top: 8px;
+  padding: 8px;
+  background: var(--bg-secondary);
+  border-radius: 4px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.zone-scale-group {
+  margin-bottom: 12px;
+}
+
+.zone-scale-group:last-child {
+  margin-bottom: 0;
+}
+
+.zone-scale-group-header {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.zone-scale-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.zone-label {
+  font-size: 0.75rem;
+  font-family: monospace;
+  color: var(--text-secondary);
+  width: 70px;
+  flex-shrink: 0;
+}
+
+.zone-scale-input {
+  width: 60px;
+  padding: 4px 6px;
+  font-size: 0.75rem;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  text-align: right;
+}
+
+.zone-scale-input:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+}
+
+.zone-scale-input::-webkit-inner-spin-button,
+.zone-scale-input::-webkit-outer-spin-button {
+  opacity: 1;
+}
+
+.zone-scale-unit {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
 .gateway-config {
   margin-top: 12px;
   padding-top: 12px;
@@ -4203,6 +4573,106 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 
 .stats-table td {
   font-size: 0.9rem;
+}
+
+/* Gateway Files Table Styles */
+.filter-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.form-select-sm {
+  padding: 4px 8px;
+  font-size: 0.85rem;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--input-bg);
+  color: var(--text-primary);
+}
+
+.files-table-container {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.files-table {
+  width: 100%;
+}
+
+.files-table .filename {
+  font-size: 0.85rem;
+  background: var(--code-bg, rgba(0, 0, 0, 0.1));
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+
+.badge-primary {
+  background: var(--primary-color);
+  color: white;
+}
+
+.badge-info {
+  background: #17a2b8;
+  color: white;
+}
+
+.badge-success {
+  background: #28a745;
+  color: white;
+}
+
+.badge-warning {
+  background: #ffc107;
+  color: #212529;
+}
+
+.text-right {
+  text-align: right;
+}
+
+.text-muted {
+  color: var(--text-secondary);
+}
+
+.card-footer {
+  padding: 12px 16px;
+  background: rgba(0, 0, 0, 0.02);
+  border-top: 1px solid var(--border-color);
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.loading-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 40px;
+  color: var(--text-secondary);
+}
+
+.spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border-color);
+  border-top-color: var(--primary-color);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 .empty-state {
