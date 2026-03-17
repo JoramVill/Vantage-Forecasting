@@ -154,6 +154,22 @@ interface Window {
       oldestFile?: string;
       newestFile?: string;
     }>;
+    getGatewayFiles: (filters?: { type?: string; category?: string; geography?: string; limit?: number }) => Promise<{
+      success: boolean;
+      error?: string;
+      files?: Array<{
+        filename: string;
+        type: string;
+        category: string;
+        geography: string | null;
+        size: number;
+        sizeFormatted: string;
+        date: string;
+        modified: string;
+        path: string;
+      }>;
+      count?: number;
+    }>;
     archiveGatewayFiles: (options: { olderThanDays: number; deleteAfterArchive?: boolean }) => Promise<{
       success: boolean;
       error?: string;
