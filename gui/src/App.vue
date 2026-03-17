@@ -1307,6 +1307,26 @@ async function runForecast() {
         demandArgs.push('--push');
       }
 
+      // Add zone/region scaling from config
+      if (globalConfig.value?.demand?.scaling?.zones) {
+        const zoneScales = Object.entries(globalConfig.value.demand.scaling.zones as Record<string, number>)
+          .filter(([_, scale]) => scale !== 0)
+          .map(([zone, scale]) => `${zone}:${scale}`)
+          .join(',');
+        if (zoneScales) {
+          demandArgs.push('--scale-zone', zoneScales);
+        }
+      }
+      if (globalConfig.value?.demand?.scaling?.regions) {
+        const regionScales = Object.entries(globalConfig.value.demand.scaling.regions as Record<string, number>)
+          .filter(([_, scale]) => scale !== 0)
+          .map(([region, scale]) => `${region}:${scale}`)
+          .join(',');
+        if (regionScales) {
+          demandArgs.push('--scale-region', regionScales);
+        }
+      }
+
       const demandResult = await window.electronAPI.runCommand(demandArgs);
       completedSteps++;
       progress.value = (completedSteps / totalSteps) * 90;
@@ -2363,6 +2383,98 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
                 <div class="form-group compact">
                   <label>Training Cutoff</label>
                   <input type="date" v-model="trainingEndDate" :disabled="isRunning" placeholder="Optional" style="width: 130px;" />
+                </div>
+              </div>
+
+              <!-- Zone Scaling Section (Manual Forecast) -->
+              <div v-if="enableDemand" class="zone-scaling-section" style="margin-top: 12px;">
+                <div class="zone-scaling-header" @click="showZoneScaling = !showZoneScaling">
+                  <span class="collapse-icon">{{ showZoneScaling ? '▼' : '▶' }}</span>
+                  <span>Zone Scaling</span>
+                  <span v-if="hasAnyZoneScales()" class="zone-scale-indicator">●</span>
+                </div>
+                <div v-if="showZoneScaling" class="zone-scaling-content">
+                  <p class="hint" style="margin-bottom: 8px;">Adjust forecasts for specific zones or regions (%)</p>
+
+                  <!-- Region scales -->
+                  <div class="zone-scale-group">
+                    <div class="zone-scale-group-header">Regions</div>
+                    <div class="zone-scale-row" v-for="region in ALL_REGIONS" :key="'manual-' + region">
+                      <label class="zone-label">{{ region }}</label>
+                      <input
+                        type="number"
+                        class="zone-scale-input"
+                        :value="getRegionScale(region)"
+                        @change="(e: Event) => { setRegionScale(region, parseFloat((e.target as HTMLInputElement).value) || 0); saveGlobalConfig(); }"
+                        placeholder="0"
+                        min="-50"
+                        max="50"
+                        step="0.5"
+                        :disabled="isRunning"
+                      />
+                      <span class="zone-scale-unit">%</span>
+                    </div>
+                  </div>
+
+                  <!-- Luzon zones -->
+                  <div class="zone-scale-group">
+                    <div class="zone-scale-group-header">Luzon Zones</div>
+                    <div class="zone-scale-row" v-for="zone in ALL_ZONES.filter(z => ZONE_TO_REGION[z] === 'CLUZ')" :key="'manual-' + zone">
+                      <label class="zone-label">{{ zone }}</label>
+                      <input
+                        type="number"
+                        class="zone-scale-input"
+                        :value="getZoneScale(zone)"
+                        @change="(e: Event) => { setZoneScale(zone, parseFloat((e.target as HTMLInputElement).value) || 0); saveGlobalConfig(); }"
+                        placeholder="0"
+                        min="-50"
+                        max="50"
+                        step="0.5"
+                        :disabled="isRunning"
+                      />
+                      <span class="zone-scale-unit">%</span>
+                    </div>
+                  </div>
+
+                  <!-- Visayas zones -->
+                  <div class="zone-scale-group">
+                    <div class="zone-scale-group-header">Visayas Zones</div>
+                    <div class="zone-scale-row" v-for="zone in ALL_ZONES.filter(z => ZONE_TO_REGION[z] === 'CVIS')" :key="'manual-' + zone">
+                      <label class="zone-label">{{ zone }}</label>
+                      <input
+                        type="number"
+                        class="zone-scale-input"
+                        :value="getZoneScale(zone)"
+                        @change="(e: Event) => { setZoneScale(zone, parseFloat((e.target as HTMLInputElement).value) || 0); saveGlobalConfig(); }"
+                        placeholder="0"
+                        min="-50"
+                        max="50"
+                        step="0.5"
+                        :disabled="isRunning"
+                      />
+                      <span class="zone-scale-unit">%</span>
+                    </div>
+                  </div>
+
+                  <!-- Mindanao zones -->
+                  <div class="zone-scale-group">
+                    <div class="zone-scale-group-header">Mindanao Zones</div>
+                    <div class="zone-scale-row" v-for="zone in ALL_ZONES.filter(z => ZONE_TO_REGION[z] === 'CMIN')" :key="'manual-' + zone">
+                      <label class="zone-label">{{ zone }}</label>
+                      <input
+                        type="number"
+                        class="zone-scale-input"
+                        :value="getZoneScale(zone)"
+                        @change="(e: Event) => { setZoneScale(zone, parseFloat((e.target as HTMLInputElement).value) || 0); saveGlobalConfig(); }"
+                        placeholder="0"
+                        min="-50"
+                        max="50"
+                        step="0.5"
+                        :disabled="isRunning"
+                      />
+                      <span class="zone-scale-unit">%</span>
+                    </div>
+                  </div>
                 </div>
               </div>
             </section>
