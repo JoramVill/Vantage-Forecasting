@@ -12,6 +12,7 @@ import { RegressionModel } from './models/regressionModel.js';
 import { XGBoostModel } from './models/xgboostModel.js';
 import { HybridModel } from './models/hybridModel.js';
 import { DemandCalibrator } from './models/DemandCalibrator.js';
+import { IterativeScalingCalibrator } from './models/IterativeScalingCalibrator.js';
 import { writeForecastCsv, writeModelReport, writeMetricsSummary } from './writers/index.js';
 import { REGION_MAPPINGS, isPhilippineHoliday } from './constants/index.js';
 import { ForecastResult, TrainingSample, RawWeatherData } from './types/index.js';
@@ -45,8 +46,13 @@ import { mergeZonalData, MergedRecord } from './utils/index.js';
 import { extractZonalFeatures } from './features/featureEngineering.js';
 import { ZONAL_LOCATIONS, getZonalLocationsByZone, WeatherService } from './services/index.js';
 import { getZonalDatabase, closeZonalDatabase } from './database/index.js';
-import { loadZonalConfig, getZoneCodes } from './constants/index.js';
+import { loadZonalConfig, getZoneCodes, getZoneToRegionMap } from './constants/index.js';
 import { ZonalMergedRecord } from './types/index.js';
+import { createModelsCommand } from './commands/models.js';
+import { CFACCalibrationService } from './services/cfacCalibrationService.js';
+import type { CFACCalibrationState } from './types/cfacCalibration.js';
+import { getModelById, getActiveModel } from './services/modelStore.js';
+import { saveDemandModel, TrainingResult } from './services/forecastGenerator.js';
 
 // Default API key (can be overridden by env or config)
 const DEFAULT_API_KEY = 'BJYBHG8K3YS8EFK46233M8L75';
@@ -69,12 +75,14 @@ function getApiKey(): string {
   return DEFAULT_API_KEY;
 }
 
-// Zone to parent region mapping
-const ZONE_TO_REGION: Record<string, string> = {
-  '01NLUZ': 'CLUZ', '02METRO': 'CLUZ', '03SLUZ': 'CLUZ',
-  '04LEYTE': 'CVIS', '05CEBU': 'CVIS', '06NEGROS': 'CVIS', '07BOHOL': 'CVIS', '08PANAY': 'CVIS',
-  '09NWMIN': 'CMIN', '10LANAO': 'CMIN', '11NCMIN': 'CMIN', '12NEMIN': 'CMIN', '13SEMIN': 'CMIN', '14SWMIN': 'CMIN'
-};
+// Zone to parent region mapping - loaded from zones.json config
+let _zoneToRegionCache: Record<string, string> | null = null;
+function getZONE_TO_REGION(): Record<string, string> {
+  if (!_zoneToRegionCache) {
+    _zoneToRegionCache = getZoneToRegionMap();
+  }
+  return _zoneToRegionCache;
+}
 
 /**
  * Parse zone/region scaling string into a Map
@@ -100,7 +108,8 @@ function parseScaleString(scaleStr: string | undefined): Map<string, number> {
  * Get parent region for a zone code
  */
 function getParentRegion(zoneOrRegion: string): string {
-  return ZONE_TO_REGION[zoneOrRegion.toUpperCase()] || zoneOrRegion.toUpperCase();
+  const zoneToRegion = getZONE_TO_REGION();
+  return zoneToRegion[zoneOrRegion.toUpperCase()] || zoneOrRegion.toUpperCase();
 }
 
 /**
@@ -230,51 +239,243 @@ async function runZonalForecast(options: any): Promise<void> {
     process.exit(1);
   }
 
-  // Train HybridModel on 14 zones
-  console.log(`\n🎯 Training hybrid model on ${zones.length} zones...`);
-  const growthRate = parseFloat(options.growth) / 100;
-  const model = new HybridModel({ growthFactor: growthRate, recentDaysCount: 7 });
-  const result = await model.train(samples);
-  console.log(`  R² = ${result.r2Score.toFixed(4)}, MAPE = ${result.mape.toFixed(2)}%`);
+  // Either load saved model or train new one
+  let model: HybridModel;
+  let usedSavedModel = false;
 
-  // Learn dynamic weekend corrections for zones
-  console.log('\n📊 Learning weekend correction factors...');
-  const predictionData = samples.map(s => ({
-    datetime: s.datetime,
-    region: s.region,
-    demand: s.demand,
-    predictedDemand: model.predictForRegion(s.features, s.region) || s.demand
-  }));
-  model.learnWeekendCorrections(predictionData);
-
-  // Train XGBoost calibrator for hybrid model corrections (unless disabled)
-  if (options.calibrate !== false) {
-    if (options.loadCalibrator) {
-      // Load existing calibrator
-      console.log(`\n🔧 Loading calibrator from ${options.loadCalibrator}...`);
-      const calibrator = DemandCalibrator.load(options.loadCalibrator);
-      model.setCalibrator(calibrator);
-      const metrics = calibrator.getMetrics();
-      console.log(`  ✅ Calibrator loaded: Val MAPE=${metrics?.validationMAPE?.toFixed(2) || 'N/A'}%`);
-    } else {
-      // Train new calibrator
-      console.log('\n🔧 Training XGBoost calibrator...');
-      const calibrator = new DemandCalibrator();
-      const calibratorMetrics = await calibrator.train(
-        samples,
-        (sample: TrainingSample) => model.predictForRegion(sample.features, sample.region) || sample.demand
-      );
-      model.setCalibrator(calibrator);
-      console.log(`  ✅ Calibrator trained: Val MAPE=${calibratorMetrics.validationMAPE.toFixed(2)}%`);
-
-      // Save if requested
-      if (options.saveCalibrator) {
-        calibrator.save(options.saveCalibrator);
-        console.log(`  💾 Calibrator saved to ${options.saveCalibrator}`);
+  if (options.useModel) {
+    // Load saved model from model store
+    console.log(`\n💾 Loading saved model: ${options.useModel}...`);
+    try {
+      const savedModel = getModelById(options.useModel);
+      if (!savedModel) {
+        console.error(`❌ Model not found: ${options.useModel}`);
+        console.error('   Run "node dist/index.js models list" to see available models');
+        process.exit(1);
       }
+
+      // Restore HybridModel from saved state
+      model = HybridModel.fromJSON(savedModel.modelData.data);
+      usedSavedModel = true;
+
+      console.log(`  ✅ Model loaded: ${savedModel.metadata.entityCode} v${savedModel.metadata.version}`);
+      console.log(`  📅 Trained: ${savedModel.metadata.trainedAt}`);
+      console.log(`  📊 Training MAPE: ${savedModel.metrics.mape?.toFixed(2) || 'N/A'}%`);
+      console.log(`  ⚡ Skipping training - using pre-trained model`);
+    } catch (error: any) {
+      console.error(`❌ Failed to load model: ${error.message}`);
+      process.exit(1);
     }
   } else {
-    console.log('\n🔧 XGBoost calibration disabled (using hybrid model only)');
+    // Train HybridModel on 14 zones
+    console.log(`\n🎯 Training hybrid model on ${zones.length} zones...`);
+    const growthRate = parseFloat(options.growth) / 100;
+    model = new HybridModel({ growthFactor: growthRate, recentDaysCount: 7 });
+    const result = await model.train(samples);
+    console.log(`  R² = ${result.r2Score.toFixed(4)}, MAPE = ${result.mape.toFixed(2)}%`);
+
+    // Learn dynamic weekend corrections for zones
+    console.log('\n📊 Learning weekend correction factors...');
+    const predictionData = samples.map(s => ({
+      datetime: s.datetime,
+      region: s.region,
+      demand: s.demand,
+      predictedDemand: model.predictForRegion(s.features, s.region) || s.demand
+    }));
+    model.learnWeekendCorrections(predictionData);
+
+    // Determine calibration mode from global config or CLI options
+    const configService = getConfigService();
+    const calibConfig = configService.get()?.calibration;
+    const calibrationMode = options.calibrate === false ? 'none' : (calibConfig?.mode || 'hybrid');
+    const quantileAlpha = calibConfig?.quantileAlpha ?? 0.80;
+    const enableZoneScaling = calibConfig?.enableZoneScaling ?? true;
+
+    // Track calibration results for model saving
+    let calibrationInfo: {
+      mode: 'hybrid' | 'iterative' | 'xgboost' | 'none';
+      quantileAlpha?: number;
+      enableZoneScaling?: boolean;
+      pass1?: { peakScale: number; offpeakScale: number; zoneScales?: Record<string, number>; converged: boolean; iterations: number };
+      pass2?: { trainMAPE: number; validationMAPE: number; alpha: number };
+    } = { mode: calibrationMode as 'hybrid' | 'iterative' | 'xgboost' | 'none' };
+
+    // Train calibrators based on mode
+    if (calibrationMode !== 'none') {
+      calibrationInfo.quantileAlpha = quantileAlpha;
+      calibrationInfo.enableZoneScaling = enableZoneScaling;
+
+      if (options.loadCalibrator) {
+        // Load existing calibrator (legacy XGBoost only)
+        console.log(`\n🔧 Loading calibrator from ${options.loadCalibrator}...`);
+        const calibrator = DemandCalibrator.load(options.loadCalibrator);
+        model.setCalibrator(calibrator);
+        const metrics = calibrator.getMetrics();
+        console.log(`  ✅ Calibrator loaded: Val MAPE=${metrics?.validationMAPE?.toFixed(2) || 'N/A'}%`);
+        if (metrics) {
+          calibrationInfo.pass2 = { trainMAPE: metrics.trainMAPE, validationMAPE: metrics.validationMAPE, alpha: quantileAlpha };
+        }
+      } else {
+        // Train new calibrators based on mode
+        console.log(`\n🔧 Calibration mode: ${calibrationMode.toUpperCase()}`);
+
+        // Pass 1: Iterative Scaling (for hybrid or iterative modes)
+        if (calibrationMode === 'hybrid' || calibrationMode === 'iterative') {
+          console.log('\n  📊 Pass 1: Training iterative scaling calibrator...');
+          const iterativeCalibrator = new IterativeScalingCalibrator();
+
+          // Generate predictions for all samples to compare with actuals
+          const forecastData = samples.map(s => ({
+            DateTimeEnding: s.datetime.toISOString(),
+            [s.region]: model.predictForRegion(s.features, s.region) || s.demand
+          }));
+
+          // Build aggregated forecast data by timestamp
+          const aggregatedForecast: Record<string, any> = {};
+          for (const row of forecastData) {
+            const key = row.DateTimeEnding;
+            if (!aggregatedForecast[key]) {
+              aggregatedForecast[key] = { DateTimeEnding: key };
+            }
+            Object.assign(aggregatedForecast[key], row);
+          }
+          const forecastDataArray = Object.values(aggregatedForecast);
+
+          // Build actual data in same format
+          const actualData = samples.map(s => ({
+            DateTimeEnding: s.datetime.toISOString(),
+            [s.region]: s.demand
+          }));
+
+          // Aggregate actual data by timestamp
+          const aggregatedActual: Record<string, any> = {};
+          for (const row of actualData) {
+            const key = row.DateTimeEnding;
+            if (!aggregatedActual[key]) {
+              aggregatedActual[key] = { DateTimeEnding: key };
+            }
+            Object.assign(aggregatedActual[key], row);
+          }
+          const actualDataArray = Object.values(aggregatedActual);
+
+          // Analyze deviation and train
+          const analysis = iterativeCalibrator.analyzeDeviation(forecastDataArray, actualDataArray);
+          iterativeCalibrator.trainFromAnalysis(analysis, {
+            start: trainStart,
+            end: trainEnd
+          }, { enableZoneScaling });
+
+          const iterResult = iterativeCalibrator.getResult();
+          if (iterResult) {
+            model.setIterativeCalibrator(iterativeCalibrator);
+            console.log(`  ✅ Pass 1 trained: Peak ${iterResult.factors.peakScale >= 0 ? '+' : ''}${iterResult.factors.peakScale.toFixed(1)}%, Off-peak ${iterResult.factors.offpeakScale >= 0 ? '+' : ''}${iterResult.factors.offpeakScale.toFixed(1)}%`);
+            // Capture Pass 1 results
+            calibrationInfo.pass1 = {
+              peakScale: iterResult.factors.peakScale,
+              offpeakScale: iterResult.factors.offpeakScale,
+              zoneScales: iterResult.factors.zoneScales,
+              converged: iterResult.converged,
+              iterations: iterResult.iterations
+            };
+          }
+        }
+
+        // Pass 2: XGBoost (for hybrid or xgboost modes)
+        if (calibrationMode === 'hybrid' || calibrationMode === 'xgboost') {
+          console.log(`\n  📊 Pass 2: Training XGBoost calibrator (α=${quantileAlpha})...`);
+          const calibrator = new DemandCalibrator({ alpha: quantileAlpha });
+
+          // For hybrid mode, use scaled predictions; otherwise use raw predictions
+          const predictor = (sample: TrainingSample) => {
+            let prediction = model.predictForRegion(sample.features, sample.region) || sample.demand;
+            // If hybrid mode and iterative calibrator exists, apply Pass 1 scaling
+            if (calibrationMode === 'hybrid' && model.hasIterativeCalibrator()) {
+              const hour = sample.datetime?.getHours() ?? sample.features?.hour ?? 12;
+              prediction = model.applyIterativeScaling(prediction, hour, sample.region);
+            }
+            return prediction;
+          };
+
+          const calibratorMetrics = await calibrator.train(samples, predictor, {
+            alpha: quantileAlpha
+          });
+          model.setCalibrator(calibrator);
+          console.log(`  ✅ Pass 2 trained: Val MAPE=${calibratorMetrics.validationMAPE.toFixed(2)}%`);
+          // Capture Pass 2 results
+          calibrationInfo.pass2 = {
+            trainMAPE: calibratorMetrics.trainMAPE,
+            validationMAPE: calibratorMetrics.validationMAPE,
+            alpha: quantileAlpha
+          };
+
+          // Save if requested
+          if (options.saveCalibrator) {
+            calibrator.save(options.saveCalibrator);
+            console.log(`  💾 Calibrator saved to ${options.saveCalibrator}`);
+          }
+        }
+      }
+    } else {
+      console.log('\n🔧 Calibration disabled (using hybrid model only)');
+    }
+
+    // Save model to model store if requested
+    if (options.saveModel) {
+      console.log('\n💾 Saving trained model to model store...');
+      try {
+        // Generate model name if not provided
+        const modelName = options.modelName || `Zonal ${DateTime.now().toFormat('yyyy-MM-dd HH:mm')}`;
+
+        // Calculate per-zone MAPE for detailed metrics
+        const perZoneMape: Record<string, number> = {};
+        for (const zone of zones) {
+          const zoneSamples = samples.filter(s => s.region === zone);
+          if (zoneSamples.length > 0) {
+            let totalError = 0;
+            let count = 0;
+            for (const sample of zoneSamples) {
+              const predicted = model.predictForRegion(sample.features, zone);
+              if (predicted && sample.demand > 0) {
+                totalError += Math.abs((predicted - sample.demand) / sample.demand);
+                count++;
+              }
+            }
+            perZoneMape[zone] = count > 0 ? (totalError / count) * 100 : 0;
+          }
+        }
+
+        console.log('  📊 Per-zone MAPE:');
+        for (const [zone, mape] of Object.entries(perZoneMape).sort((a, b) => a[0].localeCompare(b[0]))) {
+          console.log(`     ${zone}: ${mape.toFixed(2)}%`);
+        }
+
+        const savedModelResult: TrainingResult = {
+          mape: result.mape,
+          rmse: 0, // Not available in zonal training result
+          mae: 0,  // Not available in zonal training result
+          r2Score: result.r2Score,
+          bias: 0,
+          sampleCount: samples.length,
+          trainingStart: trainStart,
+          trainingEnd: trainEnd,
+          calibration: calibrationMode !== 'none' ? calibrationInfo : undefined,
+          perZoneMape, // Include per-zone breakdown
+        };
+        const modelId = saveDemandModel(
+          model,
+          'zonal',
+          'all_zones',
+          savedModelResult,
+          false,
+          modelName
+        );
+        console.log(`  ✅ Model saved: ${modelId}`);
+        console.log(`  📛 Name: ${modelName}`);
+        console.log(`  📌 Use --use-model ${modelId} to load this model in future runs`);
+      } catch (error: any) {
+        console.error(`  ⚠️ Failed to save model: ${error.message}`);
+      }
+    }
   }
 
   // Fetch weather for forecast period
@@ -493,9 +694,9 @@ async function runZonalForecast(options: any): Promise<void> {
 
       const hybridPrediction = model.predictForRegion(features, region, daysAhead);
 
-      // Apply calibration if available
+      // Apply calibration if available (supports hybrid: Pass 1 + Pass 2)
       let calibratedPrediction = hybridPrediction ?? lastKnownDemand.get(region)?.value ?? 0;
-      if (model.hasCalibrator() && hybridPrediction !== undefined) {
+      if ((model.hasCalibrator() || model.hasIterativeCalibrator()) && hybridPrediction !== undefined) {
         // Create sample for calibration
         const calibrationSample: TrainingSample = {
           datetime,
@@ -503,7 +704,8 @@ async function runZonalForecast(options: any): Promise<void> {
           demand: 0, // Not used for calibration prediction
           features
         };
-        calibratedPrediction = model.applyCalibration(hybridPrediction, calibrationSample);
+        // Use hybrid calibration (Pass 1 + Pass 2) if both available
+        calibratedPrediction = model.applyHybridCalibration(hybridPrediction, calibrationSample, region);
       }
       const prediction = calibratedPrediction * getScaleFactor(datetime, region);
 
@@ -707,6 +909,9 @@ program
   .option('--no-calibrate', 'Disable XGBoost calibration layer (uses hybrid model only)')
   .option('--save-calibrator <path>', 'Save trained calibrator model to file')
   .option('--load-calibrator <path>', 'Load calibrator model from file (skips training)')
+  .option('--use-model <id>', 'Use saved trained model from model store (skips training)')
+  .option('--save-model', 'Save trained model to model store after training (hybrid models only)')
+  .option('--model-name <name>', 'Name for saved model (used with --save-model)')
   .option('--push', 'Push generated forecast to Vantage-Gateway server')
   .option('--horizons <type>', 'Forecast horizons: daily, weekly, or both (generates multiple outputs from single training)', 'daily')
   .action(async (options) => {
@@ -789,7 +994,30 @@ program
       let model: RegressionModel | XGBoostModel | HybridModel = new RegressionModel(); // Initialize to avoid TS error
       let usedSavedModel = false;
 
-      if (options.useSaved && options.model === 'regression') {
+      if (options.useModel) {
+        // Load saved model from model store (hybrid models only)
+        console.log(`\n💾 Loading saved model: ${options.useModel}...`);
+        try {
+          const savedModel = getModelById(options.useModel);
+          if (!savedModel) {
+            console.error(`❌ Model not found: ${options.useModel}`);
+            console.error('   Run "node dist/index.js models list" to see available models');
+            process.exit(1);
+          }
+
+          // Restore HybridModel from saved state
+          model = HybridModel.fromJSON(savedModel.modelData.data);
+          usedSavedModel = true;
+
+          console.log(`  ✅ Model loaded: ${savedModel.metadata.entityCode} v${savedModel.metadata.version}`);
+          console.log(`  📅 Trained: ${savedModel.metadata.trainedAt}`);
+          console.log(`  📊 Training MAPE: ${savedModel.metrics.mape?.toFixed(2) || 'N/A'}%`);
+          console.log(`  ⚡ Skipping training - using pre-trained model`);
+        } catch (error: any) {
+          console.error(`❌ Failed to load model: ${error.message}`);
+          process.exit(1);
+        }
+      } else if (options.useSaved && options.model === 'regression') {
         // Try to load saved model from database
         console.log('\n💾 Loading saved model from database...');
         try {
@@ -816,24 +1044,86 @@ program
         }
       }
 
+      let trainingResult: { r2Score: number; mape: number; rmse?: number; mae?: number } | null = null;
+
       if (!usedSavedModel) {
         console.log(`\n🎯 Training ${options.model} model...`);
         if (options.model === 'regression') {
           model = new RegressionModel();
-          const result = (model as RegressionModel).train(samples);
-          console.log(`  R² = ${result.r2Score.toFixed(4)}, MAPE = ${result.mape.toFixed(2)}%`);
+          trainingResult = (model as RegressionModel).train(samples);
+          console.log(`  R² = ${trainingResult.r2Score.toFixed(4)}, MAPE = ${trainingResult.mape.toFixed(2)}%`);
         } else if (options.model === 'hybrid') {
           const growthRate = parseFloat(options.growth) / 100; // Convert percent to decimal
           model = new HybridModel({ growthFactor: growthRate, recentDaysCount: 7 });
-          const result = await (model as HybridModel).train(samples);
-          console.log(`  R² = ${result.r2Score.toFixed(4)}, MAPE = ${result.mape.toFixed(2)}%`);
+          trainingResult = await (model as HybridModel).train(samples);
+          console.log(`  R² = ${trainingResult.r2Score.toFixed(4)}, MAPE = ${trainingResult.mape.toFixed(2)}%`);
           if (growthRate > 0) {
             console.log(`  📈 Growth factor: ${(growthRate * 100).toFixed(4)}% per day`);
           }
         } else {
           model = new XGBoostModel();
-          const result = await (model as XGBoostModel).train(samples);
-          console.log(`  R² = ${result.r2Score.toFixed(4)}, MAPE = ${result.mape.toFixed(2)}%`);
+          trainingResult = await (model as XGBoostModel).train(samples);
+          console.log(`  R² = ${trainingResult.r2Score.toFixed(4)}, MAPE = ${trainingResult.mape.toFixed(2)}%`);
+        }
+
+        // Save model to model store if requested
+        if (options.saveModel && options.model === 'hybrid' && model instanceof HybridModel) {
+          console.log('\n💾 Saving trained model to model store...');
+          try {
+            // Generate model name if not provided
+            const modelName = options.modelName || `Regional ${DateTime.now().toFormat('yyyy-MM-dd HH:mm')}`;
+
+            // Calculate per-region MAPE for detailed metrics
+            const regions = [...new Set(samples.map(s => s.region))];
+            const perRegionMape: Record<string, number> = {};
+            for (const region of regions) {
+              const regionSamples = samples.filter(s => s.region === region);
+              if (regionSamples.length > 0) {
+                let totalError = 0;
+                let count = 0;
+                for (const sample of regionSamples) {
+                  const predicted = model.predictForRegion(sample.features, region);
+                  if (predicted && sample.demand > 0) {
+                    totalError += Math.abs((predicted - sample.demand) / sample.demand);
+                    count++;
+                  }
+                }
+                perRegionMape[region] = count > 0 ? (totalError / count) * 100 : 0;
+              }
+            }
+
+            console.log('  📊 Per-region MAPE:');
+            for (const [region, mape] of Object.entries(perRegionMape).sort((a, b) => a[0].localeCompare(b[0]))) {
+              console.log(`     ${region}: ${mape.toFixed(2)}%`);
+            }
+
+            const savedModelResult: TrainingResult = {
+              mape: trainingResult.mape,
+              rmse: trainingResult.rmse || 0,
+              mae: trainingResult.mae || 0,
+              r2Score: trainingResult.r2Score,
+              bias: 0,
+              sampleCount: samples.length,
+              trainingStart: trainStart,
+              trainingEnd: trainEnd,
+              perRegionMape, // Include per-region breakdown
+            };
+            const modelId = saveDemandModel(
+              model,
+              'regional',
+              'all_regions',
+              savedModelResult,
+              false,
+              modelName
+            );
+            console.log(`  ✅ Model saved: ${modelId}`);
+            console.log(`  📛 Name: ${modelName}`);
+            console.log(`  📌 Use --use-model ${modelId} to load this model in future runs`);
+          } catch (error: any) {
+            console.error(`  ⚠️ Failed to save model: ${error.message}`);
+          }
+        } else if (options.saveModel && options.model !== 'hybrid') {
+          console.warn('  ⚠️ --save-model only supports hybrid models');
         }
       }
 
@@ -1919,6 +2209,7 @@ cfacCommand
   .option('--push', 'Push generated forecast to Vantage-Gateway server')
   .option('--weather-refresh-mode <mode>', 'Weather refresh mode: cache (no downloads), refresh (smart), force-refresh (always download)', 'refresh')
   .option('--horizons <type>', 'Forecast horizons: daily, weekly, or both (generates multiple outputs from single training)', 'daily')
+  .option('--use-calibration <id>', 'Use saved calibration instead of training fresh')
   // NOTE: LSTM model option removed from production - experimental only via direct code modification
   .action(async (options) => {
     try {
@@ -1985,6 +2276,54 @@ cfacCommand
       // Per-station scale factors for OTHER stations (hydro, geothermal, etc.)
       // Key: stationCode, Value: scale factor (initialized to 1.0)
       const otherStationScale = new Map<string, number>();
+
+      // ═══════════════════════════════════════════════════════════════════════════
+      // LOAD SAVED CALIBRATION (if specified)
+      // ═══════════════════════════════════════════════════════════════════════════
+      let loadedCalibration: CFACCalibrationState | null = null;
+      let skipTraining = false;
+
+      if (options.useCalibration) {
+        const cfacCalibrationService = new CFACCalibrationService();
+        loadedCalibration = await cfacCalibrationService.loadCalibration(options.useCalibration);
+
+        if (loadedCalibration) {
+          console.log(`\n📂 Loading saved calibration: ${options.useCalibration}`);
+          console.log(`   Training period: ${loadedCalibration.trainingPeriod.start} to ${loadedCalibration.trainingPeriod.end}`);
+          console.log(`   Wind MAPE: ${loadedCalibration.trainingMetrics.windMAPE.toFixed(1)}%`);
+          console.log(`   Solar MAPE: ${loadedCalibration.trainingMetrics.solarMAPE.toFixed(1)}%`);
+
+          // Apply loaded global factors
+          effectiveWindScale = loadedCalibration.globalFactors.windBias;
+          effectiveSolarScale = loadedCalibration.globalFactors.solarBias;
+          effectiveOtherScale = loadedCalibration.globalFactors.otherBias;
+
+          // Apply loaded hourly solar scales
+          for (const [hourStr, scale] of Object.entries(loadedCalibration.solarHourlyScale)) {
+            solarHourlyScale.set(parseInt(hourStr), scale);
+          }
+
+          // Apply loaded per-station wind scales
+          for (const [station, scale] of Object.entries(loadedCalibration.stationScales.wind)) {
+            windStationScale.set(station, scale);
+          }
+
+          // Apply loaded per-station solar scales
+          for (const [station, scale] of Object.entries(loadedCalibration.stationScales.solar)) {
+            solarStationScale.set(station, scale);
+          }
+
+          // Apply loaded per-station other scales
+          for (const [station, scale] of Object.entries(loadedCalibration.stationScales.other)) {
+            otherStationScale.set(station, scale);
+          }
+
+          console.log(`   ✅ Loaded calibration applied (global + per-station + hourly)`);
+          skipTraining = true;  // Skip training, just use loaded calibration
+        } else {
+          console.log(`\n⚠️  Calibration ${options.useCalibration} not found, training fresh`);
+        }
+      }
 
       console.log('\n═══════════════════════════════════════════════════════════════════════════════');
       console.log('          OPTIMAL CAPACITY FACTOR FORECASTING (v2)                              ');
@@ -2170,10 +2509,10 @@ cfacCommand
             // Wind and Geothermal should never be zero when operating
             filteredRecords = records.filter(r => r.capacityFactor > 0);
           } else if (stationType === StationType.SOLAR) {
-            // Solar: only filter daytime zeros (6am-6pm local time)
+            // Solar: only filter daytime zeros (5am-7pm local time for seasonal variation)
             filteredRecords = records.filter(r => {
               const hour = r.datetime.getHours();
-              const isDaylight = hour >= 6 && hour <= 18;
+              const isDaylight = hour >= 5 && hour <= 19;
               // Keep nighttime zeros, but filter daytime zeros
               if (!isDaylight) return true;  // Keep nighttime records
               return r.capacityFactor > 0;   // Filter daytime zeros
@@ -2560,12 +2899,12 @@ cfacCommand
             const physicsModel = new SolarIrradianceModel();
             solarPhysicsModels.set(stationCode, physicsModel);
 
-            // Calculate bias from training data (daylight hours only)
+            // Calculate bias from training data (daylight hours only, 5 AM to 7 PM for seasonal variation)
             let biasSum = 0;
             let biasCount = 0;
             for (const sample of stationSamples) {
               const hour = sample.datetime.getHours();
-              if (hour < 6 || hour > 18) continue;
+              if (hour < 5 || hour > 19) continue;
               if (sample.actualCFac < 0.01) continue;
 
               const physicsPred = physicsModel.predict(sample.weather.solarRadiation, sample.weather.temperature);
@@ -3099,8 +3438,8 @@ cfacCommand
               const datetime = new Date(ts);
               const hour = datetime.getHours();
 
-              // Only daylight hours (6-18) are meaningful for solar
-              if (hour < 6 || hour > 18) continue;
+              // Only daylight hours (5-19) are meaningful for solar (seasonal variation)
+              if (hour < 5 || hour > 19) continue;
 
               let rawPrediction: number;
 
@@ -3231,6 +3570,83 @@ cfacCommand
           }
           console.log(`      Calibrated ${otherCalibrated} stations with sufficient samples`);
         }
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════════
+      // SAVE CALIBRATION (if training was fresh and not loaded)
+      // ═══════════════════════════════════════════════════════════════════════════
+
+      if (!loadedCalibration && autoCalibrate) {
+        console.log('\n💾 Saving calibration state...');
+        const cfacCalibrationService = new CFACCalibrationService();
+
+        // Extract MREC factors from models
+        const windMRECFactors: Record<string, any> = {};
+        if (wind4Tier && wind4TierModels) {
+          for (const [stationCode, model] of wind4TierModels) {
+            windMRECFactors[stationCode] = {
+              stationCode,
+              vL: 0,  // TODO: Extract from model if available
+              vH: 0,
+              tL: 0,
+              tH: 0,
+              calibrated: true
+            };
+          }
+        } else if (windHybridModels) {
+          for (const [stationCode] of windHybridModels) {
+            windMRECFactors[stationCode] = {
+              stationCode,
+              vL: 0,
+              vH: 0,
+              tL: 0,
+              tH: 0,
+              calibrated: true
+            };
+          }
+        }
+
+        // Calculate training metrics (use calibration metrics as proxy)
+        const windMAPE = calibratedWindBias ? Math.abs(calibratedWindBias * 100) : 0;
+        const solarMAPE = calibratedSolarBias ? Math.abs(calibratedSolarBias * 100) : 0;
+
+        const calibrationState: CFACCalibrationState = {
+          id: '',  // Will be generated by service
+          createdAt: new Date().toISOString(),
+          trainingPeriod: {
+            start: calibrationStartDate.toISODate() || '',
+            end: calibrationEndDate.toISODate() || ''
+          },
+          config: {
+            useXgboost: useXGBoost,
+            asymmetricLoss,
+            biasCorrection: options.biasCorrection || false,
+            autoCalibrateDays: calibrationDays,
+            excludeOutages
+          },
+          globalFactors: {
+            windBias: effectiveWindScale,
+            solarBias: effectiveSolarScale,
+            otherBias: effectiveOtherScale
+          },
+          solarHourlyScale: Object.fromEntries(solarHourlyScale),
+          windMRECFactors,
+          stationScales: {
+            wind: Object.fromEntries(windStationScale),
+            solar: Object.fromEntries(solarStationScale),
+            other: Object.fromEntries(otherStationScale)
+          },
+          trainingMetrics: {
+            windMAPE,
+            solarMAPE,
+            stationCount: trainingStations.length,
+            trainingRecords: filteredCfacData.length
+          }
+        };
+
+        const savedId = await cfacCalibrationService.saveCalibration(calibrationState);
+        console.log(`   ✅ Calibration saved: ${savedId}`);
+        console.log(`   Use with: --use-calibration ${savedId}`);
       }
 
       // ═══════════════════════════════════════════════════════════════════════════
@@ -6310,9 +6726,9 @@ mrecCommand
           if (!weather) continue;
 
           const actual = record.capacityFactor;
-          // Only evaluate daylight hours with actual generation
+          // Only evaluate daylight hours with actual generation (5 AM to 7 PM for seasonal variation)
           const hour = record.datetime.getHours();
-          if (hour < 6 || hour > 18 || actual < 0.01) continue;
+          if (hour < 5 || hour > 19 || actual < 0.01) continue;
 
           const solarRadiation = weather.solarRadiation;
           const temperature = weather.temperature;
@@ -8522,6 +8938,7 @@ scheduler
   .option('--no-archive', 'Skip archiving')
   // Model loading options
   .option('--load-calibrator <path>', 'Load calibrator model from file (skips auto-training)')
+  .option('--use-model <id>', 'Use saved trained demand model from model store (skips training)')
   // Auto-calibration period options
   .option('--training-days <days>', 'Number of days for auto-calibration training period', '30')
   .action(async (options) => {
@@ -8543,10 +8960,13 @@ scheduler
         demandModel: options.demandModel,
         regionalDbPath: globalConfig.databases.regionalDemand,
         zonalDbPath: globalConfig.databases.zonalDemand,
+        // Zone/region scaling from config
+        zoneScales: globalConfig.demand?.scaling?.zones || {},
+        regionScales: globalConfig.demand?.scaling?.regions || {},
         // CFAC options
-        useXgboost: options.useXgboost || false,
-        asymmetricLoss: options.asymmetricLoss || false,
-        biasCorrection: options.biasCorrection || false,
+        useXgboost: globalConfig.cfac?.useXgboost || false,
+        asymmetricLoss: globalConfig.cfac?.asymmetricLoss || false,
+        biasCorrection: globalConfig.cfac?.biasCorrection || false,
         // Gateway push
         pushToGateway: options.pushGateway || false,
         // Database source options
@@ -8568,6 +8988,7 @@ scheduler
         horizon,
         verbose: true,
         loadCalibratorPath: options.loadCalibrator,
+        useModelId: options.useModel,
         trainingDays: parseInt(options.trainingDays) || 30,
         useCalibrationId: options.useCalibration ? parseInt(options.useCalibration) : undefined,
         useMostRecentCalibration: options.useSavedCalibration || false
@@ -8611,6 +9032,7 @@ scheduler
   .option('--training-days <days>', 'Number of days for auto-calibration training period', '30')
   // Model loading options
   .option('--load-calibrator <path>', 'Load calibrator model from file (skips auto-training)')
+  .option('--use-model <id>', 'Use saved trained demand model from model store (skips training)')
   // Output options
   .option('-v, --verbose', 'Show detailed progress for each date (default: true)')
   .option('-q, --quiet', 'Minimal output, only show errors and summary')
@@ -8638,6 +9060,13 @@ scheduler
         calibrationDays: parseInt(options.calibDays) || 7,
         pushToGateway: options.pushGateway || false,
         demandGeography: geographyOption as 'regional' | 'zonal' | 'both',
+        // Zone/region scaling from config
+        zoneScales: globalConfig.demand?.scaling?.zones || {},
+        regionScales: globalConfig.demand?.scaling?.regions || {},
+        // CFAC options from config
+        useXgboost: globalConfig.cfac?.useXgboost || false,
+        asymmetricLoss: globalConfig.cfac?.asymmetricLoss || false,
+        biasCorrection: globalConfig.cfac?.biasCorrection || false,
         // Database source options
         useDb: options.useDb || false,
         dataDbPath: options.dataDb,
@@ -8732,6 +9161,7 @@ scheduler
             verbose: !options.quiet && !showProgress && !summaryOnly,  // Suppress verbose if using progress bar or summary-only
             trainingDays: parseInt(options.trainingDays) || 30,
             loadCalibratorPath: options.loadCalibrator,
+            useModelId: options.useModel,
             suffix: options.suffix,
             overwrite: options.overwrite,
             useCalibrationId,
@@ -9892,5 +10322,8 @@ cacheCommand
       process.exit(1);
     }
   });
+
+// MODELS command - Model management
+program.addCommand(createModelsCommand());
 
 program.parse();

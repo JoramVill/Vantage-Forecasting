@@ -30,7 +30,7 @@ const forecastStart = ref('');
 const forecastEnd = ref('');
 
 // Tab navigation
-const activeTab = ref<'manual' | 'scheduler' | 'gateway' | 'settings'>('manual');
+const activeTab = ref<'manual' | 'scheduler' | 'gateway' | 'models' | 'settings'>('manual');
 
 // Forecast options
 const enableDemand = ref(true);
@@ -62,16 +62,13 @@ const demandModel = ref<'hybrid' | 'hybrid-calibrated'>('hybrid-calibrated'); //
 const pushToGateway = ref(false); // Push forecasts to Vantage-Gateway server
 const demandGrowthRate = ref(0); // Daily demand growth rate (e.g., 0.001 = 0.1%)
 const trainingEndDate = ref(''); // Optional training data cutoff date
+const modelName = ref(''); // Name for saved model (used with --save-model)
 
 // Scheduler state - OLD (legacy, not used by new scheduler tab)
 // const schedulerMode = ref<'run' | 'backfill'>('run');
 // const schedulerAsOfDate = ref('');
 // const schedulerStartDate = ref('');
 // const schedulerEndDate = ref('');
-const schedulerDailyEnabled = ref(true);
-const schedulerWeeklyEnabled = ref(true);
-const schedulerDemandEnabled = ref(true);
-const schedulerCfacEnabled = ref(true);
 const schedulerDemandGeography = ref<'regional' | 'zonal' | 'both'>('regional');
 const schedulerOutputDir = ref('output/forecasts');
 // Scheduler data source removed - now uses global settings
@@ -170,8 +167,6 @@ const gatewayConfig = ref<GatewayConfig>({
   username: 'vantage-upload',
   password: ''
 });
-const gatewayTestStatus = ref<'idle' | 'testing' | 'success' | 'error'>('idle');
-const gatewayTestMessage = ref('');
 
 // Gateway Storage Management
 interface StorageCategory {
@@ -220,6 +215,51 @@ const gatewayFileFilter = ref<{
   geography: string | null;
 }>({ type: null, category: null, geography: null });
 
+// ============ MODELS TAB STATE ============
+const trainingInstances = ref<any[]>([]);
+const modelsList = ref<any[]>([]);  // Models within selected instance
+const modelsLoading = ref(false);
+const modelsFilterEntityType = ref('');
+// const modelsFilterActive = ref(''); // Unused after redesign
+const selectedInstanceId = ref<string | null>(null);
+const selectedInstance = ref<any | null>(null);
+// Phase 1A: Search and filter
+const modelSearchQuery = ref('');
+const modelTypeFilter = ref<string>('all');
+// Phase 1B: Tabbed interface
+const instanceDetailTab = ref<'config' | 'calibration' | 'evaluation'>('config');
+// Phase 3: Active model management
+const showSetActiveMenu = ref(false);
+// Phase 4: Confirmation modals for Send to Scheduler workflow
+const showSchedulerConfirmModal = ref(false);
+const showManualConfirmModal = ref(false);
+const showSuccessMessage = ref(false);
+const successMessageText = ref('');
+// Backtest feature state
+const backtestDays = ref(14);
+const isBacktesting = ref(false);
+const backtestResults = ref<any>(null);
+// Model comparison feature state
+const comparisonMode = ref(false);
+const comparisonInstanceId = ref<string | null>(null);
+const comparisonInstance = ref<any | null>(null);
+// Unused after Models tab simplification
+// const selectedModelId = ref<string | null>(null);
+// const selectedModelDetails = ref<any | null>(null);
+// const modelDetailsLoading = ref(false);
+// const isReEvaluating = ref(false);
+// const comparisonModelDetails = ref<any | null>(null);
+
+// ============ MANUAL/SCHEDULER INSTANCE SELECTION ============
+const selectedTrainingInstanceId = ref<string | null>(null);  // For Manual Forecast tab
+const activeTrainingInstanceId = ref<string | null>(null);     // For Scheduler tab
+const showInstanceSelector = ref(false); // Modal for scheduler instance selection
+
+// ============ CFAC CALIBRATIONS STATE ============
+const cfacCalibrations = ref<any[]>([]);
+const selectedCalibration = ref<any | null>(null);
+const showCalibrationDetails = ref(false);
+
 const schedulerConfig = ref<SchedulerConfig>({
   enabled: false,
   runTimeMorning: '06:00',
@@ -240,13 +280,24 @@ const manualRunDate = ref('');
 const manualRunEndDate = ref(''); // Optional end date for backfill range
 const manualRunType = ref<'both' | 'demand' | 'cfac'>('both');
 const manualRunHorizon = ref<'both' | 'daily' | 'weekly'>('both');
-const schedulerCalibrationMode = ref<'auto' | 'saved' | 'reuse'>('auto'); // auto = calibrate on-the-fly, saved = use saved model, reuse = use saved calibration
-const schedulerSelectedCalibrator = ref<string>('');
-const schedulerCalibrationPeriod = ref<'14days' | '1month' | '2months' | '3months'>('1month'); // How much data to use for calibration
-const schedulerVerboseOutput = ref(true); // Show detailed progress in terminal (default: true)
+// Removed: old calibration mode - now using unified Training Instances
+// const schedulerCalibrationMode = ref<'auto' | 'saved' | 'reuse'>('auto');
+// const schedulerSelectedCalibrator = ref<string>('');
 const schedulerRefreshWeather = ref(false); // Force weather cache refresh
 const schedulerOverwrite = ref(false); // Overwrite existing forecasts (backfill mode)
 const schedulerSuffix = ref(''); // Custom suffix for backfill filenames
+
+// ============ MODEL SELECTION (for scheduler) ============
+// After UI unification: Training Instance selection replaces individual model dropdowns
+const useTrainedModels = ref(false); // Toggle: train fresh vs use saved models
+const defaultDemandModel = ref<string | null>(null); // Default demand model ID (used by setActiveTrainingInstance)
+const defaultCfacModel = ref<string | null>(null); // Default CFAC model ID (used by setActiveTrainingInstance)
+// Unused after UI unification - Training Instances include calibration automatically
+// const selectedCfacCalibrationId = ref<string | null>(null); // Selected CFAC calibration ID
+// const zoneModelOverrides = ref<Record<string, string>>({}); // Per-zone model overrides
+// const availableDemandModels = ref<Array<{ id: string; name: string; entityCode: string; mape?: number }>>([]);
+// const availableCfacModels = ref<Array<{ id: string; name: string; entityType: string; mape?: number }>>([]);
+// const showZoneModelOverrides = ref(false); // Collapsible zone override section
 
 // ============ GLOBAL CONFIG (forecast_config.json) ============
 // Global config from forecast_config.json
@@ -255,44 +306,127 @@ const configLoading = ref(false);
 const configSaveStatus = ref<'idle' | 'saving' | 'saved' | 'error'>('idle');
 const configDirty = ref(false);
 
-// Zone scaling UI state
-const showZoneScaling = ref(false);
-const ALL_ZONES = ['01NLUZ', '02METRO', '03SLUZ', '04LEYTE', '05CEBU', '06NEGROS', '07BOHOL', '08PANAY', '09NWMIN', '10LANAO', '11NCMIN', '12NEMIN', '13SEMIN', '14SWMIN'];
-const ALL_REGIONS = ['CLUZ', 'CVIS', 'CMIN'];
-const ZONE_TO_REGION: Record<string, string> = {
-  '01NLUZ': 'CLUZ', '02METRO': 'CLUZ', '03SLUZ': 'CLUZ',
-  '04LEYTE': 'CVIS', '05CEBU': 'CVIS', '06NEGROS': 'CVIS', '07BOHOL': 'CVIS', '08PANAY': 'CVIS',
-  '09NWMIN': 'CMIN', '10LANAO': 'CMIN', '11NCMIN': 'CMIN', '12NEMIN': 'CMIN', '13SEMIN': 'CMIN', '14SWMIN': 'CMIN'
-};
+// Zone/region configuration - loaded dynamically from zones.json via IPC
+const zonesConfig = ref<{
+  zones: Array<{ code: string; name: string; parentRegion: string }>;
+  regions: Array<{ code: string; name: string; parentKey: string }>;
+  zoneToRegion: Record<string, string>;
+}>({
+  zones: [],
+  regions: [],
+  zoneToRegion: {}
+});
 
-// Saved calibrations (for 'reuse' mode - skip recalibration)
-interface SavedCalibration {
-  id: number;
-  date: string;
-  periodStart: string;
-  periodEnd: string;
-  windScale: number;
-  solarScale: number;
-  windDeviation: number;
-  solarDeviation: number;
-  demandMape: number;
-  demandPeakScale: number;
-  demandOffpeakScale: number;
-  converged: boolean;
-  iterations: number;
-  createdAt: string;
+// Computed properties for easy access
+const ALL_ZONES = computed(() => zonesConfig.value.zones.map(z => z.code));
+const ALL_REGIONS = computed(() => zonesConfig.value.regions.map(r => r.code));
+const ZONE_TO_REGION = computed(() => zonesConfig.value.zoneToRegion);
+
+// Phase 1A: Filtered training instances (search + filter)
+const filteredInstances = computed(() => {
+  return trainingInstances.value.filter(instance => {
+    if (modelTypeFilter.value !== 'all' && instance.entityType !== modelTypeFilter.value) {
+      return false;
+    }
+    if (modelSearchQuery.value) {
+      const query = modelSearchQuery.value.toLowerCase();
+      return (instance.name && instance.name.toLowerCase().includes(query)) ||
+             instance.entityType.toLowerCase().includes(query) ||
+             instance.trainedAt.includes(query) ||
+             instance.models.some((m: any) => m.entity_code.toLowerCase().includes(query));
+    }
+    return true;
+  });
+});
+
+// Get selected training instance for manual forecast tab
+const selectedTrainingInstance = computed(() => {
+  if (!selectedTrainingInstanceId.value) return null;
+  return trainingInstances.value.find((i: any) => i.id === selectedTrainingInstanceId.value);
+});
+
+// Get active training instance for scheduler (uses same logic but different ref)
+// TODO: Phase D - Add Training Instance selector UI to Scheduler tab
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const activeTrainingInstance = computed(() => {
+  if (!activeTrainingInstanceId.value) return null;
+  return trainingInstances.value.find((i: any) => i.id === activeTrainingInstanceId.value);
+});
+
+// Compute penalty ratio from alpha for demand calibration
+const penaltyRatio = computed(() => {
+  const alpha = quantileAlpha.value;
+  if (alpha === 0.5) return '1';
+  return (alpha / (1 - alpha)).toFixed(1);
+});
+
+// Load zones configuration from zones.json
+async function loadZonesConfig() {
+  try {
+    const config = await window.electronAPI.getZonesConfig();
+    zonesConfig.value = config;
+  } catch (error) {
+    console.error('Failed to load zones config:', error);
+    // Fallback to hardcoded values
+    zonesConfig.value = {
+      zones: [
+        { code: '01NLUZ', name: 'Northern Luzon', parentRegion: 'luzon' },
+        { code: '02METRO', name: 'Metro Manila', parentRegion: 'luzon' },
+        { code: '03SLUZ', name: 'Southern Luzon', parentRegion: 'luzon' },
+        { code: '04LEYTE', name: 'Leyte/Eastern Visayas', parentRegion: 'visayas' },
+        { code: '05CEBU', name: 'Cebu', parentRegion: 'visayas' },
+        { code: '06NEGROS', name: 'Negros', parentRegion: 'visayas' },
+        { code: '07BOHOL', name: 'Bohol', parentRegion: 'visayas' },
+        { code: '08PANAY', name: 'Panay/Western Visayas', parentRegion: 'visayas' },
+        { code: '09NWMIN', name: 'Northwest Mindanao', parentRegion: 'mindanao' },
+        { code: '10LANAO', name: 'Lanao', parentRegion: 'mindanao' },
+        { code: '11NCMIN', name: 'North Central Mindanao', parentRegion: 'mindanao' },
+        { code: '12NEMIN', name: 'Northeast Mindanao', parentRegion: 'mindanao' },
+        { code: '13SEMIN', name: 'Southeast Mindanao', parentRegion: 'mindanao' },
+        { code: '14SWMIN', name: 'Southwest Mindanao', parentRegion: 'mindanao' }
+      ],
+      regions: [
+        { code: 'CLUZ', name: 'Luzon', parentKey: 'luzon' },
+        { code: 'CVIS', name: 'Visayas', parentKey: 'visayas' },
+        { code: 'CMIN', name: 'Mindanao', parentKey: 'mindanao' }
+      ],
+      zoneToRegion: {
+        '01NLUZ': 'CLUZ', '02METRO': 'CLUZ', '03SLUZ': 'CLUZ',
+        '04LEYTE': 'CVIS', '05CEBU': 'CVIS', '06NEGROS': 'CVIS', '07BOHOL': 'CVIS', '08PANAY': 'CVIS',
+        '09NWMIN': 'CMIN', '10LANAO': 'CMIN', '11NCMIN': 'CMIN', '12NEMIN': 'CMIN', '13SEMIN': 'CMIN', '14SWMIN': 'CMIN'
+      }
+    };
+  }
 }
-const savedCalibrations = ref<SavedCalibration[]>([]);
-const selectedCalibrationId = ref<number | null>(null);
+
+// Removed: Old saved calibrations - now using unified Training Instances
+// interface SavedCalibration {
+//   id: number;
+//   date: string;
+//   periodStart: string;
+//   periodEnd: string;
+//   windScale: number;
+//   solarScale: number;
+//   windDeviation: number;
+//   solarDeviation: number;
+//   demandMape: number;
+//   demandPeakScale: number;
+//   demandOffpeakScale: number;
+//   converged: boolean;
+//   iterations: number;
+//   createdAt: string;
+// }
+// const savedCalibrations = ref<SavedCalibration[]>([]);
+// const selectedCalibrationId = ref<number | null>(null);
 
 // Terminal panel tabs (for scheduler tab - switch between terminal output and recent runs)
 const terminalPanelTab = ref<'terminal' | 'runs'>('terminal');
 
-// Calibration settings (for hybrid-calibrated mode)
-const calibrationMode = ref<'auto' | 'saved'>('auto'); // auto = train on-the-fly, saved = use saved model
-const selectedCalibrator = ref<string>('');
-const availableCalibratorModels = ref<{ name: string; date: string; mape?: number }[]>([]);
-const saveCalibrator = ref(false); // Save after auto-training
+// Removed: Old calibration mode - now using unified Training Instances
+// const calibrationMode = ref<'auto' | 'saved'>('auto');
+// const selectedCalibrator = ref<string>('');
+// const availableCalibratorModels = ref<{ name: string; date: string; mape?: number }[]>([]);
+// const saveCalibrator = ref(false);
 
 // Output naming settings
 const demandPrefix = ref('FC_DEM_');
@@ -304,10 +438,18 @@ const customDemandName = ref('');
 const customCfacName = ref('');
 // const showNamingOptions = ref(false); // Unused - commented out
 
+// Demand Calibration Settings
+const demandCalibrationMode = ref<'iterative' | 'hybrid' | 'xgboost' | 'none'>('hybrid');
+const quantileAlpha = ref(0.80);
+const useHybridCalibration = ref(true); // Simple mode checkbox
+const showAdvancedCalibration = ref(false); // Advanced options toggle
+
 // State
 const isRunning = ref(false);
 const isComplete = ref(false);
 const hasError = ref(false);
+
+// Save Model Dialog removed - models are auto-saved by CLI with --save-model flag
 
 // Data format detection
 const dataFormatMessage = ref('');
@@ -404,10 +546,11 @@ function saveSettings() {
     cfacModel: cfacModel.value,
     demandModel: demandModel.value,
     pushToGateway: pushToGateway.value,
-    // Calibration settings
-    calibrationMode: calibrationMode.value,
-    selectedCalibrator: selectedCalibrator.value,
-    saveCalibrator: saveCalibrator.value,
+    // Removed: Old calibration settings - now using unified Training Instances
+    // calibrationMode: calibrationMode.value,
+    // selectedCalibrator: selectedCalibrator.value,
+    // saveCalibrator: saveCalibrator.value,
+    selectedTrainingInstanceId: selectedTrainingInstanceId.value, // Manual tab selection
     // Output naming
     demandPrefix: demandPrefix.value,
     demandZonalPrefix: demandZonalPrefix.value,
@@ -418,12 +561,7 @@ function saveSettings() {
     customCfacName: customCfacName.value,
     // Tab state
     activeTab: activeTab.value,
-    // Scheduler settings (schedulerMode removed - legacy)
-    // schedulerMode: schedulerMode.value,
-    schedulerDailyEnabled: schedulerDailyEnabled.value,
-    schedulerWeeklyEnabled: schedulerWeeklyEnabled.value,
-    schedulerDemandEnabled: schedulerDemandEnabled.value,
-    schedulerCfacEnabled: schedulerCfacEnabled.value,
+    // Scheduler settings
     schedulerDemandGeography: schedulerDemandGeography.value,
     schedulerOutputDir: schedulerOutputDir.value,
     // Global settings
@@ -447,11 +585,11 @@ function saveSettings() {
     schedulerDemandZonalPrefix: schedulerDemandZonalPrefix.value,
     schedulerCfacPrefix: schedulerCfacPrefix.value,
     schedulerOutputSuffix: schedulerOutputSuffix.value,
-    schedulerSelectedCalibrator: schedulerSelectedCalibrator.value,
-    // Auto calibration settings
-    schedulerCalibrationMode: schedulerCalibrationMode.value,
-    schedulerCalibrationPeriod: schedulerCalibrationPeriod.value,
-    selectedCalibrationId: selectedCalibrationId.value,
+    // Removed: Old calibration settings - now using unified Training Instances
+    // schedulerSelectedCalibrator: schedulerSelectedCalibrator.value,
+    // schedulerCalibrationMode: schedulerCalibrationMode.value,
+    // selectedCalibrationId: selectedCalibrationId.value,
+    activeTrainingInstanceId: activeTrainingInstanceId.value, // New: unified training instance
     // New global settings
     globalWeatherCacheDir: globalWeatherCacheDir.value,
     globalSchedulerOutputDir: globalSchedulerOutputDir.value,
@@ -465,16 +603,23 @@ function saveSettings() {
     usePerTypeScaling: usePerTypeScaling.value,
     demandGrowthRate: demandGrowthRate.value,
     trainingEndDate: trainingEndDate.value,
+    // Demand calibration settings
+    demandCalibrationMode: demandCalibrationMode.value,
+    quantileAlpha: quantileAlpha.value,
   });
 }
 
 // Watch for settings changes and persist them
-watch([dataSource, databasePath, demandDataDir, cfacDataDir, weatherDataDir, demandOutputDir, cfacOutputDir, enableDemand, enableCfac, enableZonal, scalingPercent, scalingWind, scalingSolar, usePerTypeScaling, cfacModel, demandModel, pushToGateway, demandGrowthRate, trainingEndDate, calibrationMode, selectedCalibrator, saveCalibrator, demandPrefix, demandZonalPrefix, cfacPrefix, outputSuffix, useCustomName, customDemandName, customCfacName, activeTab, schedulerDailyEnabled, schedulerWeeklyEnabled, schedulerDemandEnabled, schedulerCfacEnabled, schedulerDemandGeography, schedulerOutputDir, schedulerDemandModel, schedulerCalibDays, schedulerCalibThreshold, schedulerMaxIterations, schedulerCalibrationMode, schedulerCalibrationPeriod, schedulerRefreshWeather, schedulerOverwrite, schedulerSuffix, globalRegionalDemandDb, globalZonalDemandDb, globalSchedulerDb, globalDemandCsvPath, globalCfacCsvPath, globalWeatherCacheDir, globalSchedulerOutputDir, autoImportBeforeRun, autoFetchWeather], () => {
+// Removed: calibrationMode, selectedCalibrator, saveCalibrator, schedulerCalibrationMode, schedulerDailyEnabled, schedulerWeeklyEnabled, schedulerDemandEnabled, schedulerCfacEnabled, schedulerCalibrationPeriod, schedulerVerboseOutput - now using unified Training Instances
+watch([dataSource, databasePath, demandDataDir, cfacDataDir, weatherDataDir, demandOutputDir, cfacOutputDir, enableDemand, enableCfac, enableZonal, scalingPercent, scalingWind, scalingSolar, usePerTypeScaling, cfacModel, demandModel, pushToGateway, demandGrowthRate, trainingEndDate, demandPrefix, demandZonalPrefix, cfacPrefix, outputSuffix, useCustomName, customDemandName, customCfacName, activeTab, schedulerDemandGeography, schedulerOutputDir, schedulerDemandModel, schedulerCalibDays, schedulerCalibThreshold, schedulerMaxIterations, schedulerRefreshWeather, schedulerOverwrite, schedulerSuffix, globalRegionalDemandDb, globalZonalDemandDb, globalSchedulerDb, globalDemandCsvPath, globalCfacCsvPath, globalWeatherCacheDir, globalSchedulerOutputDir, autoImportBeforeRun, autoFetchWeather, activeTrainingInstanceId], () => {
   saveSettings();
 });
 
 // Set default dates and load saved settings
 onMounted(async () => {
+  // Load zones configuration from zones.json
+  await loadZonesConfig();
+
   const today = new Date();
   const thirtyDaysAgo = new Date(today);
   thirtyDaysAgo.setDate(today.getDate() - 30);
@@ -508,10 +653,12 @@ onMounted(async () => {
     // Migration: convert old 'lstm' setting to 'hybrid'
     if (settings.cfacModel === 'lstm') cfacModel.value = 'hybrid';
     if (settings.demandModel === 'hybrid' || settings.demandModel === 'hybrid-calibrated') demandModel.value = settings.demandModel;
-    // Calibration settings
-    if (settings.calibrationMode) calibrationMode.value = settings.calibrationMode;
-    if (settings.selectedCalibrator) selectedCalibrator.value = settings.selectedCalibrator;
-    if (settings.saveCalibrator !== undefined) saveCalibrator.value = settings.saveCalibrator;
+    // Removed: Old calibration settings - now using unified Training Instances
+    // if (settings.calibrationMode) calibrationMode.value = settings.calibrationMode;
+    // if (settings.selectedCalibrator) selectedCalibrator.value = settings.selectedCalibrator;
+    // if (settings.saveCalibrator !== undefined) saveCalibrator.value = settings.saveCalibrator;
+    // New: unified Training Instance selection
+    if (settings.selectedTrainingInstanceId) selectedTrainingInstanceId.value = settings.selectedTrainingInstanceId;
     // Output naming
     if (settings.demandPrefix) demandPrefix.value = settings.demandPrefix;
     if (settings.demandZonalPrefix) demandZonalPrefix.value = settings.demandZonalPrefix;
@@ -524,10 +671,6 @@ onMounted(async () => {
     if (settings.activeTab === 'manual' || settings.activeTab === 'scheduler' || settings.activeTab === 'gateway' || settings.activeTab === 'settings') activeTab.value = settings.activeTab;
     // Scheduler settings (schedulerMode removed - legacy)
     // if (settings.schedulerMode === 'run' || settings.schedulerMode === 'backfill') schedulerMode.value = settings.schedulerMode;
-    if (typeof settings.schedulerDailyEnabled === 'boolean') schedulerDailyEnabled.value = settings.schedulerDailyEnabled;
-    if (typeof settings.schedulerWeeklyEnabled === 'boolean') schedulerWeeklyEnabled.value = settings.schedulerWeeklyEnabled;
-    if (typeof settings.schedulerDemandEnabled === 'boolean') schedulerDemandEnabled.value = settings.schedulerDemandEnabled;
-    if (typeof settings.schedulerCfacEnabled === 'boolean') schedulerCfacEnabled.value = settings.schedulerCfacEnabled;
     // Load demandGeography with backward compatibility from schedulerZonalEnabled
     if (settings.schedulerDemandGeography === 'regional' || settings.schedulerDemandGeography === 'zonal' || settings.schedulerDemandGeography === 'both') {
       schedulerDemandGeography.value = settings.schedulerDemandGeography;
@@ -568,15 +711,12 @@ onMounted(async () => {
     if (settings.schedulerDemandZonalPrefix) schedulerDemandZonalPrefix.value = settings.schedulerDemandZonalPrefix;
     if (settings.schedulerCfacPrefix) schedulerCfacPrefix.value = settings.schedulerCfacPrefix;
     if (settings.schedulerOutputSuffix) schedulerOutputSuffix.value = settings.schedulerOutputSuffix;
-    if (settings.schedulerSelectedCalibrator) schedulerSelectedCalibrator.value = settings.schedulerSelectedCalibrator;
-    // Auto calibration settings (also support legacy schedulerTrainingMode for backwards compatibility)
-    if (settings.schedulerCalibrationMode === 'auto' || settings.schedulerCalibrationMode === 'saved' || settings.schedulerCalibrationMode === 'reuse') {
-      schedulerCalibrationMode.value = settings.schedulerCalibrationMode;
-    } else if (settings.schedulerTrainingMode === 'auto' || settings.schedulerTrainingMode === 'saved') {
-      schedulerCalibrationMode.value = settings.schedulerTrainingMode;
-    }
-    if (settings.schedulerCalibrationPeriod) schedulerCalibrationPeriod.value = settings.schedulerCalibrationPeriod;
-    if (typeof settings.selectedCalibrationId === 'number') selectedCalibrationId.value = settings.selectedCalibrationId;
+    // Removed: Old calibration settings - now using unified Training Instances
+    // if (settings.schedulerSelectedCalibrator) schedulerSelectedCalibrator.value = settings.schedulerSelectedCalibrator;
+    // if (settings.schedulerCalibrationMode) schedulerCalibrationMode.value = settings.schedulerCalibrationMode;
+    // if (typeof settings.selectedCalibrationId === 'number') selectedCalibrationId.value = settings.selectedCalibrationId;
+    // New: unified Training Instance
+    if (settings.activeTrainingInstanceId) activeTrainingInstanceId.value = settings.activeTrainingInstanceId;
 
     // New global settings
     if (settings.globalWeatherCacheDir) globalWeatherCacheDir.value = settings.globalWeatherCacheDir;
@@ -591,6 +731,9 @@ onMounted(async () => {
     if (typeof settings.usePerTypeScaling === 'boolean') usePerTypeScaling.value = settings.usePerTypeScaling;
     if (typeof settings.demandGrowthRate === 'number') demandGrowthRate.value = settings.demandGrowthRate;
     if (settings.trainingEndDate) trainingEndDate.value = settings.trainingEndDate;
+    // Demand calibration settings
+    if (settings.demandCalibrationMode) demandCalibrationMode.value = settings.demandCalibrationMode;
+    if (typeof settings.quantileAlpha === 'number') quantileAlpha.value = settings.quantileAlpha;
 
     // Load database info if in database mode
     if (dataSource.value === 'database' && databasePath.value) {
@@ -600,17 +743,25 @@ onMounted(async () => {
     console.error('Failed to load settings:', e);
   }
 
-  // Load available calibrator models
-  loadCalibratorModels();
+  // Removed: Old calibrator loading - now using unified Training Instances
+  // loadCalibratorModels();
 
-  // Load scheduler configuration, gateway config, recent runs, and saved calibrations
+  // Load scheduler configuration, gateway config, recent runs
   loadSchedulerConfig();
   loadGatewayConfig();
   loadRecentRuns();
-  loadSavedCalibrations();
+  // Removed: loadSavedCalibrations() - now using unified Training Instances
 
   // Load global config from forecast_config.json
   await loadGlobalConfig();
+
+  // Load training instances for Manual/Scheduler tabs
+  await loadTrainingInstances();
+
+  // Load active instance ID from config
+  if (globalConfig.value?.modelSelection?.defaultDemandModel) {
+    activeTrainingInstanceId.value = globalConfig.value.modelSelection.defaultDemandModel;
+  }
 
   // Set up real-time output listener - routes to appropriate terminal
   window.electronAPI.onCommandOutput((data) => {
@@ -811,83 +962,19 @@ const canRunForecast = computed(() => {
   return true;
 });
 
-// Convert calibration period to days for display
-const computedTrainingDays = computed(() => {
-  switch (schedulerCalibrationPeriod.value) {
-    case '14days': return 14;
-    case '1month': return 30;
-    case '2months': return 60;
-    case '3months': return 90;
-    default: return 30;
-  }
-});
-
 // Clear format message
 function clearFormatMessage() {
   dataFormatMessage.value = '';
   dataFormatType.value = '';
 }
 
-// Handle format detection result
-function handleFormatResult(result: { format: string; message: string; columns?: string[] }, expectedZonal: boolean) {
-  if (result.format === 'error') {
-    dataFormatMessage.value = result.message;
-    dataFormatType.value = 'error';
-    return;
-  }
+// REMOVED: handleFormatResult - no longer needed with global settings
+// function handleFormatResult(...) { ... }
 
-  const isZonalData = result.format === 'zonal';
-  const isRegionalData = result.format === 'regional';
-
-  if (result.format === 'unknown' || result.format === 'mixed') {
-    dataFormatMessage.value = result.message;
-    dataFormatType.value = 'warning';
-  } else if (expectedZonal && isRegionalData) {
-    dataFormatMessage.value = 'Zonal Mode is ON, but data contains regional format (CLUZ, CVIS, CMIN). Switching to Non-Zonal mode.';
-    dataFormatType.value = 'warning';
-    enableZonal.value = false;
-  } else if (!expectedZonal && isZonalData) {
-    dataFormatMessage.value = 'Detected 14-zone format data. Switching to Zonal Mode.';
-    dataFormatType.value = 'info';
-    enableZonal.value = true;
-  } else {
-    dataFormatMessage.value = result.message;
-    dataFormatType.value = 'info';
-  }
-
-  // Auto-clear message after 5 seconds
-  setTimeout(clearFormatMessage, 5000);
-}
-
-// Browse functions
-async function browseDemandDir() {
-  const path = await window.electronAPI.selectDirectory();
-  if (path) {
-    demandDataDir.value = path;
-    // Check data format
-    const result = await window.electronAPI.checkDataFormat(path, 'demand');
-    handleFormatResult(result, enableZonal.value);
-  }
-}
-
-async function browseCfacDir() {
-  const path = await window.electronAPI.selectDirectory();
-  if (path) cfacDataDir.value = path;
-}
-
-async function browseDatabase() {
-  const path = await window.electronAPI.selectFile([
-    { name: 'SQLite Database', extensions: ['db', 'sqlite', 'sqlite3'] },
-  ]);
-  if (path) {
-    databasePath.value = path;
-    // Check data format (database detection will be handled separately)
-    const result = await window.electronAPI.checkDataFormat(path, 'database');
-    if (result.format !== 'unknown') {
-      handleFormatResult(result, enableZonal.value);
-    }
-  }
-}
+// Browse functions - REMOVED: Now using global settings for paths
+// async function browseDemandDir() { ... }
+// async function browseCfacDir() { ... }
+// async function browseDatabase() { ... }
 
 // ============ Settings Tab Browse Functions ============
 async function browseRegionalDb() {
@@ -1021,6 +1108,28 @@ async function loadGlobalConfig() {
       schedulerConfig.value.demandGeography = geo;
       schedulerDemandGeography.value = geo;
     }
+    // Load calibration settings from global config
+    if (globalConfig.value?.calibration) {
+      const calib = globalConfig.value.calibration;
+      useHybridCalibration.value = calib.mode !== 'none';
+      demandCalibrationMode.value = calib.mode || 'hybrid';
+      quantileAlpha.value = calib.quantileAlpha ?? 0.80;
+      // enableZoneScaling handled elsewhere
+    }
+    // Load model selection settings (simplified - Training Instance selection)
+    if (globalConfig.value?.modelSelection) {
+      useTrainedModels.value = globalConfig.value.modelSelection.useTrainedModels || false;
+      defaultDemandModel.value = globalConfig.value.modelSelection.defaultDemandModel || null;
+      defaultCfacModel.value = globalConfig.value.modelSelection.defaultCfacModel || null;
+      // Unused after UI unification - Training Instances include calibration automatically
+      // selectedCfacCalibrationId.value = globalConfig.value.modelSelection.activeCfacCalibrationId || null;
+      // zoneModelOverrides.value = globalConfig.value.modelSelection.modelOverrides || {};
+    }
+    // Unused after UI unification - Training Instance selector replaces individual dropdowns
+    // await loadDemandModels();
+    // await loadCfacModels();
+    // Load CFAC calibrations for dropdown
+    await loadCfacCalibrations();
     addSchedulerStatus('Global config loaded successfully', 'success');
   } catch (e: any) {
     console.error('Failed to load global config:', e);
@@ -1033,6 +1142,15 @@ async function loadGlobalConfig() {
 // Mark global config as dirty (unsaved changes)
 function markConfigDirty() {
   configDirty.value = true;
+}
+
+// Handle calibration toggle - simple mode checkbox
+function onCalibrationToggle() {
+  if (useHybridCalibration.value) {
+    demandCalibrationMode.value = 'hybrid';
+  } else {
+    demandCalibrationMode.value = 'none';
+  }
 }
 
 // Sync scheduler demand geography to global config and save
@@ -1132,15 +1250,9 @@ async function resetGlobalConfig() {
   }
 }
 
-async function browseDemandOutputDir() {
-  const path = await window.electronAPI.selectDirectory();
-  if (path) demandOutputDir.value = path;
-}
-
-async function browseCfacOutputDir() {
-  const path = await window.electronAPI.selectDirectory();
-  if (path) cfacOutputDir.value = path;
-}
+// REMOVED: Output directory browse functions - now using global settings
+// async function browseDemandOutputDir() { ... }
+// async function browseCfacOutputDir() { ... }
 
 // async function browseWeatherDir() {
 //   const path = await window.electronAPI.selectDirectory();
@@ -1243,6 +1355,28 @@ watch(databasePath, async (newPath) => {
   }
 });
 
+// Watch calibration settings and sync to global config
+watch([demandCalibrationMode, quantileAlpha], async (_newVals, oldVals) => {
+  // Skip if initial load (oldVals is undefined)
+  if (!oldVals || !oldVals[0]) return;
+  if (!globalConfig.value) return;
+
+  try {
+    // Update global config calibration section
+    if (!globalConfig.value.calibration) {
+      globalConfig.value.calibration = {};
+    }
+    globalConfig.value.calibration.mode = demandCalibrationMode.value;
+    globalConfig.value.calibration.quantileAlpha = quantileAlpha.value;
+    globalConfig.value.calibration.enableZoneScaling = true; // Default for zonal
+
+    // Save to forecast_config.json
+    await saveGlobalConfig();
+  } catch (err) {
+    console.error('Failed to save calibration config:', err);
+  }
+});
+
 // Run forecast
 async function runForecast() {
   if (!canRunForecast.value) return;
@@ -1255,91 +1389,119 @@ async function runForecast() {
   currentStatus.value = 'Starting...';
   statusHistory.value = [];
 
-  const totalSteps = (enableDemand.value ? 1 : 0) + (enableCfac.value ? 1 : 0);
+  // Manual forecast always generates both regional and zonal demand (2 steps for demand)
+  const demandSteps = enableDemand.value ? 2 : 0;
+  const totalSteps = demandSteps + (enableCfac.value ? 1 : 0);
   let completedSteps = 0;
 
   try {
-    // Run Demand forecast
+    // Run Demand forecasts - BOTH regional and zonal
     if (enableDemand.value) {
-      addStatus('Starting Demand Forecast...');
+      // Show calibration status at the start
+      const calibEnabled = demandModel.value === 'hybrid-calibrated';
+      if (calibEnabled) {
+        addStatus('Calibration: ENABLED (XGBoost correction layer will be trained)');
+      } else {
+        addStatus('Calibration: DISABLED (using Hybrid model only)');
+      }
+
+      // Helper function to run a single demand forecast
+      const runSingleDemandForecast = async (isZonal: boolean) => {
+        const mode = isZonal ? 'Zonal (14 zones)' : 'Regional (3 regions)';
+        const calibStatus = calibEnabled ? ' with XGBoost calibration' : '';
+        addStatus(`Starting ${mode} Demand Forecast${calibStatus}...`);
+
+        const demandFilename = generateOutputFilename('demand', isZonal);
+
+        // Select appropriate database path
+        const dbPath = isZonal ? globalZonalDemandDb.value : globalRegionalDemandDb.value;
+
+        const demandArgs = [
+          'forecast',
+          '-d', dataSource.value === 'database' ? dbPath : demandDataDir.value,
+          '-s', forecastStart.value,
+          '-e', forecastEnd.value,
+          '-o', `${demandOutputDir.value}/${demandFilename}`,
+          '--model', 'hybrid',
+        ];
+
+        // Add database flag if using database mode
+        if (dataSource.value === 'database') {
+          demandArgs.push('--use-db');
+        }
+
+        // Add zonal flag for zonal forecasts
+        if (isZonal) {
+          demandArgs.push('--zonal');
+        }
+
+        // Training dates: only when NOT using a saved Training Instance
+        if (!selectedTrainingInstanceId.value && dataSource.value === 'csv' && trainingStart.value && trainingEnd.value) {
+          demandArgs.push('--training-start', trainingStart.value);
+          demandArgs.push('--training-end', trainingEnd.value);
+        }
+
+        // When using a saved Training Instance, the calibration is included automatically
+        if (!calibEnabled) {
+          demandArgs.push('--no-calibrate');
+        }
+
+        // Add gateway push flag if enabled
+        if (pushToGateway.value) {
+          demandArgs.push('--push');
+        }
+
+        // Always save model to model store with full metrics
+        demandArgs.push('--save-model');
+
+        // Add model name if provided (appends -regional or -zonal suffix automatically)
+        if (modelName.value && modelName.value.trim()) {
+          const suffix = isZonal ? '-zonal' : '-regional';
+          demandArgs.push('--model-name', `${modelName.value.trim()}${suffix}`);
+        }
+
+        // Add zone/region scaling from config
+        if (isZonal && globalConfig.value?.demand?.scaling?.zones) {
+          const zoneScales = Object.entries(globalConfig.value.demand.scaling.zones as Record<string, number>)
+            .filter(([_, scale]) => scale !== 0)
+            .map(([zone, scale]) => `${zone}:${scale}`)
+            .join(',');
+          if (zoneScales) {
+            demandArgs.push('--scale-zone', zoneScales);
+          }
+        }
+        if (!isZonal && globalConfig.value?.demand?.scaling?.regions) {
+          const regionScales = Object.entries(globalConfig.value.demand.scaling.regions as Record<string, number>)
+            .filter(([_, scale]) => scale !== 0)
+            .map(([region, scale]) => `${region}:${scale}`)
+            .join(',');
+          if (regionScales) {
+            demandArgs.push('--scale-region', regionScales);
+          }
+        }
+
+        const demandResult = await window.electronAPI.runCommand(demandArgs);
+        completedSteps++;
+        progress.value = (completedSteps / totalSteps) * 90;
+
+        if (demandResult.code === 0) {
+          addStatus(`${mode} demand forecast completed successfully`, 'success');
+          return true;
+        } else {
+          const errorLines = demandResult.stderr?.split('\n').filter((l: string) => l.trim()).slice(-3) || [];
+          const errorMsg = errorLines.join(' ').substring(0, 200) || demandResult.error || 'Unknown error';
+          addStatus(`${mode} demand forecast failed: ${errorMsg}`, 'error');
+          hasError.value = true;
+          return false;
+        }
+      };
+
+      // Run Regional forecast first
       progress.value = 5;
+      await runSingleDemandForecast(false);
 
-      const demandFilename = generateOutputFilename('demand');
-      const demandArgs = [
-        'forecast',
-        '-d', dataSource.value === 'database' ? databasePath.value : demandDataDir.value,
-        '-s', forecastStart.value,
-        '-e', forecastEnd.value,
-        '-o', `${demandOutputDir.value}/${demandFilename}`,
-        '--model', 'hybrid',
-      ];
-
-      // Add database flag if using database mode
-      if (dataSource.value === 'database') {
-        demandArgs.push('--use-db');
-      }
-
-      // Add zonal flag if enabled
-      if (enableZonal.value) {
-        demandArgs.push('--zonal');
-      }
-
-      // Add training dates for auto-train mode
-      if (calibrationMode.value === 'auto' && dataSource.value === 'csv' && trainingStart.value && trainingEnd.value) {
-        demandArgs.push('--training-start', trainingStart.value);
-        demandArgs.push('--training-end', trainingEnd.value);
-      }
-
-      // Calibration options
-      if (demandModel.value === 'hybrid-calibrated') {
-        if (calibrationMode.value === 'saved' && selectedCalibrator.value) {
-          demandArgs.push('--load-calibrator', `models/calibrator/${selectedCalibrator.value}.json`);
-        } else if (saveCalibrator.value) {
-          const modelName = `calibrator_${new Date().toISOString().split('T')[0]}`;
-          demandArgs.push('--save-calibrator', `models/calibrator/${modelName}.json`);
-        }
-      } else {
-        demandArgs.push('--no-calibrate');
-      }
-
-      // Add gateway push flag if enabled
-      if (pushToGateway.value) {
-        demandArgs.push('--push');
-      }
-
-      // Add zone/region scaling from config
-      if (globalConfig.value?.demand?.scaling?.zones) {
-        const zoneScales = Object.entries(globalConfig.value.demand.scaling.zones as Record<string, number>)
-          .filter(([_, scale]) => scale !== 0)
-          .map(([zone, scale]) => `${zone}:${scale}`)
-          .join(',');
-        if (zoneScales) {
-          demandArgs.push('--scale-zone', zoneScales);
-        }
-      }
-      if (globalConfig.value?.demand?.scaling?.regions) {
-        const regionScales = Object.entries(globalConfig.value.demand.scaling.regions as Record<string, number>)
-          .filter(([_, scale]) => scale !== 0)
-          .map(([region, scale]) => `${region}:${scale}`)
-          .join(',');
-        if (regionScales) {
-          demandArgs.push('--scale-region', regionScales);
-        }
-      }
-
-      const demandResult = await window.electronAPI.runCommand(demandArgs);
-      completedSteps++;
-      progress.value = (completedSteps / totalSteps) * 90;
-
-      if (demandResult.code === 0) {
-        addStatus('Demand forecast completed successfully', 'success');
-      } else {
-        // Extract meaningful error from stderr
-        const errorLines = demandResult.stderr?.split('\n').filter((l: string) => l.trim()).slice(-3) || [];
-        const errorMsg = errorLines.join(' ').substring(0, 200) || demandResult.error || 'Unknown error';
-        addStatus(`Demand forecast failed: ${errorMsg}`, 'error');
-        hasError.value = true;
-      }
+      // Run Zonal forecast second
+      await runSingleDemandForecast(true);
     }
 
     // Run CFAC forecast
@@ -1451,6 +1613,9 @@ function resetProgress() {
   currentStatus.value = '';
   statusHistory.value = [];
 }
+// NOTE: Model saving is now handled automatically by CLI with --save-model flag
+// GUI passes --model-name to CLI when running forecasts from Manual tab
+
 
 // ============ SCHEDULER FUNCTIONS ============
 
@@ -1639,6 +1804,541 @@ async function saveSchedulerConfig() {
   }
 }
 
+// Unused after UI unification - Training Instance selection replaces individual model dropdowns
+// Use setActiveTrainingInstance() instead
+// async function saveModelSelectionConfig() {
+//   try {
+//     const modelSelection = {
+//       useTrainedModels: useTrainedModels.value,
+//       defaultDemandModel: defaultDemandModel.value,
+//       defaultCfacModel: defaultCfacModel.value,
+//       activeCfacCalibrationId: selectedCfacCalibrationId.value,
+//       modelOverrides: toRaw(zoneModelOverrides.value)
+//     };
+//     await window.electronAPI.updateModelSelection(modelSelection);
+//     addSchedulerStatus('Model selection saved', 'success');
+//   } catch (error: any) {
+//     addSchedulerStatus('Failed to save model selection: ' + error.message, 'error');
+//   }
+// }
+
+// ============ MODEL MANAGEMENT FUNCTIONS ============
+// Note: initializeModelStore removed - model store is auto-initialized by CLI on first use
+
+async function loadModels() {
+  modelsLoading.value = true;
+  try {
+    // Load training instances (grouped models)
+    let instances = await window.electronAPI.getTrainingInstances();
+
+    // Apply filters
+    if (modelsFilterEntityType.value) {
+      instances = instances.filter((i: any) => i.entityType === modelsFilterEntityType.value);
+    }
+
+    trainingInstances.value = instances;
+
+    // If we have a selected instance, update its models
+    if (selectedInstanceId.value) {
+      const instance = instances.find((i: any) => i.id === selectedInstanceId.value);
+      if (instance) {
+        selectedInstance.value = instance;
+        modelsList.value = instance.models;
+      } else {
+        // Instance no longer exists, clear selection
+        selectedInstanceId.value = null;
+        selectedInstance.value = null;
+        modelsList.value = [];
+      }
+    }
+  } catch (error: any) {
+    console.error('Failed to load models:', error);
+  } finally {
+    modelsLoading.value = false;
+  }
+}
+
+// Load training instances for Manual/Scheduler tabs (simplified list)
+async function loadTrainingInstances() {
+  try {
+    const instances = await window.electronAPI.getTrainingInstances();
+    // Filter to only completed instances
+    trainingInstances.value = instances.filter((i: any) => i.status === 'completed');
+  } catch (error: any) {
+    console.error('Failed to load training instances:', error);
+    trainingInstances.value = [];
+  }
+}
+
+// Set active training instance for scheduler
+// TODO: Phase D - Wire up to Scheduler tab Training Instance selector modal
+async function setActiveTrainingInstance(instanceId: string | null) {
+  activeTrainingInstanceId.value = instanceId;
+  try {
+    await window.electronAPI.updateModelSelection({
+      useTrainedModels: instanceId !== null,
+      defaultDemandModel: instanceId,
+      defaultCfacModel: instanceId
+    });
+    await loadGlobalConfig();
+    showInstanceSelector.value = false;
+  } catch (error: any) {
+    console.error('Failed to set active training instance:', error);
+  }
+}
+// Handler for when active training instance changes in Scheduler tab
+async function onActiveInstanceChange() {
+  // activeTrainingInstanceId is already updated via v-model
+  await setActiveTrainingInstance(activeTrainingInstanceId.value);
+}
+
+function selectInstance(instance: any) {
+  selectedInstanceId.value = instance.id;
+  selectedInstance.value = instance;
+  modelsList.value = instance.models;
+}
+
+function openSchedulerConfirmModal() {
+  showSchedulerConfirmModal.value = true;
+}
+
+async function confirmSetSchedulerActive() {
+  if (!selectedInstance.value) return;
+
+  // Set the first model in this instance as scheduler active
+  const firstModelId = selectedInstance.value.models[0]?.id;
+  if (!firstModelId) {
+    console.error('No model ID found in instance');
+    return;
+  }
+
+  try {
+    const result = await window.electronAPI.setSchedulerActiveModel(firstModelId);
+    if (result.success) {
+      // Update local state
+      selectedInstance.value.isSchedulerActive = true;
+      // Refresh the instances list to show updated badges
+      await loadModels();
+
+      // Show success message
+      successMessageText.value = 'Instance set as active for Scheduler';
+      showSuccessMessage.value = true;
+      setTimeout(() => {
+        showSuccessMessage.value = false;
+      }, 3000);
+    } else {
+      console.error('Failed to set scheduler active:', result.error);
+      alert('Failed to set scheduler active: ' + result.error);
+    }
+  } catch (error) {
+    console.error('Error setting scheduler active:', error);
+    alert('Error setting scheduler active');
+  }
+
+  showSchedulerConfirmModal.value = false;
+  showSetActiveMenu.value = false;
+}
+
+async function setAsSchedulerActive() {
+  openSchedulerConfirmModal();
+}
+
+function openManualConfirmModal() {
+  showManualConfirmModal.value = true;
+}
+
+async function confirmSetManualActive() {
+  if (!selectedInstance.value) return;
+
+  const firstModelId = selectedInstance.value.models[0]?.id;
+  if (!firstModelId) {
+    console.error('No model ID found in instance');
+    return;
+  }
+
+  try {
+    const result = await window.electronAPI.setManualActiveModel(firstModelId);
+    if (result.success) {
+      selectedInstance.value.isManualActive = true;
+      await loadModels();
+
+      // Show success message
+      successMessageText.value = 'Instance set as active for Manual Forecast';
+      showSuccessMessage.value = true;
+      setTimeout(() => {
+        showSuccessMessage.value = false;
+      }, 3000);
+    } else {
+      console.error('Failed to set manual active:', result.error);
+      alert('Failed to set manual active: ' + result.error);
+    }
+  } catch (error) {
+    console.error('Error setting manual active:', error);
+    alert('Error setting manual active');
+  }
+
+  showManualConfirmModal.value = false;
+  showSetActiveMenu.value = false;
+}
+
+async function setAsManualActive() {
+  openManualConfirmModal();
+}
+
+// ============ BACKTEST FUNCTIONS ============
+async function runBacktest() {
+  if (!selectedInstance.value) return;
+
+  isBacktesting.value = true;
+  backtestResults.value = null;
+
+  try {
+    // Get the first model ID from this instance
+    const firstModelId = selectedInstance.value.models[0]?.id;
+    if (!firstModelId) {
+      alert('No model found in instance');
+      return;
+    }
+
+    // Call reEvaluateModel IPC with backtest days
+    const result = await window.electronAPI.reEvaluateModel(firstModelId, {
+      days: backtestDays.value,
+      update: false
+    });
+
+    if (result) {
+      backtestResults.value = result;
+    } else {
+      alert('Backtest failed - no results returned');
+    }
+  } catch (error: any) {
+    console.error('Backtest failed:', error);
+    alert('Backtest failed: ' + error.message);
+  } finally {
+    isBacktesting.value = false;
+  }
+}
+
+function clearBacktest() {
+  backtestResults.value = null;
+}
+
+// ============ MODEL COMPARISON FUNCTIONS ============
+function enableComparisonMode() {
+  comparisonMode.value = true;
+  comparisonInstanceId.value = null;
+  comparisonInstance.value = null;
+}
+
+function disableComparisonMode() {
+  comparisonMode.value = false;
+  comparisonInstanceId.value = null;
+  comparisonInstance.value = null;
+}
+
+async function selectComparisonInstance(instanceId: string) {
+  comparisonInstanceId.value = instanceId;
+  const instance = trainingInstances.value.find((i: any) => i.id === instanceId);
+  comparisonInstance.value = instance || null;
+}
+
+// Helper to compute comparison difference
+function getComparisonDiff(valueA: number | null | undefined, valueB: number | null | undefined): string {
+  if (valueA === null || valueA === undefined || valueB === null || valueB === undefined) return '-';
+  const diff = valueA - valueB;
+  const sign = diff > 0 ? '+' : '';
+  return sign + diff.toFixed(1);
+}
+
+function isComparisonBetter(valueA: number | null | undefined, valueB: number | null | undefined): boolean {
+  if (valueA === null || valueA === undefined || valueB === null || valueB === undefined) return false;
+  return valueA < valueB; // Lower MAPE is better
+}
+
+// Unused after UI unification - Training Instance selector replaces individual model dropdowns
+// async function loadDemandModels() {
+//   try {
+//     const models = await window.electronAPI.listModels({
+//       entityType: 'demand',
+//       isActive: true
+//     });
+//     availableDemandModels.value = models.map((m: any) => ({
+//       id: m.id,
+//       name: m.name || `${m.entity_code} Model`,
+//       entityCode: m.entity_code,
+//       mape: m.metadata?.performance?.mape
+//     }));
+//   } catch (error: any) {
+//     console.error('Failed to load demand models:', error);
+//     availableDemandModels.value = [];
+//   }
+// }
+
+// async function loadCfacModels() {
+//   try {
+//     const models = await window.electronAPI.listModels({
+//       entityType: 'cfac',
+//       isActive: true
+//     });
+//     availableCfacModels.value = models.map((m: any) => ({
+//       id: m.id,
+//       name: m.name || `${m.entity_code} Model`,
+//       entityType: m.entity_type || 'cfac',
+//       mape: m.metadata?.performance?.mape
+//     }));
+//   } catch (error: any) {
+//     console.error('Failed to load CFAC models:', error);
+//     availableCfacModels.value = [];
+//   }
+// }
+
+// Unused after redesign - may be re-enabled later
+// async function reEvaluateModel(id: string) {
+//   isReEvaluating.value = true;
+//   try {
+//     const result = await window.electronAPI.reEvaluateModel(id, { days: 14, update: false });
+//     if (result.success) {
+//       // Reload model details to show updated metrics (if update flag was true)
+//       if (selectedModelId.value === id) {
+//         await viewModelDetails(id);
+//       }
+//       alert('Model re-evaluation complete. Check console for details.');
+//     } else {
+//       alert(`Re-evaluation failed: ${result.error || 'Unknown error'}`);
+//     }
+//   } catch (error: any) {
+//     console.error('Failed to re-evaluate model:', error);
+//     alert(`Re-evaluation failed: ${error.message}`);
+//   } finally {
+//     isReEvaluating.value = false;
+//   }
+// }
+
+// async function loadComparisonModel(id: string | null) {
+//   if (!id) {
+//     comparisonModelDetails.value = null;
+//     return;
+//   }
+//
+//   try {
+//     comparisonModelDetails.value = await window.electronAPI.getModelById(id);
+//   } catch (error: any) {
+//     console.error('Failed to load comparison model:', error);
+//     comparisonModelDetails.value = null;
+//   }
+// }
+
+// Unused after redesign - may be re-enabled later
+// function formatModelDate(dateStr: string): string {
+//   const date = new Date(dateStr);
+//   return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+// }
+
+// function formatModelDateShort(dateStr: string): string {
+//   const date = new Date(dateStr);
+//   return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+// }
+
+function getMapeClass(mape: number | undefined): string {
+  if (!mape) return '';
+  if (mape < 10) return 'mape-excellent';
+  if (mape < 20) return 'mape-good';
+  if (mape < 30) return 'mape-fair';
+  return 'mape-poor';
+}
+
+// ============ CFAC CALIBRATIONS FUNCTIONS ============
+async function loadCfacCalibrations() {
+  try {
+    cfacCalibrations.value = await window.electronAPI.listCfacCalibrations();
+  } catch (error: any) {
+    console.error('Failed to load CFAC calibrations:', error);
+    cfacCalibrations.value = [];
+  }
+}
+
+// Unused after Models tab simplification (CFAC Calibrations card removed)
+// async function viewCalibrationDetails(id: string) {
+//   try {
+//     selectedCalibration.value = await window.electronAPI.getCfacCalibrationDetails(id);
+//     showCalibrationDetails.value = true;
+//   } catch (error: any) {
+//     console.error('Failed to load calibration details:', error);
+//     alert(`Failed to load calibration details: ${error.message}`);
+//   }
+// }
+
+// async function setActiveCalibration(id: string) {
+//   try {
+//     await window.electronAPI.setActiveCfacCalibration(id);
+//     await loadCfacCalibrations();
+//   } catch (error: any) {
+//     console.error('Failed to set active calibration:', error);
+//     alert(`Failed to set active calibration: ${error.message}`);
+//   }
+// }
+
+// async function deleteCalibration(id: string) {
+//   if (!confirm('Are you sure you want to delete this calibration?')) {
+//     return;
+//   }
+//   try {
+//     const success = await window.electronAPI.deleteCfacCalibration(id);
+//     if (success) {
+//       await loadCfacCalibrations();
+//     } else {
+//       alert('Failed to delete calibration');
+//     }
+//   } catch (error: any) {
+//     console.error('Failed to delete calibration:', error);
+//     alert(`Failed to delete calibration: ${error.message}`);
+//   }
+// }
+
+function closeCalibrationDetails() {
+  showCalibrationDetails.value = false;
+  selectedCalibration.value = null;
+}
+
+function formatCalibrationDate(dateStr: string): string {
+  const date = new Date(dateStr);
+  return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// Unused after redesign - may be re-enabled later
+// function getComparisonClass(current: number | undefined, comparison: number | undefined): string {
+//   if (!current || !comparison) return '';
+//   const diff = current - comparison;
+//   if (diff < -1) return 'comparison-better';
+//   if (diff > 1) return 'comparison-worse';
+//   return 'comparison-same';
+// }
+
+// function getMetricDiff(current: number | undefined, comparison: number | undefined): string {
+//   if (!current || !comparison) return '-';
+//   const diff = current - comparison;
+//   const sign = diff > 0 ? '+' : '';
+//   return sign + diff.toFixed(2);
+// }
+
+function formatInstanceDate(dateStr: string): string {
+  const date = new Date(dateStr);
+  return date.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
+function formatInstanceDateShort(dateStr: string): string {
+  const date = new Date(dateStr);
+  return date.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric'
+  });
+}
+
+// Helper functions for Peak/Off-Peak MAPE
+function hasPeakOffPeakData(instance: any): boolean {
+  if (!instance?.models?.length) return false;
+  return instance.models.some((m: any) => m.peak_mape !== null && m.peak_mape !== undefined);
+}
+
+function getPeakMape(instance: any): number | null {
+  if (!instance?.models?.length) return null;
+  const peakValues = instance.models
+    .filter((m: any) => m.peak_mape !== null && m.peak_mape !== undefined)
+    .map((m: any) => m.peak_mape);
+  if (peakValues.length === 0) return null;
+  return peakValues.reduce((a: number, b: number) => a + b, 0) / peakValues.length;
+}
+
+function getOffPeakMape(instance: any): number | null {
+  if (!instance?.models?.length) return null;
+  const offpeakValues = instance.models
+    .filter((m: any) => m.offpeak_mape !== null && m.offpeak_mape !== undefined)
+    .map((m: any) => m.offpeak_mape);
+  if (offpeakValues.length === 0) return null;
+  return offpeakValues.reduce((a: number, b: number) => a + b, 0) / offpeakValues.length;
+}
+
+// Helper functions for Day Type MAPE (Weekday/Weekend/Holiday)
+function hasDayTypeData(instance: any): boolean {
+  if (!instance?.models?.length) return false;
+  return instance.models.some((m: any) =>
+    (m.weekday_mape !== null && m.weekday_mape !== undefined) ||
+    (m.weekend_mape !== null && m.weekend_mape !== undefined) ||
+    (m.holiday_mape !== null && m.holiday_mape !== undefined)
+  );
+}
+
+function getWeekdayMape(instance: any): number | null {
+  // First check if instance has aggregated avgWeekdayMape
+  if (instance?.avgWeekdayMape !== null && instance?.avgWeekdayMape !== undefined) {
+    return instance.avgWeekdayMape;
+  }
+  // Fallback to calculating from models
+  if (!instance?.models?.length) return null;
+  const weekdayValues = instance.models
+    .filter((m: any) => m.weekday_mape !== null && m.weekday_mape !== undefined)
+    .map((m: any) => m.weekday_mape);
+  if (weekdayValues.length === 0) return null;
+  return weekdayValues.reduce((a: number, b: number) => a + b, 0) / weekdayValues.length;
+}
+
+function getWeekendMape(instance: any): number | null {
+  // First check if instance has aggregated avgWeekendMape
+  if (instance?.avgWeekendMape !== null && instance?.avgWeekendMape !== undefined) {
+    return instance.avgWeekendMape;
+  }
+  // Fallback to calculating from models
+  if (!instance?.models?.length) return null;
+  const weekendValues = instance.models
+    .filter((m: any) => m.weekend_mape !== null && m.weekend_mape !== undefined)
+    .map((m: any) => m.weekend_mape);
+  if (weekendValues.length === 0) return null;
+  return weekendValues.reduce((a: number, b: number) => a + b, 0) / weekendValues.length;
+}
+
+function getHolidayMape(instance: any): number | null {
+  // First check if instance has aggregated avgHolidayMape
+  if (instance?.avgHolidayMape !== null && instance?.avgHolidayMape !== undefined) {
+    return instance.avgHolidayMape;
+  }
+  // Fallback to calculating from models
+  if (!instance?.models?.length) return null;
+  const holidayValues = instance.models
+    .filter((m: any) => m.holiday_mape !== null && m.holiday_mape !== undefined)
+    .map((m: any) => m.holiday_mape);
+  if (holidayValues.length === 0) return null;
+  return holidayValues.reduce((a: number, b: number) => a + b, 0) / holidayValues.length;
+}
+
+// Unused after Models tab simplification
+// function getInstanceModelTypes(instance: any): string[] {
+//   if (!instance.models?.length) return [];
+//   const types = new Set<string>();
+//   instance.models.forEach((m: any) => {
+//     if (m.model_type) types.add(formatModelType(m.model_type));
+//   });
+//   return Array.from(types);
+// }
+
+// Unused after Models tab simplification
+// function formatTrainingPeriod(period: { start: string; end: string } | undefined): string {
+//   if (!period?.start || !period?.end) return 'N/A';
+//   const start = new Date(period.start).toLocaleDateString();
+//   const end = new Date(period.end).toLocaleDateString();
+//   return `${start} - ${end}`;
+// }
+
+// function hasSettings(config: any): boolean {
+//   if (!config) return false;
+//   return config.useXgboost || config.asymmetricLoss || config.biasCorrection;
+// }
+
 // Gateway configuration management
 async function loadGatewayConfig() {
   try {
@@ -1653,64 +2353,6 @@ async function loadGatewayConfig() {
     }
   } catch (error: any) {
     console.error('Failed to load gateway config:', error);
-  }
-}
-
-async function saveGatewayConfig() {
-  try {
-    // Convert reactive proxy to plain object for IPC serialization
-    const config = {
-      host: gatewayConfig.value.host,
-      port: gatewayConfig.value.port,
-      username: gatewayConfig.value.username,
-      password: gatewayConfig.value.password
-    };
-    const result = await window.electronAPI.saveGatewayConfig(config);
-    if (result.success) {
-      gatewayTestStatus.value = 'success';
-      gatewayTestMessage.value = 'Gateway configuration saved';
-      setTimeout(() => {
-        gatewayTestStatus.value = 'idle';
-        gatewayTestMessage.value = '';
-      }, 3000);
-    } else {
-      gatewayTestStatus.value = 'error';
-      gatewayTestMessage.value = result.error || 'Failed to save';
-    }
-  } catch (error: any) {
-    gatewayTestStatus.value = 'error';
-    gatewayTestMessage.value = 'Failed to save: ' + error.message;
-  }
-}
-
-async function testGatewayConnection() {
-  gatewayTestStatus.value = 'testing';
-  gatewayTestMessage.value = 'Testing connection...';
-
-  try {
-    // Convert reactive proxy to plain object for IPC serialization
-    const config = {
-      host: gatewayConfig.value.host,
-      port: gatewayConfig.value.port,
-      username: gatewayConfig.value.username,
-      password: gatewayConfig.value.password
-    };
-    // First save the config, then test
-    await window.electronAPI.saveGatewayConfig(config);
-    const result = await window.electronAPI.testGatewayConnection();
-
-    if (result.connected) {
-      gatewayTestStatus.value = 'success';
-      const accessibleDirs = result.directories?.filter((d: any) => d.accessible).length || 0;
-      const totalDirs = result.directories?.length || 0;
-      gatewayTestMessage.value = `Connected! ${accessibleDirs}/${totalDirs} directories accessible`;
-    } else {
-      gatewayTestStatus.value = 'error';
-      gatewayTestMessage.value = result.error || 'Connection failed';
-    }
-  } catch (error: any) {
-    gatewayTestStatus.value = 'error';
-    gatewayTestMessage.value = 'Test failed: ' + error.message;
   }
 }
 
@@ -1844,19 +2486,19 @@ async function loadRecentRuns(limit = 20) {
   }
 }
 
-async function loadSavedCalibrations(limit = 10) {
-  try {
-    const calibrations = await window.electronAPI.getCalibrations(limit);
-    savedCalibrations.value = calibrations;
-    // Auto-select the most recent converged calibration
-    const converged = calibrations.find(c => c.converged);
-    if (converged && !selectedCalibrationId.value) {
-      selectedCalibrationId.value = converged.id;
-    }
-  } catch (error: any) {
-    console.error('Failed to load saved calibrations:', error);
-  }
-}
+// Removed: Old calibration loading - now using unified Training Instances
+// async function loadSavedCalibrations(limit = 10) {
+//   try {
+//     const calibrations = await window.electronAPI.getCalibrations(limit);
+//     savedCalibrations.value = calibrations;
+//     const converged = calibrations.find(c => c.converged);
+//     if (converged && !selectedCalibrationId.value) {
+//       selectedCalibrationId.value = converged.id;
+//     }
+//   } catch (error: any) {
+//     console.error('Failed to load saved calibrations:', error);
+//   }
+// }
 
 async function runSchedulerManual() {
   if (!manualRunDate.value) {
@@ -1932,17 +2574,33 @@ async function runSchedulerManual() {
   }
 
   try {
-    const calibratorPath = schedulerCalibrationMode.value === 'saved' && schedulerSelectedCalibrator.value
-      ? `models/calibrator/${schedulerSelectedCalibrator.value}.json`
-      : null;
+    // Unified model selection: if an instance is selected, use its calibration
+    // Otherwise, train fresh with the selected training period
+    let useCalibrationId: string | null = null; // String UUID from CFAC calibration service
+    let useModelId: string | null = null; // Demand model ID for inference-only mode
+    let trainingDays: number | undefined = undefined;
 
-    // For auto mode, pass training period (data end date is auto-detected)
-    const trainingDays = schedulerCalibrationMode.value === 'auto' ? computedTrainingDays.value : undefined;
+    if (activeTrainingInstanceId.value && activeTrainingInstance.value) {
+      // Using a saved training instance - use its CFAC calibration (string UUID)
+      useCalibrationId = activeTrainingInstance.value.cfacCalibrationId || null;
 
-    // For reuse mode, pass the selected calibration ID to skip recalibration
-    const useCalibrationId = schedulerCalibrationMode.value === 'reuse' && selectedCalibrationId.value
-      ? selectedCalibrationId.value
-      : null;
+      // Extract demand model ID for inference-only mode (no training)
+      // Priority: zonal > regional (if both exist, use zonal for more granular forecast)
+      const zonalModels = activeTrainingInstance.value.demandZonalSummary;
+      const regionalModels = activeTrainingInstance.value.demandRegionalSummary;
+
+      if (zonalModels && zonalModels.length > 0) {
+        // Use first zonal model ID (all models in same instance share training session)
+        useModelId = zonalModels[0].modelId;
+      } else if (regionalModels && regionalModels.length > 0) {
+        // Fallback to regional model if no zonal models exist
+        useModelId = regionalModels[0].modelId;
+      }
+    }
+    // Note: Train Fresh option removed - scheduler now requires a saved training instance
+
+    // Legacy calibratorPath removed - now using Training Instances instead
+    const calibratorPath = null;
 
     // Determine data source based on toggle
     const useDb = schedulerDataSource.value === 'database';
@@ -1968,9 +2626,10 @@ async function runSchedulerManual() {
       calibratorPath,
       trainingDays,
       endDate: manualRunEndDate.value || null,
-      verbose: schedulerVerboseOutput.value,
+      verbose: true, // Always show verbose output
       pushGateway: schedulerConfig.value.autoPushGateway,
       useCalibrationId,
+      useModelId,  // Pass demand model ID for inference-only mode
       useDb,
       dataDbPath,
       maxIterations: calibrationIterations.value,
@@ -1984,7 +2643,7 @@ async function runSchedulerManual() {
     });
     addSchedulerStatus(isDateRange ? 'Backfill completed' : 'Manual run completed', 'success');
     await loadRecentRuns();
-    await loadSavedCalibrations(); // Refresh calibrations after run (may have created new one)
+    await loadTrainingInstances(); // Refresh training instances after run (may have created new one)
   } catch (error: any) {
     addSchedulerStatus('Manual run failed: ' + error.message, 'error');
   } finally {
@@ -1992,33 +2651,39 @@ async function runSchedulerManual() {
   }
 }
 
-// Load available calibrator models
-async function loadCalibratorModels() {
-  try {
-    const result = await window.electronAPI.listTrainedModels();
-    if (result.success && result.models) {
-      availableCalibratorModels.value = result.models;
-      if (result.models.length > 0 && !selectedCalibrator.value) {
-        selectedCalibrator.value = result.models[0].name;
-      }
-    } else {
-      availableCalibratorModels.value = [];
-    }
-  } catch (e) {
-    console.error('Failed to load calibrator models:', e);
-    availableCalibratorModels.value = [];
-  }
-}
+// Removed: Old calibrator model loading - now using unified Training Instances
+// async function loadCalibratorModels() {
+//   try {
+//     const result = await window.electronAPI.listTrainedModels();
+//     if (result.success && result.models) {
+//       availableCalibratorModels.value = result.models;
+//       if (result.models.length > 0 && !selectedCalibrator.value) {
+//         selectedCalibrator.value = result.models[0].name;
+//       }
+//     } else {
+//       availableCalibratorModels.value = [];
+//     }
+//   } catch (e) {
+//     console.error('Failed to load calibrator models:', e);
+//     availableCalibratorModels.value = [];
+//   }
+// }
 
 // Generate output filename based on naming settings
-function generateOutputFilename(type: 'demand' | 'cfac'): string {
+// For demand forecasts, isZonal parameter determines whether to use zonal prefix
+function generateOutputFilename(type: 'demand' | 'cfac', isZonal?: boolean): string {
   const startDate = forecastStart.value;
   const endDate = forecastEnd.value;
 
   if (useCustomName.value) {
     // Use custom full name if provided
     if (type === 'demand' && customDemandName.value) {
-      return customDemandName.value.endsWith('.csv') ? customDemandName.value : `${customDemandName.value}.csv`;
+      // For custom names with dual output, append _zonal for zonal file
+      const baseName = customDemandName.value.replace(/\.csv$/i, '');
+      if (isZonal) {
+        return `${baseName}_zonal.csv`;
+      }
+      return `${baseName}.csv`;
     }
     if (type === 'cfac' && customCfacName.value) {
       return customCfacName.value.endsWith('.csv') ? customCfacName.value : `${customCfacName.value}.csv`;
@@ -2028,7 +2693,8 @@ function generateOutputFilename(type: 'demand' | 'cfac'): string {
   // Use prefix + date + suffix naming
   let prefix = '';
   if (type === 'demand') {
-    prefix = enableZonal.value ? demandZonalPrefix.value : demandPrefix.value;
+    // Use explicit isZonal parameter for demand forecasts (manual tab always generates both)
+    prefix = isZonal ? demandZonalPrefix.value : demandPrefix.value;
   } else {
     prefix = cfacPrefix.value;
   }
@@ -2040,7 +2706,9 @@ function generateOutputFilename(type: 'demand' | 'cfac'): string {
 }
 
 // Get preview of output filename
-const demandFilenamePreview = computed(() => generateOutputFilename('demand'));
+// For demand, show both regional and zonal since manual forecast generates both
+const demandFilenamePreview = computed(() => generateOutputFilename('demand', false)); // Regional
+const demandZonalFilenamePreview = computed(() => generateOutputFilename('demand', true)); // Zonal
 const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 </script>
 
@@ -2064,7 +2732,7 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
         <button
           class="nav-item"
           :class="{ active: activeTab === 'manual' }"
-          @click="activeTab = 'manual'"
+          @click="activeTab = 'manual'; loadTrainingInstances()"
           :disabled="isRunning || schedulerIsRunning"
         >
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -2075,7 +2743,7 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
         <button
           class="nav-item"
           :class="{ active: activeTab === 'scheduler' }"
-          @click="activeTab = 'scheduler'"
+          @click="activeTab = 'scheduler'; loadTrainingInstances(); loadRecentRuns()"
           :disabled="isRunning || schedulerIsRunning"
         >
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -2094,6 +2762,18 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
             <path d="M5 12h14M12 5l7 7-7 7"/>
           </svg>
           <span class="nav-text">Gateway</span>
+        </button>
+        <button
+          class="nav-item"
+          :class="{ active: activeTab === 'models' }"
+          @click="activeTab = 'models'; loadModels(); loadCfacCalibrations()"
+          :disabled="isRunning || schedulerIsRunning"
+        >
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M4 7V4a1 1 0 011-1h14a1 1 0 011 1v3M4 7h16M4 7v10a1 1 0 001 1h14a1 1 0 001-1V7"/>
+            <path d="M9 11h6M9 15h3"/>
+          </svg>
+          <span class="nav-text">Models</span>
         </button>
         <button
           class="nav-item"
@@ -2126,134 +2806,85 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
           <button @click="clearFormatMessage" class="format-close">&times;</button>
         </div>
 
+        <!-- NOTE: Training model selection moved to Training Settings card in Row 2 -->
+
         <!-- Row Layout for Manual Tab -->
         <div class="manual-layout">
-          <!-- Row 1: Data Source (full width) -->
+          <!-- Row 1: Data Source Info (read-only, configured in Settings) -->
           <section class="card card-full-row">
-            <h2>Data Source</h2>
-            <div class="data-source-content">
-              <div class="source-toggle">
-                <label class="radio-label">
-                  <input type="radio" v-model="dataSource" value="csv" :disabled="isRunning" />
-                  <span>CSV</span>
-                </label>
-                <label class="radio-label">
-                  <input type="radio" v-model="dataSource" value="database" :disabled="isRunning" />
-                  <span>Database</span>
-                </label>
+            <div class="card-header-inline">
+              <h2>Data Source</h2>
+              <span class="data-source-badge">{{ dataSource === 'database' ? 'Database' : 'CSV' }}</span>
+              <button @click="activeTab = 'settings'" class="btn btn-text btn-xs">Change</button>
+            </div>
+            <div class="data-source-info-compact">
+              <div v-if="dataSource === 'database'" class="db-stats-row">
+                <span class="db-label">{{ schedulerDemandGeography === 'zonal' ? 'Zonal' : 'Regional' }} DB:</span>
+                <span class="db-stat" v-if="databaseInfo">{{ databaseInfo.demand?.records?.toLocaleString() || 0 }} records</span>
+                <span class="db-stat hint" v-else>Loading...</span>
               </div>
-
-              <div v-if="dataSource === 'database'" class="data-source-inputs">
-                <div class="form-group compact">
-                  <label>Database</label>
-                  <div class="input-row">
-                    <input type="text" v-model="databasePath" placeholder="Select database file..." readonly />
-                    <button @click="browseDatabase" class="btn btn-secondary btn-sm" :disabled="isRunning">Browse</button>
-                  </div>
-                </div>
-                <div v-if="databaseInfo" class="db-info-inline">
-                  <span class="db-stat">Demand: {{ databaseInfo.demand?.records?.toLocaleString() || 0 }}</span>
-                  <span class="db-stat">CFAC: {{ databaseInfo.cfac?.records?.toLocaleString() || 0 }}</span>
-                  <span class="db-stat">Weather: {{ databaseInfo.weather?.records?.toLocaleString() || 0 }}</span>
-                  <button @click="loadDatabaseInfo" class="btn btn-text btn-xs" :disabled="isLoadingDbInfo">Refresh</button>
-                </div>
-              </div>
-
-              <div v-else class="data-source-inputs csv-mode">
-                <div class="form-group compact" v-if="enableDemand">
-                  <label>Demand</label>
-                  <div class="input-row">
-                    <input type="text" v-model="demandDataDir" placeholder="Demand folder..." readonly />
-                    <button @click="browseDemandDir" class="btn btn-secondary btn-sm" :disabled="isRunning">Browse</button>
-                  </div>
-                </div>
-                <div class="form-group compact" v-if="enableCfac">
-                  <label>CFAC</label>
-                  <div class="input-row">
-                    <input type="text" v-model="cfacDataDir" placeholder="CFAC folder..." readonly />
-                    <button @click="browseCfacDir" class="btn btn-secondary btn-sm" :disabled="isRunning">Browse</button>
-                  </div>
-                </div>
-              </div>
-
-              <div class="output-dir-inputs">
-                <div class="form-group compact" v-if="enableDemand">
-                  <label>Demand Out</label>
-                  <div class="input-row">
-                    <input type="text" v-model="demandOutputDir" placeholder="Output folder..." :disabled="isRunning" />
-                    <button @click="browseDemandOutputDir" class="btn btn-secondary btn-sm" :disabled="isRunning">Browse</button>
-                  </div>
-                </div>
-                <div class="form-group compact" v-if="enableCfac">
-                  <label>CFAC Out</label>
-                  <div class="input-row">
-                    <input type="text" v-model="cfacOutputDir" placeholder="Output folder..." :disabled="isRunning" />
-                    <button @click="browseCfacOutputDir" class="btn btn-secondary btn-sm" :disabled="isRunning">Browse</button>
-                  </div>
-                </div>
-              </div>
+              <span class="hint">Output: {{ globalSchedulerOutputDir || 'output/' }}</span>
             </div>
           </section>
 
           <!-- Row 2: 3-Column Grid -->
           <div class="cards-grid-3">
-            <!-- Column 1: Output Naming Card -->
+            <!-- Column 1: Output Naming Card (Read-Only Reference) -->
             <section class="card card-compact">
-              <h2>Output Naming</h2>
+              <div class="card-header-inline">
+                <h2>Output Naming</h2>
+                <button @click="activeTab = 'settings'" class="btn btn-text btn-xs">Configure</button>
+              </div>
               <div class="output-preview">
-                <span v-if="enableDemand" class="preview-tag">{{ demandFilenamePreview }}</span>
+                <span v-if="enableDemand" class="preview-tag" title="Regional (3 regions)">{{ demandFilenamePreview }}</span>
+                <span v-if="enableDemand" class="preview-tag zonal-tag" title="Zonal (14 zones)">{{ demandZonalFilenamePreview }}</span>
                 <span v-if="enableCfac" class="preview-tag">{{ cfacFilenamePreview }}</span>
               </div>
-              <div class="naming-mode">
-                <label class="radio-label">
-                  <input type="radio" :value="false" v-model="useCustomName" :disabled="isRunning" />
-                  <span>Prefix</span>
-                </label>
-                <label class="radio-label">
-                  <input type="radio" :value="true" v-model="useCustomName" :disabled="isRunning" />
-                  <span>Custom</span>
-                </label>
-              </div>
-              <div v-if="!useCustomName" class="naming-grid">
-                <div class="form-group compact" v-if="enableDemand">
-                  <label>Dem</label>
-                  <input type="text" v-model="demandPrefix" placeholder="FC_DEM_" :disabled="isRunning" />
-                </div>
-                <div class="form-group compact" v-if="enableCfac">
-                  <label>CFAC</label>
-                  <input type="text" v-model="cfacPrefix" placeholder="FC_CF_" :disabled="isRunning" />
-                </div>
-                <div class="form-group compact">
-                  <label>Suffix</label>
-                  <input type="text" v-model="outputSuffix" placeholder="_v2" :disabled="isRunning" />
-                </div>
-              </div>
-              <div v-else class="naming-grid">
-                <div class="form-group compact" v-if="enableDemand">
-                  <label>Demand</label>
-                  <input type="text" v-model="customDemandName" placeholder="forecast.csv" :disabled="isRunning" />
-                </div>
-                <div class="form-group compact" v-if="enableCfac">
-                  <label>CFAC</label>
-                  <input type="text" v-model="customCfacName" placeholder="cfac.csv" :disabled="isRunning" />
-                </div>
-              </div>
+              <p class="hint" style="margin-top: 8px;">
+                Mode: {{ useCustomName ? 'Custom' : 'Prefix' }}
+                <br />
+                Configure naming patterns in Settings tab.
+              </p>
             </section>
 
-            <!-- Column 2: Model Training Card -->
-            <section class="card card-compact">
-              <h2>Model Training</h2>
-              <div class="calibration-mode-row">
-                <label class="radio-label">
-                  <input type="radio" v-model="calibrationMode" value="auto" :disabled="isRunning" />
-                  <span>Auto</span>
-                </label>
-                <label class="radio-label">
-                  <input type="radio" v-model="calibrationMode" value="saved" :disabled="isRunning || availableCalibratorModels.length === 0" />
-                  <span>Saved</span>
-                </label>
+            <!-- Column 2: Training Settings -->
+            <section class="card card-compact training-settings-card">
+              <div class="card-header-inline">
+                <h2>Training Settings</h2>
+                <button @click="loadTrainingInstances" class="btn btn-text btn-xs" :disabled="isRunning">↻</button>
               </div>
-              <div v-if="calibrationMode === 'auto'" class="training-period-section">
+
+              <!-- Model Selection Listbox -->
+              <div class="model-listbox-container">
+                <div
+                  class="model-listbox-item"
+                  :class="{ 'selected': !selectedTrainingInstanceId }"
+                  @click="selectedTrainingInstanceId = null"
+                >
+                  <span class="model-name">Train Fresh</span>
+                  <span class="model-hint">Configure dates below</span>
+                </div>
+                <div
+                  v-for="instance in trainingInstances"
+                  :key="instance.id"
+                  class="model-listbox-item"
+                  :class="{ 'selected': selectedTrainingInstanceId === instance.id }"
+                  @click="selectedTrainingInstanceId = instance.id"
+                >
+                  <span class="model-name">{{ instance.templateName || 'Training Run' }}</span>
+                  <span class="model-date">{{ formatInstanceDate(instance.startedAt) }}</span>
+                  <span class="model-metrics">
+                    {{ instance.demandRegionalMape?.toFixed(1) || 'N/A' }}% MAPE
+                  </span>
+                </div>
+                <div v-if="trainingInstances.length === 0" class="model-listbox-empty">
+                  No saved models yet
+                </div>
+              </div>
+
+              <!-- Training Period (only when Train Fresh) -->
+              <div v-if="!selectedTrainingInstanceId" class="training-dates-section">
+                <p class="hint" style="margin: 8px 0 4px; font-size: 10px;">Training data range:</p>
                 <div class="date-row">
                   <div class="form-group compact">
                     <label>Start</label>
@@ -2264,19 +2895,21 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
                     <input type="date" v-model="trainingEnd" :disabled="isRunning" />
                   </div>
                 </div>
-                <div class="save-option">
-                  <label class="checkbox-label">
-                    <input type="checkbox" v-model="saveCalibrator" :disabled="isRunning" />
-                    <span>Save</span>
-                  </label>
+                <!-- Model Name for saved model -->
+                <div class="form-group compact" style="margin-top: 8px;">
+                  <label>Model Name <span class="optional">(optional)</span></label>
+                  <input type="text" v-model="modelName" :disabled="isRunning" placeholder="e.g., Dec2025-Test" style="width: 100%;" />
                 </div>
               </div>
-              <div v-if="calibrationMode === 'saved'" class="saved-model-section">
-                <select v-model="selectedCalibrator" :disabled="isRunning" class="calibrator-dropdown">
-                  <option v-for="model in availableCalibratorModels" :key="model.name" :value="model.name">
-                    {{ model.name }}
-                  </option>
-                </select>
+
+              <!-- Selected Instance Info (when saved model selected) -->
+              <div v-else-if="selectedTrainingInstance" class="selected-model-info">
+                <p class="hint" style="font-size: 10px;">
+                  Period: {{ selectedTrainingInstance.dateRangeStart }} → {{ selectedTrainingInstance.dateRangeEnd }}
+                </p>
+                <p v-if="selectedTrainingInstance.cfacCalibrationId" class="hint" style="font-size: 10px;">
+                  ✓ CFAC Calibration included
+                </p>
               </div>
             </section>
 
@@ -2302,10 +2935,18 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
                     <span class="toggle-slider"></span>
                     <span class="toggle-label">Demand</span>
                   </label>
-                  <select v-if="enableDemand" v-model="demandModel" :disabled="isRunning" class="model-dropdown-sm">
+                  <select v-if="enableDemand" v-model="demandModel" :disabled="isRunning" class="model-dropdown-sm"
+                    :title="demandModel === 'hybrid-calibrated' ? 'XGBoost calibration layer trained on recent data to correct systematic errors' : 'Hybrid model only (no calibration layer)'">
                     <option value="hybrid-calibrated">+Calib</option>
                     <option value="hybrid">Hybrid</option>
                   </select>
+                  <span v-if="enableDemand && demandModel === 'hybrid-calibrated'" class="calib-indicator" title="Calibration enabled: trains XGBoost correction layer">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="calib-icon">
+                      <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                      <path d="M2 17l10 5 10-5"/>
+                      <path d="M2 12l10 5 10-5"/>
+                    </svg>
+                  </span>
                 </div>
                 <div class="toggle-group">
                   <label class="toggle">
@@ -2318,12 +2959,9 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
                     <option value="hybrid-lstm">+LSTM</option>
                   </select>
                 </div>
-                <div class="toggle-group" :class="{ 'disabled': !enableDemand }">
-                  <label class="toggle">
-                    <input type="checkbox" v-model="enableZonal" :disabled="isRunning || !enableDemand" />
-                    <span class="toggle-slider"></span>
-                    <span class="toggle-label">Zonal</span>
-                  </label>
+                <!-- Zonal toggle removed - Manual Forecast now always generates both Regional and Zonal -->
+                <div class="toggle-group info-badge" v-if="enableDemand" title="Manual Forecast generates both Regional and Zonal demand files">
+                  <span class="dual-mode-label">Regional + Zonal</span>
                 </div>
                 <div class="scaling-group-compact" v-if="!usePerTypeScaling">
                   <label>Scale</label>
@@ -2386,99 +3024,18 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
                 </div>
               </div>
 
-              <!-- Zone Scaling Section (Manual Forecast) -->
-              <div v-if="enableDemand" class="zone-scaling-section" style="margin-top: 12px;">
-                <div class="zone-scaling-header" @click="showZoneScaling = !showZoneScaling">
-                  <span class="collapse-icon">{{ showZoneScaling ? '▼' : '▶' }}</span>
-                  <span>Zone Scaling</span>
-                  <span v-if="hasAnyZoneScales()" class="zone-scale-indicator">●</span>
-                </div>
-                <div v-if="showZoneScaling" class="zone-scaling-content">
-                  <p class="hint" style="margin-bottom: 8px;">Adjust forecasts for specific zones or regions (%)</p>
-
-                  <!-- Region scales -->
-                  <div class="zone-scale-group">
-                    <div class="zone-scale-group-header">Regions</div>
-                    <div class="zone-scale-row" v-for="region in ALL_REGIONS" :key="'manual-' + region">
-                      <label class="zone-label">{{ region }}</label>
-                      <input
-                        type="number"
-                        class="zone-scale-input"
-                        :value="getRegionScale(region)"
-                        @change="(e: Event) => { setRegionScale(region, parseFloat((e.target as HTMLInputElement).value) || 0); saveGlobalConfig(); }"
-                        placeholder="0"
-                        min="-50"
-                        max="50"
-                        step="0.5"
-                        :disabled="isRunning"
-                      />
-                      <span class="zone-scale-unit">%</span>
-                    </div>
-                  </div>
-
-                  <!-- Luzon zones -->
-                  <div class="zone-scale-group">
-                    <div class="zone-scale-group-header">Luzon Zones</div>
-                    <div class="zone-scale-row" v-for="zone in ALL_ZONES.filter(z => ZONE_TO_REGION[z] === 'CLUZ')" :key="'manual-' + zone">
-                      <label class="zone-label">{{ zone }}</label>
-                      <input
-                        type="number"
-                        class="zone-scale-input"
-                        :value="getZoneScale(zone)"
-                        @change="(e: Event) => { setZoneScale(zone, parseFloat((e.target as HTMLInputElement).value) || 0); saveGlobalConfig(); }"
-                        placeholder="0"
-                        min="-50"
-                        max="50"
-                        step="0.5"
-                        :disabled="isRunning"
-                      />
-                      <span class="zone-scale-unit">%</span>
-                    </div>
-                  </div>
-
-                  <!-- Visayas zones -->
-                  <div class="zone-scale-group">
-                    <div class="zone-scale-group-header">Visayas Zones</div>
-                    <div class="zone-scale-row" v-for="zone in ALL_ZONES.filter(z => ZONE_TO_REGION[z] === 'CVIS')" :key="'manual-' + zone">
-                      <label class="zone-label">{{ zone }}</label>
-                      <input
-                        type="number"
-                        class="zone-scale-input"
-                        :value="getZoneScale(zone)"
-                        @change="(e: Event) => { setZoneScale(zone, parseFloat((e.target as HTMLInputElement).value) || 0); saveGlobalConfig(); }"
-                        placeholder="0"
-                        min="-50"
-                        max="50"
-                        step="0.5"
-                        :disabled="isRunning"
-                      />
-                      <span class="zone-scale-unit">%</span>
-                    </div>
-                  </div>
-
-                  <!-- Mindanao zones -->
-                  <div class="zone-scale-group">
-                    <div class="zone-scale-group-header">Mindanao Zones</div>
-                    <div class="zone-scale-row" v-for="zone in ALL_ZONES.filter(z => ZONE_TO_REGION[z] === 'CMIN')" :key="'manual-' + zone">
-                      <label class="zone-label">{{ zone }}</label>
-                      <input
-                        type="number"
-                        class="zone-scale-input"
-                        :value="getZoneScale(zone)"
-                        @change="(e: Event) => { setZoneScale(zone, parseFloat((e.target as HTMLInputElement).value) || 0); saveGlobalConfig(); }"
-                        placeholder="0"
-                        min="-50"
-                        max="50"
-                        step="0.5"
-                        :disabled="isRunning"
-                      />
-                      <span class="zone-scale-unit">%</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
             </section>
           </div>
+
+          <!-- Row 3: Zone Scaling Reference (configured in Settings) -->
+          <section v-if="enableDemand" class="card card-full-row">
+            <div class="card-header-inline">
+              <h2>Zone Scaling</h2>
+              <span v-if="hasAnyZoneScales()" class="zone-scale-indicator">● Active</span>
+              <button @click="activeTab = 'settings'" class="btn btn-text btn-xs">Configure</button>
+            </div>
+            <p class="hint">Zone scaling factors are applied automatically from Settings.</p>
+          </section>
         </div>
 
       </div><!-- End Manual Forecast Tab -->
@@ -2487,6 +3044,40 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
       <div v-if="activeTab === 'scheduler'" class="tab-content">
         <h1 class="page-title">Scheduler</h1>
         <p class="page-subtitle">Run manual forecasts and configure automated scheduling</p>
+
+        <!-- Active Model Card -->
+        <section class="card active-model-card">
+          <div class="active-model-header">
+            <h2>Active Model</h2>
+            <span v-if="activeTrainingInstance" class="status-indicator active" title="Model ready for scheduler">●</span>
+          </div>
+
+          <div v-if="activeTrainingInstance" class="active-model-details">
+            <div class="model-name-display">
+              {{ activeTrainingInstance.templateName || 'Training Instance' }} - {{ formatInstanceDateShort(activeTrainingInstance.startedAt) }}
+            </div>
+            <div class="model-metrics-display">
+              <span v-if="activeTrainingInstance.demandRegionalMape">
+                Regional MAPE: {{ activeTrainingInstance.demandRegionalMape.toFixed(1) }}%
+              </span>
+              <span v-if="activeTrainingInstance.demandZonalMape">
+                <span v-if="activeTrainingInstance.demandRegionalMape"> | </span>
+                Zonal MAPE: {{ activeTrainingInstance.demandZonalMape.toFixed(1) }}%
+              </span>
+            </div>
+            <div v-if="activeTrainingInstance.dateRangeStart && activeTrainingInstance.dateRangeEnd" class="training-period-display">
+              Training Period: {{ activeTrainingInstance.dateRangeStart }} to {{ activeTrainingInstance.dateRangeEnd }}
+            </div>
+          </div>
+
+          <div v-else class="no-model-selected">
+            <p>No model selected for scheduler</p>
+          </div>
+
+          <button @click="activeTab = 'models'" class="btn" :class="activeTrainingInstance ? 'btn-outline' : 'btn-primary'">
+            {{ activeTrainingInstance ? 'Change Model' : 'Select Model' }} →
+          </button>
+        </section>
 
         <!-- Manual Run Section - Full Width -->
         <section class="card manual-run-card">
@@ -2542,53 +3133,21 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
               </div>
             </div>
 
-            <!-- Calibration Settings -->
+            <!-- Model Selection (Unified Training Instances) -->
             <div class="manual-run-calibration">
               <div class="form-group compact">
-                <label>Calibration</label>
-                <div class="calibration-mode-row">
-                  <label class="radio-label">
-                    <input type="radio" v-model="schedulerCalibrationMode" value="auto" :disabled="schedulerIsRunning" />
-                    <span>Auto</span>
-                  </label>
-                  <label class="radio-label" :title="savedCalibrations.length === 0 ? 'No saved calibrations - run scheduler first' : 'Use saved calibration (skips calibration phase)'">
-                    <input type="radio" v-model="schedulerCalibrationMode" value="reuse" :disabled="schedulerIsRunning || savedCalibrations.length === 0" />
-                    <span>Reuse</span>
-                  </label>
-                  <label class="radio-label">
-                    <input type="radio" v-model="schedulerCalibrationMode" value="saved" :disabled="schedulerIsRunning || availableCalibratorModels.length === 0" />
-                    <span>Model</span>
-                  </label>
-                </div>
-              </div>
-              <!-- Reuse mode: select from saved calibrations -->
-              <div v-if="schedulerCalibrationMode === 'reuse'" class="form-group compact">
-                <select v-model="selectedCalibrationId" :disabled="schedulerIsRunning" class="calibrator-dropdown">
-                  <option v-for="cal in savedCalibrations" :key="cal.id" :value="cal.id">
-                    #{{ cal.id }} | Wind {{ cal.windScale >= 0 ? '+' : '' }}{{ cal.windScale }}%, Solar {{ cal.solarScale >= 0 ? '+' : '' }}{{ cal.solarScale }}% {{ cal.converged ? '✓' : '' }}
-                  </option>
-                </select>
-                <span v-if="selectedCalibrationId" class="hint-inline" style="margin-left: 8px; font-size: 11px;">
-                  {{ savedCalibrations.find(c => c.id === selectedCalibrationId)?.periodStart }} - {{ savedCalibrations.find(c => c.id === selectedCalibrationId)?.periodEnd }}
-                </span>
-              </div>
-              <!-- Saved model mode -->
-              <div v-if="schedulerCalibrationMode === 'saved'" class="form-group compact">
-                <select v-model="schedulerSelectedCalibrator" :disabled="schedulerIsRunning" class="calibrator-dropdown">
-                  <option v-for="model in availableCalibratorModels" :key="model.name" :value="model.name">
-                    {{ model.name }} <span v-if="model.mape">({{ model.mape.toFixed(1) }}% MAPE)</span>
+                <label>Model</label>
+                <select v-model="activeTrainingInstanceId" @change="onActiveInstanceChange" :disabled="schedulerIsRunning" class="calibrator-dropdown" style="min-width: 250px;">
+                  <option v-for="instance in trainingInstances" :key="instance.id" :value="instance.id">
+                    {{ instance.templateName || 'Training' }} - {{ formatInstanceDate(instance.startedAt) }}
+                    ({{ instance.demandRegionalMape?.toFixed(1) || 'N/A' }}% MAPE)
                   </option>
                 </select>
               </div>
-              <!-- Auto mode: select calibration period -->
-              <div v-if="schedulerCalibrationMode === 'auto'" class="form-group compact">
-                <select v-model="schedulerCalibrationPeriod" :disabled="schedulerIsRunning" class="calibrator-dropdown">
-                  <option value="14days">2 Weeks</option>
-                  <option value="1month">1 Month</option>
-                  <option value="2months">2 Months</option>
-                  <option value="3months">3 Months</option>
-                </select>
-                <span class="hint-inline" style="margin-left: 8px;">({{ computedTrainingDays }} days)</span>
+              <!-- Show instance info -->
+              <div v-if="activeTrainingInstance" class="instance-info-compact" style="font-size: 11px; color: var(--text-secondary); margin-top: 4px;">
+                Using: {{ activeTrainingInstance.dateRangeStart }} to {{ activeTrainingInstance.dateRangeEnd }}
+                <span v-if="activeTrainingInstance.cfacCalibrationId"> | CFAC Calibration included</span>
               </div>
             </div>
 
@@ -2611,12 +3170,8 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
               </template>
             </div>
 
-            <!-- Verbose and Run Button -->
+            <!-- Run Button -->
             <div class="manual-run-actions">
-              <label class="checkbox-label">
-                <input type="checkbox" v-model="schedulerVerboseOutput" :disabled="schedulerIsRunning" />
-                <span>Verbose</span>
-              </label>
               <button @click="runSchedulerManual" class="btn btn-primary" :disabled="schedulerIsRunning || !manualRunDate">
                 <span v-if="schedulerIsRunning" class="btn-content">
                   <span class="spinner"></span>
@@ -2638,51 +3193,6 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
           </div>
 
           <div class="automation-grid">
-            <!-- Schedule Section -->
-            <div class="automation-section">
-              <h3>Schedule</h3>
-              <div class="toggle-group" style="margin-bottom: 12px;">
-                <label class="toggle">
-                  <input type="checkbox" v-model="schedulerConfig.enabled" />
-                  <span class="toggle-slider"></span>
-                  <span class="toggle-label">Enable Scheduler</span>
-                </label>
-              </div>
-              <div class="form-group compact">
-                <label>Morning Run</label>
-                <input type="time" v-model="schedulerConfig.runTimeMorning" />
-              </div>
-              <div class="toggle-group" style="margin-top: 8px;">
-                <label class="toggle">
-                  <input type="checkbox" v-model="schedulerConfig.secondRunEnabled" />
-                  <span class="toggle-slider"></span>
-                  <span class="toggle-label">Evening Run</span>
-                </label>
-              </div>
-              <div v-if="schedulerConfig.secondRunEnabled" class="form-group compact" style="margin-top: 8px;">
-                <input type="time" v-model="schedulerConfig.runTimeEvening" />
-              </div>
-              <div class="form-group compact" style="margin-top: 12px;">
-                <label>Days</label>
-                <div class="days-grid">
-                  <label class="day-checkbox" v-for="day in ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']" :key="day">
-                    <input
-                      type="checkbox"
-                      :checked="schedulerConfig.runDays.includes(day)"
-                      @change="(e) => {
-                        if ((e.target as HTMLInputElement).checked) {
-                          schedulerConfig.runDays.push(day);
-                        } else {
-                          schedulerConfig.runDays = schedulerConfig.runDays.filter(d => d !== day);
-                        }
-                      }"
-                    />
-                    <span>{{ day.charAt(0) }}</span>
-                  </label>
-                </div>
-              </div>
-            </div>
-
             <!-- Forecast Types Section -->
             <div class="automation-section">
               <h3>Forecast Types</h3>
@@ -2708,94 +3218,6 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
                   <option value="zonal">Zonal (14)</option>
                   <option value="both">Both</option>
                 </select>
-              </div>
-
-              <!-- Zone Scaling Section -->
-              <div v-if="schedulerConfig.forecastDemand" class="zone-scaling-section" style="margin-top: 12px;">
-                <div class="zone-scaling-header" @click="showZoneScaling = !showZoneScaling">
-                  <span class="collapse-icon">{{ showZoneScaling ? '▼' : '▶' }}</span>
-                  <span>Zone Scaling</span>
-                  <span v-if="hasAnyZoneScales()" class="zone-scale-indicator">●</span>
-                </div>
-                <div v-if="showZoneScaling" class="zone-scaling-content">
-                  <p class="hint" style="margin-bottom: 8px;">Adjust forecasts for specific zones or regions (%)</p>
-
-                  <!-- Region scales -->
-                  <div class="zone-scale-group">
-                    <div class="zone-scale-group-header">Regions</div>
-                    <div class="zone-scale-row" v-for="region in ALL_REGIONS" :key="region">
-                      <label class="zone-label">{{ region }}</label>
-                      <input
-                        type="number"
-                        class="zone-scale-input"
-                        :value="getRegionScale(region)"
-                        @change="(e: Event) => { setRegionScale(region, parseFloat((e.target as HTMLInputElement).value) || 0); saveGlobalConfig(); }"
-                        placeholder="0"
-                        min="-50"
-                        max="50"
-                        step="0.5"
-                      />
-                      <span class="zone-scale-unit">%</span>
-                    </div>
-                  </div>
-
-                  <!-- Luzon zones -->
-                  <div class="zone-scale-group">
-                    <div class="zone-scale-group-header">Luzon Zones</div>
-                    <div class="zone-scale-row" v-for="zone in ALL_ZONES.filter(z => ZONE_TO_REGION[z] === 'CLUZ')" :key="zone">
-                      <label class="zone-label">{{ zone }}</label>
-                      <input
-                        type="number"
-                        class="zone-scale-input"
-                        :value="getZoneScale(zone)"
-                        @change="(e: Event) => { setZoneScale(zone, parseFloat((e.target as HTMLInputElement).value) || 0); saveGlobalConfig(); }"
-                        placeholder="0"
-                        min="-50"
-                        max="50"
-                        step="0.5"
-                      />
-                      <span class="zone-scale-unit">%</span>
-                    </div>
-                  </div>
-
-                  <!-- Visayas zones -->
-                  <div class="zone-scale-group">
-                    <div class="zone-scale-group-header">Visayas Zones</div>
-                    <div class="zone-scale-row" v-for="zone in ALL_ZONES.filter(z => ZONE_TO_REGION[z] === 'CVIS')" :key="zone">
-                      <label class="zone-label">{{ zone }}</label>
-                      <input
-                        type="number"
-                        class="zone-scale-input"
-                        :value="getZoneScale(zone)"
-                        @change="(e: Event) => { setZoneScale(zone, parseFloat((e.target as HTMLInputElement).value) || 0); saveGlobalConfig(); }"
-                        placeholder="0"
-                        min="-50"
-                        max="50"
-                        step="0.5"
-                      />
-                      <span class="zone-scale-unit">%</span>
-                    </div>
-                  </div>
-
-                  <!-- Mindanao zones -->
-                  <div class="zone-scale-group">
-                    <div class="zone-scale-group-header">Mindanao Zones</div>
-                    <div class="zone-scale-row" v-for="zone in ALL_ZONES.filter(z => ZONE_TO_REGION[z] === 'CMIN')" :key="zone">
-                      <label class="zone-label">{{ zone }}</label>
-                      <input
-                        type="number"
-                        class="zone-scale-input"
-                        :value="getZoneScale(zone)"
-                        @change="(e: Event) => { setZoneScale(zone, parseFloat((e.target as HTMLInputElement).value) || 0); saveGlobalConfig(); }"
-                        placeholder="0"
-                        min="-50"
-                        max="50"
-                        step="0.5"
-                      />
-                      <span class="zone-scale-unit">%</span>
-                    </div>
-                  </div>
-                </div>
               </div>
             </div>
 
@@ -2828,70 +3250,9 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
                   <span class="toggle-label">Auto-Push</span>
                 </label>
               </div>
-              <p class="hint">Push forecasts to Vantage-Gateway</p>
-
-              <!-- Gateway Configuration -->
-              <div class="gateway-config" v-if="schedulerConfig.autoPushGateway">
-                <div class="form-row">
-                  <div class="form-group compact">
-                    <label>Host</label>
-                    <input type="text" v-model="gatewayConfig.host" placeholder="100.115.9.94" style="width: 140px;" />
-                  </div>
-                  <div class="form-group compact">
-                    <label>Port</label>
-                    <input type="number" v-model="gatewayConfig.port" min="1" max="65535" style="width: 70px;" />
-                  </div>
-                </div>
-                <div class="form-group compact">
-                  <label>Username</label>
-                  <input type="text" v-model="gatewayConfig.username" placeholder="vantage-upload" />
-                </div>
-                <div class="form-group compact">
-                  <label>Password</label>
-                  <input type="password" v-model="gatewayConfig.password" placeholder="Enter gateway password" />
-                </div>
-                <div class="gateway-actions">
-                  <button
-                    class="btn btn-sm"
-                    @click="saveGatewayConfig"
-                    :disabled="gatewayTestStatus === 'testing'"
-                  >
-                    Save
-                  </button>
-                  <button
-                    class="btn btn-sm btn-secondary"
-                    @click="testGatewayConnection"
-                    :disabled="gatewayTestStatus === 'testing' || !gatewayConfig.password"
-                  >
-                    <span v-if="gatewayTestStatus === 'testing'">Testing...</span>
-                    <span v-else>Test Connection</span>
-                  </button>
-                </div>
-                <div v-if="gatewayTestMessage" class="gateway-status" :class="gatewayTestStatus">
-                  {{ gatewayTestMessage }}
-                </div>
-              </div>
+              <p class="hint">Push forecasts to Vantage-Gateway. Configure in Gateway tab.</p>
             </div>
 
-            <!-- Weather Section -->
-            <div class="automation-section">
-              <h3>Weather</h3>
-              <div class="form-group compact">
-                <label>Max Age (hours)</label>
-                <input type="number" v-model="schedulerConfig.weatherMaxAge" min="1" max="24" style="width: 80px;" />
-              </div>
-              <p class="hint">Reject stale weather data</p>
-            </div>
-
-            <!-- Archive Section -->
-            <div class="automation-section">
-              <h3>Archive</h3>
-              <div class="form-group compact">
-                <label>Retention (days)</label>
-                <input type="number" v-model="schedulerConfig.archiveRetention" min="7" max="365" style="width: 80px;" />
-              </div>
-              <p class="hint">Auto-delete old records</p>
-            </div>
           </div>
         </section>
       </div><!-- End Scheduler Tab -->
@@ -3106,6 +3467,795 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
         </div>
       </div><!-- End Gateway Tab -->
 
+      <!-- ============ MODELS TAB - COMPLETE REDESIGN ============ -->
+      <div v-if="activeTab === 'models'" class="tab-content" style="display: flex; height: calc(100vh - 120px); padding: 0; gap: 0; background: #1a1a2e;">
+
+        <!-- LEFT PANEL: Training Instances List -->
+        <div style="width: 320px; min-width: 280px; background: #16213e; border-right: 1px solid #0f3460; display: flex; flex-direction: column;">
+
+          <!-- Header -->
+          <div style="padding: 16px 20px; border-bottom: 1px solid #0f3460; display: flex; justify-content: space-between; align-items: center;">
+            <h2 style="margin: 0; font-size: 18px; font-weight: 600; color: #e94560;">Trained Instances</h2>
+            <div style="display: flex; gap: 8px;">
+              <button @click="loadModels" class="btn btn-secondary btn-sm" :disabled="modelsLoading" style="padding: 6px 12px;">
+                {{ modelsLoading ? 'Loading...' : 'Refresh' }}
+              </button>
+            </div>
+          </div>
+
+          <!-- Search & Filter -->
+          <div style="padding: 12px 16px; border-bottom: 1px solid #0f3460; display: flex; gap: 8px;">
+            <input
+              type="text"
+              v-model="modelSearchQuery"
+              placeholder="Search..."
+              style="flex: 1; padding: 8px 12px; border: 1px solid #0f3460; border-radius: 6px; background: #1a1a2e; color: #fff; font-size: 13px;"
+            />
+            <select v-model="modelTypeFilter" style="padding: 8px; border: 1px solid #0f3460; border-radius: 6px; background: #1a1a2e; color: #fff; font-size: 13px;">
+              <option value="all">All</option>
+              <option value="zonal">Zonal</option>
+              <option value="regional">Regional</option>
+              <option value="wind">Wind</option>
+              <option value="solar">Solar</option>
+            </select>
+          </div>
+
+          <!-- Instances List -->
+          <div style="flex: 1; overflow-y: auto; padding: 12px;">
+
+            <!-- Loading State -->
+            <div v-if="modelsLoading" style="text-align: center; padding: 40px; color: #94a3b8;">
+              <p>Loading instances...</p>
+            </div>
+
+            <!-- Empty State -->
+            <div v-else-if="filteredInstances.length === 0" style="text-align: center; padding: 40px; color: #94a3b8;">
+              <p style="font-size: 16px; margin-bottom: 8px;">No trained instances</p>
+              <p style="font-size: 13px;">Train models from the Manual tab</p>
+            </div>
+
+            <!-- Instance Cards -->
+            <div v-else>
+              <div
+                v-for="instance in filteredInstances"
+                :key="instance.id"
+                @click="selectInstance(instance)"
+                style="padding: 14px 16px; margin-bottom: 10px; border-radius: 8px; cursor: pointer; transition: all 0.2s;"
+                :style="{
+                  background: selectedInstanceId === instance.id ? '#e94560' : '#1a1a2e',
+                  border: selectedInstanceId === instance.id ? '2px solid #e94560' : '2px solid #0f3460',
+                  color: selectedInstanceId === instance.id ? '#fff' : '#e2e8f0'
+                }"
+              >
+                <!-- Name & Date Row -->
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                  <span style="font-weight: 600; font-size: 14px;">
+                    {{ instance.name || instance.entityType }}
+                  </span>
+                  <span style="font-size: 12px; opacity: 0.8;">
+                    {{ formatInstanceDateShort(instance.trainedAt) }}
+                  </span>
+                </div>
+                <!-- Type Badge -->
+                <div style="margin-bottom: 8px;">
+                  <span style="font-size: 10px; padding: 2px 8px; background: rgba(233,69,96,0.2); color: #e94560; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.5px;">
+                    {{ instance.entityType }}
+                  </span>
+                </div>
+
+                <!-- Stats Row -->
+                <div style="display: flex; justify-content: space-between; align-items: center; font-size: 13px;">
+                  <span>{{ instance.modelCount }} models</span>
+                  <span :style="{ fontWeight: 600, color: instance.avgMape < 3 ? '#10b981' : instance.avgMape < 5 ? '#f59e0b' : '#ef4444' }">
+                    {{ instance.avgMape ? instance.avgMape.toFixed(1) + '% MAPE' : 'N/A' }}
+                  </span>
+                </div>
+
+                <!-- Active Badges -->
+                <div v-if="instance.isSchedulerActive || instance.isManualActive" style="margin-top: 8px; display: flex; gap: 6px;">
+                  <span v-if="instance.isSchedulerActive" style="font-size: 10px; padding: 2px 8px; background: rgba(99,102,241,0.3); color: #a5b4fc; border-radius: 4px; text-transform: uppercase;">
+                    Scheduler
+                  </span>
+                  <span v-if="instance.isManualActive" style="font-size: 10px; padding: 2px 8px; background: rgba(16,185,129,0.3); color: #6ee7b7; border-radius: 4px; text-transform: uppercase;">
+                    Manual
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- RIGHT PANEL: Instance Details -->
+        <div style="flex: 1; background: #1a1a2e; display: flex; flex-direction: column; overflow: hidden;">
+
+          <!-- No Selection State -->
+          <div v-if="!selectedInstance" style="flex: 1; display: flex; align-items: center; justify-content: center; color: #64748b;">
+            <div style="text-align: center;">
+              <p style="font-size: 48px; margin-bottom: 16px;">📊</p>
+              <p style="font-size: 18px; font-weight: 500;">Select an instance to view details</p>
+              <p style="font-size: 14px; margin-top: 8px;">Click on any training instance from the left panel</p>
+            </div>
+          </div>
+
+          <!-- Instance Details -->
+          <div v-else style="display: flex; flex-direction: column; height: 100%;">
+
+            <!-- Detail Header -->
+            <div style="padding: 20px 24px; background: #16213e; border-bottom: 1px solid #0f3460;">
+              <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                <div>
+                  <h2 style="margin: 0 0 4px 0; font-size: 24px; font-weight: 700; color: #e94560;">
+                    {{ selectedInstance.name || selectedInstance.entityType }}
+                  </h2>
+                  <p style="margin: 0; font-size: 14px; color: #94a3b8;">
+                    <span style="padding: 2px 8px; background: rgba(233,69,96,0.2); color: #e94560; border-radius: 4px; text-transform: uppercase; font-size: 11px; margin-right: 8px;">{{ selectedInstance.entityType }}</span>
+                    Trained {{ formatInstanceDate(selectedInstance.trainedAt) }}
+                  </p>
+                  <!-- Status Badges -->
+                  <div v-if="selectedInstance.isSchedulerActive || selectedInstance.isManualActive" style="margin-top: 10px; display: flex; gap: 8px;">
+                    <span v-if="selectedInstance.isSchedulerActive" style="padding: 4px 12px; background: #6366f1; color: white; border-radius: 4px; font-size: 12px; font-weight: 600;">
+                      SCHEDULER ACTIVE
+                    </span>
+                    <span v-if="selectedInstance.isManualActive" style="padding: 4px 12px; background: #10b981; color: white; border-radius: 4px; font-size: 12px; font-weight: 600;">
+                      MANUAL ACTIVE
+                    </span>
+                  </div>
+                </div>
+                <div style="display: flex; gap: 12px;">
+                  <button
+                    @click="setAsSchedulerActive"
+                    :disabled="selectedInstance.isSchedulerActive"
+                    style="padding: 10px 20px; border-radius: 8px; font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 8px; transition: all 0.2s; border: none; cursor: pointer;"
+                    :style="{ background: selectedInstance.isSchedulerActive ? '#4b5563' : '#6366f1', color: 'white', opacity: selectedInstance.isSchedulerActive ? '0.6' : '1', cursor: selectedInstance.isSchedulerActive ? 'not-allowed' : 'pointer' }"
+                  >
+                    <svg v-if="!selectedInstance.isSchedulerActive" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 18px; height: 18px;"><path d="M12 2v20m0-20l4 4m-4-4L8 6"/></svg>
+                    <svg v-else viewBox="0 0 24 24" fill="currentColor" style="width: 18px; height: 18px;"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                    {{ selectedInstance.isSchedulerActive ? 'Scheduler Active' : 'Send to Scheduler' }}
+                  </button>
+                  <button
+                    @click="setAsManualActive"
+                    :disabled="selectedInstance.isManualActive"
+                    style="padding: 10px 20px; border-radius: 8px; font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 8px; transition: all 0.2s; border: none; cursor: pointer;"
+                    :style="{ background: selectedInstance.isManualActive ? '#4b5563' : '#10b981', color: 'white', opacity: selectedInstance.isManualActive ? '0.6' : '1', cursor: selectedInstance.isManualActive ? 'not-allowed' : 'pointer' }"
+                  >
+                    <svg v-if="!selectedInstance.isManualActive" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 18px; height: 18px;"><path d="M12 2v20m0-20l4 4m-4-4L8 6"/></svg>
+                    <svg v-else viewBox="0 0 24 24" fill="currentColor" style="width: 18px; height: 18px;"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                    {{ selectedInstance.isManualActive ? 'Manual Active' : 'Send to Manual' }}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Stats Cards -->
+            <div style="padding: 20px 24px; display: flex; gap: 16px; flex-wrap: wrap;">
+              <div style="flex: 1; min-width: 120px; padding: 16px 20px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
+                <div style="font-size: 28px; font-weight: 700; color: #e94560;">{{ selectedInstance.modelCount }}</div>
+                <div style="font-size: 12px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px;">Models</div>
+              </div>
+              <div style="flex: 1; min-width: 120px; padding: 16px 20px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
+                <div style="font-size: 28px; font-weight: 700;" :style="{ color: selectedInstance.avgMape < 3 ? '#10b981' : selectedInstance.avgMape < 5 ? '#f59e0b' : '#ef4444' }">
+                  {{ selectedInstance.avgMape ? selectedInstance.avgMape.toFixed(1) + '%' : 'N/A' }}
+                </div>
+                <div style="font-size: 12px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px;">Avg MAPE</div>
+              </div>
+              <div style="flex: 1; min-width: 120px; padding: 16px 20px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
+                <div style="font-size: 28px; font-weight: 700; color: #6366f1;">{{ selectedInstance.activeCount }}</div>
+                <div style="font-size: 12px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px;">Active</div>
+              </div>
+              <div v-if="selectedInstance.trainingPeriod" style="flex: 2; min-width: 200px; padding: 16px 20px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
+                <div style="font-size: 16px; font-weight: 600; color: #e2e8f0;">{{ selectedInstance.trainingPeriod.start }} → {{ selectedInstance.trainingPeriod.end }}</div>
+                <div style="font-size: 12px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px;">Training Period</div>
+              </div>
+            </div>
+
+            <!-- Tabs -->
+            <div style="padding: 0 24px; border-bottom: 1px solid #0f3460; display: flex; gap: 0;">
+              <button
+                @click="instanceDetailTab = 'config'"
+                style="padding: 12px 24px; border: none; background: transparent; font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.2s;"
+                :style="{
+                  color: instanceDetailTab === 'config' ? '#e94560' : '#94a3b8',
+                  borderBottom: instanceDetailTab === 'config' ? '2px solid #e94560' : '2px solid transparent'
+                }"
+              >Configuration</button>
+              <button
+                @click="instanceDetailTab = 'calibration'"
+                style="padding: 12px 24px; border: none; background: transparent; font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.2s;"
+                :style="{
+                  color: instanceDetailTab === 'calibration' ? '#e94560' : '#94a3b8',
+                  borderBottom: instanceDetailTab === 'calibration' ? '2px solid #e94560' : '2px solid transparent'
+                }"
+              >Calibration</button>
+              <button
+                @click="instanceDetailTab = 'evaluation'"
+                style="padding: 12px 24px; border: none; background: transparent; font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.2s;"
+                :style="{
+                  color: instanceDetailTab === 'evaluation' ? '#e94560' : '#94a3b8',
+                  borderBottom: instanceDetailTab === 'evaluation' ? '2px solid #e94560' : '2px solid transparent'
+                }"
+              >Evaluation</button>
+            </div>
+
+            <!-- Tab Content -->
+            <div style="flex: 1; overflow-y: auto; padding: 24px;">
+
+              <!-- Configuration Tab -->
+              <div v-if="instanceDetailTab === 'config'">
+                <h3 style="margin: 0 0 20px 0; font-size: 18px; font-weight: 600; color: #e2e8f0;">Training Configuration</h3>
+                <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px;">
+                  <div style="padding: 16px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
+                    <div style="font-size: 12px; color: #94a3b8; text-transform: uppercase; margin-bottom: 6px;">Model Type</div>
+                    <div style="font-size: 16px; font-weight: 600; color: #e2e8f0;">{{ selectedInstance.models[0]?.model_type || 'hybrid' }}</div>
+                  </div>
+                  <div style="padding: 16px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
+                    <div style="font-size: 12px; color: #94a3b8; text-transform: uppercase; margin-bottom: 6px;">Entity Type</div>
+                    <div style="font-size: 16px; font-weight: 600; color: #e2e8f0;">{{ selectedInstance.entityType }}</div>
+                  </div>
+                  <div style="padding: 16px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
+                    <div style="font-size: 12px; color: #94a3b8; text-transform: uppercase; margin-bottom: 6px;">Model Count</div>
+                    <div style="font-size: 16px; font-weight: 600; color: #e2e8f0;">{{ selectedInstance.modelCount }}</div>
+                  </div>
+                  <div style="padding: 16px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
+                    <div style="font-size: 12px; color: #94a3b8; text-transform: uppercase; margin-bottom: 6px;">Trained At</div>
+                    <div style="font-size: 16px; font-weight: 600; color: #e2e8f0;">{{ formatInstanceDate(selectedInstance.trainedAt) }}</div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Calibration Tab -->
+              <div v-if="instanceDetailTab === 'calibration'">
+                <h3 style="margin: 0 0 20px 0; font-size: 18px; font-weight: 600; color: #e2e8f0;">Calibration Settings</h3>
+
+                <div v-if="selectedInstance.calibration">
+                  <!-- Calibration Mode -->
+                  <div style="margin-bottom: 24px; padding: 20px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
+                    <div style="display: flex; align-items: center; gap: 16px; margin-bottom: 16px;">
+                      <span style="padding: 6px 16px; border-radius: 6px; font-weight: 700; font-size: 14px; text-transform: uppercase;"
+                        :style="{
+                          background: selectedInstance.calibration.mode === 'hybrid' ? '#6366f1' : selectedInstance.calibration.mode === 'iterative' ? '#10b981' : '#f59e0b',
+                          color: 'white'
+                        }">
+                        {{ selectedInstance.calibration.mode }}
+                      </span>
+                      <span v-if="selectedInstance.calibration.quantileAlpha" style="color: #94a3b8;">
+                        Alpha: {{ selectedInstance.calibration.quantileAlpha }}
+                      </span>
+                    </div>
+                  </div>
+
+                  <!-- Pass 1 -->
+                  <div v-if="selectedInstance.calibration.pass1" style="margin-bottom: 24px; padding: 20px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
+                    <h4 style="margin: 0 0 16px 0; color: #10b981; font-size: 14px;">Pass 1: Iterative Scaling</h4>
+                    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px;">
+                      <div>
+                        <div style="font-size: 11px; color: #94a3b8; text-transform: uppercase;">Peak Scale</div>
+                        <div style="font-size: 20px; font-weight: 700;" :style="{ color: selectedInstance.calibration.pass1.peakScale >= 0 ? '#10b981' : '#f59e0b' }">
+                          {{ selectedInstance.calibration.pass1.peakScale >= 0 ? '+' : '' }}{{ selectedInstance.calibration.pass1.peakScale.toFixed(1) }}%
+                        </div>
+                      </div>
+                      <div>
+                        <div style="font-size: 11px; color: #94a3b8; text-transform: uppercase;">Off-Peak Scale</div>
+                        <div style="font-size: 20px; font-weight: 700;" :style="{ color: selectedInstance.calibration.pass1.offpeakScale >= 0 ? '#10b981' : '#f59e0b' }">
+                          {{ selectedInstance.calibration.pass1.offpeakScale >= 0 ? '+' : '' }}{{ selectedInstance.calibration.pass1.offpeakScale.toFixed(1) }}%
+                        </div>
+                      </div>
+                      <div>
+                        <div style="font-size: 11px; color: #94a3b8; text-transform: uppercase;">Converged</div>
+                        <div style="font-size: 20px; font-weight: 700; color: #e2e8f0;">{{ selectedInstance.calibration.pass1.converged ? 'Yes' : 'No' }}</div>
+                      </div>
+                      <div>
+                        <div style="font-size: 11px; color: #94a3b8; text-transform: uppercase;">Iterations</div>
+                        <div style="font-size: 20px; font-weight: 700; color: #e2e8f0;">{{ selectedInstance.calibration.pass1.iterations }}</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Pass 2 -->
+                  <div v-if="selectedInstance.calibration.pass2" style="padding: 20px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
+                    <h4 style="margin: 0 0 16px 0; color: #f59e0b; font-size: 14px;">Pass 2: XGBoost Correction</h4>
+                    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;">
+                      <div>
+                        <div style="font-size: 11px; color: #94a3b8; text-transform: uppercase;">Train MAPE</div>
+                        <div style="font-size: 20px; font-weight: 700; color: #e2e8f0;">{{ selectedInstance.calibration.pass2.trainMAPE.toFixed(2) }}%</div>
+                      </div>
+                      <div>
+                        <div style="font-size: 11px; color: #94a3b8; text-transform: uppercase;">Validation MAPE</div>
+                        <div style="font-size: 20px; font-weight: 700; color: #e2e8f0;">{{ selectedInstance.calibration.pass2.validationMAPE.toFixed(2) }}%</div>
+                      </div>
+                      <div>
+                        <div style="font-size: 11px; color: #94a3b8; text-transform: uppercase;">Alpha</div>
+                        <div style="font-size: 20px; font-weight: 700; color: #e2e8f0;">{{ selectedInstance.calibration.pass2.alpha }}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div v-else style="text-align: center; padding: 40px; color: #64748b;">
+                  <p>No calibration data recorded for this instance</p>
+                </div>
+              </div>
+
+              <!-- Evaluation Tab -->
+              <div v-if="instanceDetailTab === 'evaluation'">
+                <!-- Model Comparison Toggle -->
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                  <h3 style="margin: 0; font-size: 18px; font-weight: 600; color: #e2e8f0;">Performance Metrics</h3>
+                  <button
+                    @click="comparisonMode ? disableComparisonMode() : enableComparisonMode()"
+                    style="padding: 8px 16px; border-radius: 6px; font-weight: 600; font-size: 13px; border: 1px solid #6366f1; background: transparent; color: #6366f1; cursor: pointer;"
+                  >
+                    {{ comparisonMode ? 'Exit Comparison' : 'Compare Models' }}
+                  </button>
+                </div>
+
+                <!-- Comparison Instance Selector -->
+                <div v-if="comparisonMode" style="margin-bottom: 20px; padding: 16px; background: #16213e; border-radius: 8px; border: 1px solid #6366f1;">
+                  <label style="display: block; margin-bottom: 8px; font-size: 13px; color: #94a3b8; text-transform: uppercase;">Compare With</label>
+                  <select
+                    v-model="comparisonInstanceId"
+                    @change="selectComparisonInstance(comparisonInstanceId || '')"
+                    style="width: 100%; padding: 10px; border: 1px solid #0f3460; border-radius: 6px; background: #1a1a2e; color: #fff; font-size: 14px;"
+                  >
+                    <option :value="null">Select instance to compare...</option>
+                    <option
+                      v-for="instance in trainingInstances.filter((i: any) => i.id !== selectedInstanceId)"
+                      :key="instance.id"
+                      :value="instance.id"
+                    >
+                      {{ instance.name || instance.entityType }} - {{ formatInstanceDateShort(instance.trainedAt) }} ({{ instance.avgMape?.toFixed(1) || 'N/A' }}% MAPE)
+                    </option>
+                  </select>
+                </div>
+
+                <!-- Comparison View -->
+                <div v-if="comparisonMode && comparisonInstance" style="margin-bottom: 24px;">
+                  <h4 style="margin: 0 0 16px 0; font-size: 16px; color: #e94560;">Model Comparison</h4>
+                  <div style="padding: 20px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
+                    <table style="width: 100%; border-collapse: collapse;">
+                      <thead>
+                        <tr style="border-bottom: 2px solid #0f3460;">
+                          <th style="padding: 12px; text-align: left; color: #94a3b8; font-size: 12px; text-transform: uppercase;">Metric</th>
+                          <th style="padding: 12px; text-align: right; color: #e94560; font-size: 12px; text-transform: uppercase;">Model A</th>
+                          <th style="padding: 12px; text-align: right; color: #6366f1; font-size: 12px; text-transform: uppercase;">Model B</th>
+                          <th style="padding: 12px; text-align: right; color: #94a3b8; font-size: 12px; text-transform: uppercase;">Diff</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr style="border-bottom: 1px solid #0f3460;">
+                          <td style="padding: 12px; color: #e2e8f0;">Avg MAPE</td>
+                          <td style="padding: 12px; text-align: right; font-weight: 600; color: #e2e8f0;">{{ selectedInstance.avgMape?.toFixed(1) || 'N/A' }}%</td>
+                          <td style="padding: 12px; text-align: right; font-weight: 600; color: #e2e8f0;">{{ comparisonInstance.avgMape?.toFixed(1) || 'N/A' }}%</td>
+                          <td style="padding: 12px; text-align: right; font-weight: 600;"
+                            :style="{ color: isComparisonBetter(selectedInstance.avgMape, comparisonInstance.avgMape) ? '#10b981' : '#ef4444' }">
+                            {{ getComparisonDiff(selectedInstance.avgMape, comparisonInstance.avgMape) }}%
+                            <span v-if="isComparisonBetter(selectedInstance.avgMape, comparisonInstance.avgMape)"> ✓</span>
+                          </td>
+                        </tr>
+                        <tr style="border-bottom: 1px solid #0f3460;">
+                          <td style="padding: 12px; color: #e2e8f0;">Peak MAPE</td>
+                          <td style="padding: 12px; text-align: right; font-weight: 600; color: #e2e8f0;">{{ selectedInstance.maxMape?.toFixed(1) || 'N/A' }}%</td>
+                          <td style="padding: 12px; text-align: right; font-weight: 600; color: #e2e8f0;">{{ comparisonInstance.maxMape?.toFixed(1) || 'N/A' }}%</td>
+                          <td style="padding: 12px; text-align: right; font-weight: 600;"
+                            :style="{ color: isComparisonBetter(selectedInstance.maxMape, comparisonInstance.maxMape) ? '#10b981' : '#ef4444' }">
+                            {{ getComparisonDiff(selectedInstance.maxMape, comparisonInstance.maxMape) }}%
+                            <span v-if="isComparisonBetter(selectedInstance.maxMape, comparisonInstance.maxMape)"> ✓</span>
+                          </td>
+                        </tr>
+                        <tr style="border-bottom: 1px solid #0f3460;">
+                          <td style="padding: 12px; color: #e2e8f0;">Best MAPE</td>
+                          <td style="padding: 12px; text-align: right; font-weight: 600; color: #e2e8f0;">{{ selectedInstance.minMape?.toFixed(1) || 'N/A' }}%</td>
+                          <td style="padding: 12px; text-align: right; font-weight: 600; color: #e2e8f0;">{{ comparisonInstance.minMape?.toFixed(1) || 'N/A' }}%</td>
+                          <td style="padding: 12px; text-align: right; font-weight: 600;"
+                            :style="{ color: isComparisonBetter(selectedInstance.minMape, comparisonInstance.minMape) ? '#10b981' : '#ef4444' }">
+                            {{ getComparisonDiff(selectedInstance.minMape, comparisonInstance.minMape) }}%
+                            <span v-if="isComparisonBetter(selectedInstance.minMape, comparisonInstance.minMape)"> ✓</span>
+                          </td>
+                        </tr>
+                        <tr style="border-bottom: 1px solid #0f3460;">
+                          <td style="padding: 12px; color: #e2e8f0;">Model Count</td>
+                          <td style="padding: 12px; text-align: right; font-weight: 600; color: #e2e8f0;">{{ selectedInstance.modelCount }}</td>
+                          <td style="padding: 12px; text-align: right; font-weight: 600; color: #e2e8f0;">{{ comparisonInstance.modelCount }}</td>
+                          <td style="padding: 12px; text-align: right; font-weight: 600; color: #94a3b8;">{{ selectedInstance.modelCount - comparisonInstance.modelCount }}</td>
+                        </tr>
+                        <tr>
+                          <td style="padding: 12px; color: #e2e8f0;">Training Days</td>
+                          <td style="padding: 12px; text-align: right; font-weight: 600; color: #e2e8f0;">
+                            {{ selectedInstance.trainingPeriod ? Math.ceil((new Date(selectedInstance.trainingPeriod.end).getTime() - new Date(selectedInstance.trainingPeriod.start).getTime()) / (1000 * 60 * 60 * 24)) : 'N/A' }}
+                          </td>
+                          <td style="padding: 12px; text-align: right; font-weight: 600; color: #e2e8f0;">
+                            {{ comparisonInstance.trainingPeriod ? Math.ceil((new Date(comparisonInstance.trainingPeriod.end).getTime() - new Date(comparisonInstance.trainingPeriod.start).getTime()) / (1000 * 60 * 60 * 24)) : 'N/A' }}
+                          </td>
+                          <td style="padding: 12px; text-align: right; font-weight: 600; color: #94a3b8;">
+                            {{ selectedInstance.trainingPeriod && comparisonInstance.trainingPeriod ?
+                              Math.ceil((new Date(selectedInstance.trainingPeriod.end).getTime() - new Date(selectedInstance.trainingPeriod.start).getTime()) / (1000 * 60 * 60 * 24)) -
+                              Math.ceil((new Date(comparisonInstance.trainingPeriod.end).getTime() - new Date(comparisonInstance.trainingPeriod.start).getTime()) / (1000 * 60 * 60 * 24))
+                              : '0' }}
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <!-- Backtest Section -->
+                <div v-if="!comparisonMode" style="margin-bottom: 24px; padding: 20px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
+                  <h4 style="margin: 0 0 16px 0; font-size: 16px; color: #e94560;">Backtest Against Recent Data</h4>
+                  <p style="margin: 0 0 16px 0; font-size: 13px; color: #94a3b8;">Test model performance against recent actual data</p>
+
+                  <div style="display: flex; gap: 16px; align-items: flex-end; margin-bottom: 16px;">
+                    <div style="flex: 0 0 auto;">
+                      <label style="display: block; margin-bottom: 6px; font-size: 12px; color: #94a3b8;">Test Period (days)</label>
+                      <select
+                        v-model="backtestDays"
+                        style="padding: 8px 12px; border: 1px solid #0f3460; border-radius: 6px; background: #1a1a2e; color: #fff; font-size: 14px;"
+                      >
+                        <option :value="7">Last 7 days</option>
+                        <option :value="14">Last 14 days</option>
+                        <option :value="30">Last 30 days</option>
+                      </select>
+                    </div>
+                    <button
+                      @click="runBacktest"
+                      :disabled="isBacktesting"
+                      style="padding: 8px 20px; border-radius: 6px; font-weight: 600; font-size: 14px; border: none; background: #6366f1; color: white; cursor: pointer;"
+                      :style="{ opacity: isBacktesting ? '0.6' : '1', cursor: isBacktesting ? 'not-allowed' : 'pointer' }"
+                    >
+                      <span v-if="isBacktesting">Running...</span>
+                      <span v-else>Run Backtest</span>
+                    </button>
+                    <button
+                      v-if="backtestResults"
+                      @click="clearBacktest"
+                      style="padding: 8px 16px; border-radius: 6px; font-weight: 600; font-size: 14px; border: 1px solid #ef4444; background: transparent; color: #ef4444; cursor: pointer;"
+                    >
+                      Clear Results
+                    </button>
+                  </div>
+
+                  <!-- Backtest Results -->
+                  <div v-if="backtestResults" style="margin-top: 16px; padding: 16px; background: #1a1a2e; border-radius: 6px;">
+                    <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px;">
+                      <div>
+                        <div style="font-size: 11px; color: #94a3b8; text-transform: uppercase; margin-bottom: 4px;">Training MAPE</div>
+                        <div style="font-size: 24px; font-weight: 700; color: #e2e8f0;">{{ selectedInstance.avgMape?.toFixed(1) || 'N/A' }}%</div>
+                      </div>
+                      <div>
+                        <div style="font-size: 11px; color: #94a3b8; text-transform: uppercase; margin-bottom: 4px;">Backtest MAPE</div>
+                        <div style="font-size: 24px; font-weight: 700;"
+                          :style="{ color: backtestResults.mape < selectedInstance.avgMape ? '#10b981' : '#f59e0b' }">
+                          {{ backtestResults.mape?.toFixed(1) || 'N/A' }}%
+                        </div>
+                      </div>
+                    </div>
+                    <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #0f3460;">
+                      <div style="font-size: 12px; color: #94a3b8;">Status:</div>
+                      <div style="font-size: 14px; font-weight: 600; margin-top: 4px;"
+                        :style="{ color: Math.abs(backtestResults.mape - selectedInstance.avgMape) < 1 ? '#10b981' : '#f59e0b' }">
+                        {{ Math.abs(backtestResults.mape - selectedInstance.avgMape) < 1 ? '✓ Within tolerance' : '⚠ Outside tolerance' }}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Overall Summary -->
+                <div style="margin-bottom: 24px; padding: 24px; background: linear-gradient(135deg, #16213e 0%, #0f3460 100%); border-radius: 12px;">
+                  <div style="display: flex; align-items: center; gap: 24px;">
+                    <div>
+                      <div style="font-size: 12px; color: #94a3b8; text-transform: uppercase; margin-bottom: 4px;">Overall MAPE</div>
+                      <div style="font-size: 42px; font-weight: 800;" :style="{ color: selectedInstance.avgMape < 3 ? '#10b981' : selectedInstance.avgMape < 5 ? '#f59e0b' : '#ef4444' }">
+                        {{ selectedInstance.avgMape ? selectedInstance.avgMape.toFixed(2) + '%' : 'N/A' }}
+                      </div>
+                    </div>
+                    <div v-if="selectedInstance.minMape !== null && selectedInstance.maxMape !== null" style="color: #94a3b8;">
+                      <div style="font-size: 13px;">Range: {{ selectedInstance.minMape?.toFixed(1) }}% - {{ selectedInstance.maxMape?.toFixed(1) }}%</div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Segmented Evaluation (Peak/Off-Peak) -->
+                <div v-if="hasPeakOffPeakData(selectedInstance)" style="margin-bottom: 24px;">
+                  <h4 style="margin: 0 0 16px 0; font-size: 14px; color: #94a3b8; text-transform: uppercase;">Segmented Performance</h4>
+                  <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px;">
+                    <div style="padding: 20px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
+                      <div style="font-size: 11px; color: #94a3b8; text-transform: uppercase; margin-bottom: 8px;">Peak Hours (9 AM - 9 PM)</div>
+                      <div style="font-size: 32px; font-weight: 700;" :style="{ color: (getPeakMape(selectedInstance) || 0) < 3 ? '#10b981' : (getPeakMape(selectedInstance) || 0) < 5 ? '#f59e0b' : '#ef4444' }">
+                        {{ getPeakMape(selectedInstance) !== null ? getPeakMape(selectedInstance)!.toFixed(2) + '%' : 'N/A' }}
+                      </div>
+                    </div>
+                    <div style="padding: 20px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
+                      <div style="font-size: 11px; color: #94a3b8; text-transform: uppercase; margin-bottom: 8px;">Off-Peak Hours (9 PM - 9 AM)</div>
+                      <div style="font-size: 32px; font-weight: 700;" :style="{ color: (getOffPeakMape(selectedInstance) || 0) < 3 ? '#10b981' : (getOffPeakMape(selectedInstance) || 0) < 5 ? '#f59e0b' : '#ef4444' }">
+                        {{ getOffPeakMape(selectedInstance) !== null ? getOffPeakMape(selectedInstance)!.toFixed(2) + '%' : 'N/A' }}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Day Type Breakdown (Weekday/Weekend/Holiday) -->
+                <div v-if="hasDayTypeData(selectedInstance)" style="margin-bottom: 24px;">
+                  <h4 style="margin: 0 0 16px 0; font-size: 14px; color: #94a3b8; text-transform: uppercase;">Day Type Performance</h4>
+                  <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;">
+                    <div style="padding: 20px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
+                      <div style="font-size: 11px; color: #94a3b8; text-transform: uppercase; margin-bottom: 8px;">Weekdays</div>
+                      <div style="font-size: 28px; font-weight: 700;" :style="{ color: getWeekdayMape(selectedInstance) !== null ? ((getWeekdayMape(selectedInstance) || 0) < 3 ? '#10b981' : (getWeekdayMape(selectedInstance) || 0) < 5 ? '#f59e0b' : '#ef4444') : '#64748b' }">
+                        {{ getWeekdayMape(selectedInstance) !== null ? getWeekdayMape(selectedInstance)!.toFixed(2) + '%' : 'N/A' }}
+                      </div>
+                      <div style="font-size: 10px; color: #64748b; margin-top: 4px;">Mon - Fri</div>
+                    </div>
+                    <div style="padding: 20px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
+                      <div style="font-size: 11px; color: #94a3b8; text-transform: uppercase; margin-bottom: 8px;">Weekends</div>
+                      <div style="font-size: 28px; font-weight: 700;" :style="{ color: getWeekendMape(selectedInstance) !== null ? ((getWeekendMape(selectedInstance) || 0) < 3 ? '#10b981' : (getWeekendMape(selectedInstance) || 0) < 5 ? '#f59e0b' : '#ef4444') : '#64748b' }">
+                        {{ getWeekendMape(selectedInstance) !== null ? getWeekendMape(selectedInstance)!.toFixed(2) + '%' : 'N/A' }}
+                      </div>
+                      <div style="font-size: 10px; color: #64748b; margin-top: 4px;">Sat - Sun</div>
+                    </div>
+                    <div style="padding: 20px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
+                      <div style="font-size: 11px; color: #94a3b8; text-transform: uppercase; margin-bottom: 8px;">Holidays</div>
+                      <div style="font-size: 28px; font-weight: 700;" :style="{ color: getHolidayMape(selectedInstance) !== null ? ((getHolidayMape(selectedInstance) || 0) < 3 ? '#10b981' : (getHolidayMape(selectedInstance) || 0) < 5 ? '#f59e0b' : '#ef4444') : '#64748b' }">
+                        {{ getHolidayMape(selectedInstance) !== null ? getHolidayMape(selectedInstance)!.toFixed(2) + '%' : 'N/A' }}
+                      </div>
+                      <div style="font-size: 10px; color: #64748b; margin-top: 4px;">PH Holidays</div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Per-Zone MAPE Breakdown (from training metrics) -->
+                <div v-if="selectedInstance.perZoneMape && Object.keys(selectedInstance.perZoneMape).length > 0" style="margin-bottom: 24px;">
+                  <h4 style="margin: 0 0 16px 0; font-size: 14px; color: #94a3b8; text-transform: uppercase;">Per-Zone Performance</h4>
+                  <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px;">
+                    <div v-for="(mape, zone) in selectedInstance.perZoneMape" :key="zone"
+                      style="padding: 16px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
+                      <div style="font-size: 11px; color: #94a3b8; text-transform: uppercase; margin-bottom: 6px;">{{ zone }}</div>
+                      <div style="font-size: 24px; font-weight: 700;" :style="{ color: mape < 3 ? '#10b981' : mape < 5 ? '#f59e0b' : '#ef4444' }">
+                        {{ mape.toFixed(2) }}%
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Per-Region MAPE Breakdown (from training metrics) -->
+                <div v-if="selectedInstance.perRegionMape && Object.keys(selectedInstance.perRegionMape).length > 0" style="margin-bottom: 24px;">
+                  <h4 style="margin: 0 0 16px 0; font-size: 14px; color: #94a3b8; text-transform: uppercase;">Per-Region Performance</h4>
+                  <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px;">
+                    <div v-for="(mape, region) in selectedInstance.perRegionMape" :key="region"
+                      style="padding: 16px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
+                      <div style="font-size: 11px; color: #94a3b8; text-transform: uppercase; margin-bottom: 6px;">{{ region }}</div>
+                      <div style="font-size: 24px; font-weight: 700;" :style="{ color: mape < 3 ? '#10b981' : mape < 5 ? '#f59e0b' : '#ef4444' }">
+                        {{ mape.toFixed(2) }}%
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Per-Model Performance (individual model entries) -->
+                <h4 style="margin: 0 0 16px 0; font-size: 14px; color: #94a3b8; text-transform: uppercase;">
+                  Individual Model Performance
+                </h4>
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                  <div v-for="model in selectedInstance.models" :key="model.id"
+                    style="display: flex; align-items: center; gap: 16px; padding: 12px 16px; background: #16213e; border-radius: 8px;">
+                    <span style="width: 100px; font-weight: 600; color: #e2e8f0; font-size: 13px;">{{ model.entity_code }}</span>
+                    <div style="flex: 1; height: 8px; background: #0f3460; border-radius: 4px; overflow: hidden;">
+                      <div
+                        style="height: 100%; border-radius: 4px; transition: width 0.3s;"
+                        :style="{
+                          width: model.mape ? Math.min(100, model.mape * 10) + '%' : '0%',
+                          background: model.mape < 3 ? '#10b981' : model.mape < 5 ? '#f59e0b' : '#ef4444'
+                        }"
+                      ></div>
+                    </div>
+                    <span style="width: 60px; text-align: right; font-weight: 600; font-size: 13px;"
+                      :style="{ color: model.mape < 3 ? '#10b981' : model.mape < 5 ? '#f59e0b' : '#ef4444' }">
+                      {{ model.mape ? model.mape.toFixed(1) + '%' : '-' }}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+      </div><!-- End Models Tab -->
+
+      <!-- CFAC Calibration Details Modal -->
+      <div v-if="showCalibrationDetails && selectedCalibration" class="modal-overlay" @click.self="closeCalibrationDetails">
+        <div class="modal-dialog calibration-details-modal">
+          <div class="modal-header">
+            <h3>CFAC Calibration Details</h3>
+            <button @click="closeCalibrationDetails" class="btn-close">&times;</button>
+          </div>
+
+          <div class="modal-body">
+            <div class="calibration-detail-section">
+              <h4>General Information</h4>
+              <div class="detail-grid">
+      <!-- Scheduler Confirmation Modal -->
+      <div v-if="showSchedulerConfirmModal" class="modal-overlay" @click.self="showSchedulerConfirmModal = false">
+        <div class="modal-dialog" @click.stop style="max-width: 500px;">
+          <div class="modal-header">
+            <h3 style="margin: 0; color: #e94560;">Send to Scheduler</h3>
+            <button class="modal-close" @click="showSchedulerConfirmModal = false">&times;</button>
+          </div>
+          <div class="modal-body">
+            <p style="font-size: 15px; margin-bottom: 20px; color: #e2e8f0;">Set this instance as active for the Scheduler?</p>
+            <div style="background: #16213e; padding: 16px; border-radius: 8px; margin-bottom: 20px;">
+              <div style="font-size: 18px; font-weight: 700; color: #e94560; margin-bottom: 8px;">{{ selectedInstance?.name || selectedInstance?.entityType }}</div>
+              <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 12px;">
+                <div style="padding: 12px; background: #1a1a2e; border-radius: 6px;">
+                  <div style="font-size: 11px; color: #94a3b8; text-transform: uppercase; margin-bottom: 4px;">Avg MAPE</div>
+                  <div style="font-size: 20px; font-weight: 700;" :style="{ color: (selectedInstance?.avgMape || 0) < 3 ? '#10b981' : (selectedInstance?.avgMape || 0) < 5 ? '#f59e0b' : '#ef4444' }">
+                    {{ selectedInstance?.avgMape ? selectedInstance.avgMape.toFixed(1) + '%' : 'N/A' }}
+                  </div>
+                </div>
+                <div style="padding: 12px; background: #1a1a2e; border-radius: 6px;">
+                  <div style="font-size: 11px; color: #94a3b8; text-transform: uppercase; margin-bottom: 4px;">Models</div>
+                  <div style="font-size: 20px; font-weight: 700; color: #e2e8f0;">{{ selectedInstance?.modelCount || 0 }}</div>
+                </div>
+              </div>
+              <div v-if="selectedInstance?.trainingPeriod" style="margin-top: 12px; padding: 12px; background: #1a1a2e; border-radius: 6px;">
+                <div style="font-size: 11px; color: #94a3b8; text-transform: uppercase; margin-bottom: 4px;">Training Period</div>
+                <div style="font-size: 14px; font-weight: 600; color: #e2e8f0;">{{ selectedInstance.trainingPeriod.start }} to {{ selectedInstance.trainingPeriod.end }}</div>
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button @click="showSchedulerConfirmModal = false" class="btn btn-outline">Cancel</button>
+            <button @click="confirmSetSchedulerActive" class="btn btn-primary" style="background: #6366f1;">Confirm</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Manual Confirmation Modal -->
+      <div v-if="showManualConfirmModal" class="modal-overlay" @click.self="showManualConfirmModal = false">
+        <div class="modal-dialog" @click.stop style="max-width: 500px;">
+          <div class="modal-header">
+            <h3 style="margin: 0; color: #10b981;">Send to Manual Forecast</h3>
+            <button class="modal-close" @click="showManualConfirmModal = false">&times;</button>
+          </div>
+          <div class="modal-body">
+            <p style="font-size: 15px; margin-bottom: 20px; color: #e2e8f0;">Set this instance as active for Manual Forecast?</p>
+            <div style="background: #16213e; padding: 16px; border-radius: 8px; margin-bottom: 20px;">
+              <div style="font-size: 18px; font-weight: 700; color: #10b981; margin-bottom: 8px;">{{ selectedInstance?.name || selectedInstance?.entityType }}</div>
+              <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 12px;">
+                <div style="padding: 12px; background: #1a1a2e; border-radius: 6px;">
+                  <div style="font-size: 11px; color: #94a3b8; text-transform: uppercase; margin-bottom: 4px;">Avg MAPE</div>
+                  <div style="font-size: 20px; font-weight: 700;" :style="{ color: (selectedInstance?.avgMape || 0) < 3 ? '#10b981' : (selectedInstance?.avgMape || 0) < 5 ? '#f59e0b' : '#ef4444' }">
+                    {{ selectedInstance?.avgMape ? selectedInstance.avgMape.toFixed(1) + '%' : 'N/A' }}
+                  </div>
+                </div>
+                <div style="padding: 12px; background: #1a1a2e; border-radius: 6px;">
+                  <div style="font-size: 11px; color: #94a3b8; text-transform: uppercase; margin-bottom: 4px;">Models</div>
+                  <div style="font-size: 20px; font-weight: 700; color: #e2e8f0;">{{ selectedInstance?.modelCount || 0 }}</div>
+                </div>
+              </div>
+              <div v-if="selectedInstance?.trainingPeriod" style="margin-top: 12px; padding: 12px; background: #1a1a2e; border-radius: 6px;">
+                <div style="font-size: 11px; color: #94a3b8; text-transform: uppercase; margin-bottom: 4px;">Training Period</div>
+                <div style="font-size: 14px; font-weight: 600; color: #e2e8f0;">{{ selectedInstance.trainingPeriod.start }} to {{ selectedInstance.trainingPeriod.end }}</div>
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button @click="showManualConfirmModal = false" class="btn btn-outline">Cancel</button>
+            <button @click="confirmSetManualActive" class="btn btn-primary" style="background: #10b981;">Confirm</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Success Message Toast -->
+      <div v-if="showSuccessMessage" style="position: fixed; top: 80px; right: 20px; z-index: 10000; padding: 16px 24px; background: #10b981; color: white; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); display: flex; align-items: center; gap: 12px;">
+        <svg viewBox="0 0 24 24" fill="currentColor" style="width: 24px; height: 24px;">
+          <path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        </svg>
+        <span style="font-weight: 600; font-size: 15px;">{{ successMessageText }}</span>
+      </div>
+                <div class="detail-item">
+                  <span class="detail-label">Created:</span>
+                  <span class="detail-value">{{ formatCalibrationDate(selectedCalibration.createdAt) }}</span>
+                </div>
+                <div class="detail-item">
+                  <span class="detail-label">Training Period:</span>
+                  <span class="detail-value">{{ selectedCalibration.trainingPeriod.start }} to {{ selectedCalibration.trainingPeriod.end }}</span>
+                </div>
+                <div class="detail-item">
+                  <span class="detail-label">Station Count:</span>
+                  <span class="detail-value">{{ selectedCalibration.trainingMetrics.stationCount }}</span>
+                </div>
+                <div class="detail-item">
+                  <span class="detail-label">Training Records:</span>
+                  <span class="detail-value">{{ selectedCalibration.trainingMetrics.trainingRecords.toLocaleString() }}</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="calibration-detail-section">
+              <h4>Global Bias Factors</h4>
+              <div class="metrics-row">
+                <div class="metric-card">
+                  <div class="metric-label">Wind Bias</div>
+                  <div class="metric-value">{{ (selectedCalibration.globalFactors.windBias * 100).toFixed(2) }}%</div>
+                </div>
+                <div class="metric-card">
+                  <div class="metric-label">Solar Bias</div>
+                  <div class="metric-value">{{ (selectedCalibration.globalFactors.solarBias * 100).toFixed(2) }}%</div>
+                </div>
+                <div class="metric-card">
+                  <div class="metric-label">Other Bias</div>
+                  <div class="metric-value">{{ (selectedCalibration.globalFactors.otherBias * 100).toFixed(2) }}%</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="calibration-detail-section">
+              <h4>Training Metrics</h4>
+              <div class="metrics-row">
+                <div class="metric-card">
+                  <div class="metric-label">Wind MAPE</div>
+                  <div class="metric-value" :class="getMapeClass(selectedCalibration.trainingMetrics.windMAPE)">
+                    {{ selectedCalibration.trainingMetrics.windMAPE.toFixed(2) }}%
+                  </div>
+                </div>
+                <div class="metric-card">
+                  <div class="metric-label">Solar MAPE</div>
+                  <div class="metric-value" :class="getMapeClass(selectedCalibration.trainingMetrics.solarMAPE)">
+                    {{ selectedCalibration.trainingMetrics.solarMAPE.toFixed(2) }}%
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="calibration-detail-section">
+              <h4>Solar Hourly Scale Factors</h4>
+              <div class="hourly-scale-chart">
+                <div v-for="hour in Object.keys(selectedCalibration.solarHourlyScale).slice(6, 19)" :key="hour" class="hour-bar">
+                  <div class="hour-label">{{ hour }}h</div>
+                  <div class="bar-container">
+                    <div class="bar" :style="{ width: (selectedCalibration.solarHourlyScale[hour] * 100) + '%' }"></div>
+                  </div>
+                  <div class="hour-value">{{ selectedCalibration.solarHourlyScale[hour].toFixed(3) }}</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="calibration-detail-section">
+              <h4>Station Scale Factors Summary</h4>
+              <div class="station-scales-summary">
+                <div class="scale-category">
+                  <strong>Wind Stations:</strong> {{ Object.keys(selectedCalibration.stationScales.wind).length }} stations
+                </div>
+                <div class="scale-category">
+                  <strong>Solar Stations:</strong> {{ Object.keys(selectedCalibration.stationScales.solar).length }} stations
+                </div>
+                <div class="scale-category">
+                  <strong>Other Stations:</strong> {{ Object.keys(selectedCalibration.stationScales.other).length }} stations
+                </div>
+              </div>
+            </div>
+
+            <div class="calibration-detail-section">
+              <h4>Configuration</h4>
+              <div class="config-badges">
+                <span class="config-badge" :class="{ active: selectedCalibration.config.useXgboost }">
+                  XGBoost: {{ selectedCalibration.config.useXgboost ? 'Yes' : 'No' }}
+                </span>
+                <span class="config-badge" :class="{ active: selectedCalibration.config.asymmetricLoss }">
+                  Asymmetric Loss: {{ selectedCalibration.config.asymmetricLoss ? 'Yes' : 'No' }}
+                </span>
+                <span class="config-badge" :class="{ active: selectedCalibration.config.biasCorrection }">
+                  Bias Correction: {{ selectedCalibration.config.biasCorrection ? 'Yes' : 'No' }}
+                </span>
+                <span class="config-badge">
+                  Auto-Cal Days: {{ selectedCalibration.config.autoCalibrateDays }}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div class="modal-footer">
+            <button @click="closeCalibrationDetails" class="btn btn-secondary">Close</button>
+          </div>
+        </div>
+      </div>
+
       <!-- ============ SETTINGS TAB ============ -->
       <div v-if="activeTab === 'settings'" class="tab-content">
         <h1 class="page-title">Settings</h1>
@@ -3202,6 +4352,131 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
             </div>
           </section>
 
+          <!-- Weather Settings Section -->
+          <section class="card settings-section">
+            <h2>Weather Settings</h2>
+            <p class="section-description">Configure weather cache behavior</p>
+
+            <div class="form-group">
+              <label>Weather Max Age (hours)</label>
+              <p class="field-hint">Maximum age of cached weather data before refresh (default: 24 hours)</p>
+              <div class="range-input-group">
+                <input
+                  type="range"
+                  v-model.number="schedulerConfig.weatherMaxAge"
+                  min="1"
+                  max="72"
+                  step="1"
+                  class="range-input"
+                />
+                <span class="range-value">{{ schedulerConfig.weatherMaxAge }} hours</span>
+              </div>
+            </div>
+          </section>
+
+          <!-- Output Settings Section -->
+          <section class="card settings-section">
+            <h2>Output Settings</h2>
+            <p class="section-description">Configure forecast output behavior</p>
+
+            <div class="form-group">
+              <label>Archive Retention (days)</label>
+              <p class="field-hint">How long to keep archived forecasts (default: 90 days)</p>
+              <div class="range-input-group">
+                <input
+                  type="range"
+                  v-model.number="schedulerConfig.archiveRetention"
+                  min="7"
+                  max="365"
+                  step="1"
+                  class="range-input"
+                />
+                <span class="range-value">{{ schedulerConfig.archiveRetention }} days</span>
+              </div>
+            </div>
+          </section>
+
+          <!-- Default Models Section -->
+          <section class="card settings-section">
+            <h2>Default Models</h2>
+            <p class="section-description">Set default models for training new instances</p>
+
+            <div class="form-group">
+              <label>Demand Model</label>
+              <select v-model="demandModel" class="path-input">
+                <option value="hybrid-calibrated">Hybrid + Calibration (Recommended)</option>
+                <option value="hybrid">Hybrid</option>
+              </select>
+              <p class="field-hint">Hybrid with calibration achieves best accuracy (2-4% MAPE)</p>
+            </div>
+
+            <div class="form-group">
+              <label>CFAC Model</label>
+              <select v-model="cfacModel" class="path-input">
+                <option value="hybrid">Hybrid (Recommended)</option>
+                <option value="hybrid-lstm">Hybrid + LSTM</option>
+                <option value="legacy">Legacy</option>
+              </select>
+              <p class="field-hint">Hybrid model provides best performance for wind and solar</p>
+            </div>
+          </section>
+
+          <!-- Output Naming Section -->
+          <section class="card settings-section">
+            <h2>Output Naming</h2>
+            <p class="section-description">Configure default output filename patterns</p>
+
+            <div class="naming-mode" style="margin-bottom: 16px;">
+              <label class="radio-label">
+                <input type="radio" :value="false" v-model="useCustomName" />
+                <span>Prefix Mode</span>
+              </label>
+              <label class="radio-label">
+                <input type="radio" :value="true" v-model="useCustomName" />
+                <span>Custom Mode</span>
+              </label>
+            </div>
+
+            <div v-if="!useCustomName">
+              <div class="form-group">
+                <label>Demand Prefix (Regional)</label>
+                <input type="text" v-model="demandPrefix" placeholder="FC_DEM_" class="path-input" />
+              </div>
+              <div class="form-group">
+                <label>Demand Prefix (Zonal)</label>
+                <input type="text" v-model="demandZonalPrefix" placeholder="FC_ZDEM_" class="path-input" />
+              </div>
+              <div class="form-group">
+                <label>CFAC Prefix</label>
+                <input type="text" v-model="cfacPrefix" placeholder="FC_CF_" class="path-input" />
+              </div>
+              <div class="form-group">
+                <label>Suffix</label>
+                <input type="text" v-model="outputSuffix" placeholder="_v2 (optional)" class="path-input" />
+              </div>
+            </div>
+
+            <div v-else>
+              <div class="form-group">
+                <label>Demand Filename</label>
+                <input type="text" v-model="customDemandName" placeholder="forecast.csv" class="path-input" />
+              </div>
+              <div class="form-group">
+                <label>CFAC Filename</label>
+                <input type="text" v-model="customCfacName" placeholder="cfac.csv" class="path-input" />
+              </div>
+            </div>
+
+            <div class="output-preview" style="margin-top: 12px;">
+              <p class="field-hint" style="margin-bottom: 6px;">Preview:</p>
+              <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+                <span class="preview-tag">{{ demandFilenamePreview }}</span>
+                <span class="preview-tag zonal-tag">{{ demandZonalFilenamePreview }}</span>
+                <span class="preview-tag">{{ cfacFilenamePreview }}</span>
+              </div>
+            </div>
+          </section>
+
           <!-- CFAC Model Options -->
           <section class="card settings-section">
             <h2>CFAC Model Options</h2>
@@ -3293,6 +4568,70 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
                   class="range-input"
                 />
                 <span class="range-value">{{ schedulerCalibDays }} days</span>
+              </div>
+            </div>
+          </section>
+
+          <!-- Demand Calibration Settings - Progressive Disclosure -->
+          <section class="card settings-section calibration-settings">
+            <div class="settings-header">
+              <span class="settings-icon">⚡</span>
+              <span>Demand Calibration</span>
+            </div>
+
+            <div class="settings-content">
+              <!-- Simple Mode: Just a checkbox -->
+              <div class="simple-calibration">
+                <label class="checkbox-label">
+                  <input type="checkbox" v-model="useHybridCalibration" @change="onCalibrationToggle" />
+                  <span>Use Hybrid Calibration</span>
+                  <span class="recommended-badge">Recommended</span>
+                </label>
+                <p class="help-text">
+                  Automatically adjusts forecasts to reduce prediction bias.
+                  Achieved 99% improvement in testing vs uncalibrated forecasts.
+                </p>
+              </div>
+
+              <!-- Advanced Options Toggle -->
+              <button
+                class="advanced-toggle"
+                @click="showAdvancedCalibration = !showAdvancedCalibration"
+                v-if="useHybridCalibration"
+              >
+                {{ showAdvancedCalibration ? '▼ Hide' : '▶ Show' }} Advanced Settings
+              </button>
+
+              <!-- Advanced Mode: Full options -->
+              <div v-if="showAdvancedCalibration && useHybridCalibration" class="advanced-calibration">
+                <div class="form-group">
+                  <label>Calibration Mode</label>
+                  <select v-model="demandCalibrationMode" class="form-select">
+                    <option value="hybrid">Hybrid (Iterative + XGBoost) - Best Accuracy</option>
+                    <option value="iterative">Iterative Scaling Only - Fast</option>
+                    <option value="xgboost">XGBoost Only - Legacy</option>
+                  </select>
+                </div>
+
+                <div v-if="demandCalibrationMode !== 'iterative'" class="form-group">
+                  <label>
+                    Quantile Alpha: {{ quantileAlpha.toFixed(2) }}
+                    <span class="penalty-ratio">({{ penaltyRatio }}:1 under-prediction penalty)</span>
+                  </label>
+                  <input
+                    type="range"
+                    v-model.number="quantileAlpha"
+                    min="0.5"
+                    max="0.95"
+                    step="0.05"
+                    class="form-range"
+                  />
+                  <div class="alpha-labels">
+                    <span>0.50 (Symmetric)</span>
+                    <span>0.80 (Default)</span>
+                    <span>0.95 (Aggressive)</span>
+                  </div>
+                </div>
               </div>
             </div>
           </section>
@@ -3441,6 +4780,108 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
                   </label>
                 </div>
               </div>
+
+              <!-- Data Source Section -->
+              <div class="config-section">
+                <h3>Data Source</h3>
+                <div class="data-source-toggle-group">
+                  <label class="radio-label">
+                    <input type="radio" v-model="dataSource" value="database" />
+                    <span>Database</span>
+                  </label>
+                  <label class="radio-label">
+                    <input type="radio" v-model="dataSource" value="csv" />
+                    <span>CSV Files</span>
+                  </label>
+                </div>
+                <p class="field-hint">
+                  <span v-if="dataSource === 'database'">Using database for demand and CFAC data</span>
+                  <span v-else>Using CSV files directly</span>
+                </p>
+              </div>
+
+              <!-- Zone Scaling Section -->
+              <div class="config-section config-section-wide">
+                <div class="config-section-header">
+                  <h3>Zone Scaling</h3>
+                  <span v-if="hasAnyZoneScales()" class="zone-scale-active-badge">Active</span>
+                </div>
+                <p class="section-hint">Adjust demand forecasts by percentage for specific zones or regions</p>
+                <div class="zone-scaling-settings-grid">
+                  <!-- Region scales -->
+                  <div class="zone-scale-group">
+                    <div class="zone-scale-group-header">Regions</div>
+                    <div class="zone-scale-row" v-for="region in ALL_REGIONS" :key="'settings-' + region">
+                      <label class="zone-label">{{ region }}</label>
+                      <input
+                        type="number"
+                        class="zone-scale-input"
+                        :value="getRegionScale(region)"
+                        @change="(e: Event) => { setRegionScale(region, parseFloat((e.target as HTMLInputElement).value) || 0); markConfigDirty(); }"
+                        placeholder="0"
+                        min="-50"
+                        max="50"
+                        step="0.5"
+                      />
+                      <span class="zone-scale-unit">%</span>
+                    </div>
+                  </div>
+                  <!-- Luzon zones -->
+                  <div class="zone-scale-group">
+                    <div class="zone-scale-group-header">Luzon</div>
+                    <div class="zone-scale-row" v-for="zone in ALL_ZONES.filter(z => ZONE_TO_REGION[z] === 'CLUZ')" :key="'settings-' + zone">
+                      <label class="zone-label">{{ zone }}</label>
+                      <input
+                        type="number"
+                        class="zone-scale-input"
+                        :value="getZoneScale(zone)"
+                        @change="(e: Event) => { setZoneScale(zone, parseFloat((e.target as HTMLInputElement).value) || 0); markConfigDirty(); }"
+                        placeholder="0"
+                        min="-50"
+                        max="50"
+                        step="0.5"
+                      />
+                      <span class="zone-scale-unit">%</span>
+                    </div>
+                  </div>
+                  <!-- Visayas zones -->
+                  <div class="zone-scale-group">
+                    <div class="zone-scale-group-header">Visayas</div>
+                    <div class="zone-scale-row" v-for="zone in ALL_ZONES.filter(z => ZONE_TO_REGION[z] === 'CVIS')" :key="'settings-' + zone">
+                      <label class="zone-label">{{ zone }}</label>
+                      <input
+                        type="number"
+                        class="zone-scale-input"
+                        :value="getZoneScale(zone)"
+                        @change="(e: Event) => { setZoneScale(zone, parseFloat((e.target as HTMLInputElement).value) || 0); markConfigDirty(); }"
+                        placeholder="0"
+                        min="-50"
+                        max="50"
+                        step="0.5"
+                      />
+                      <span class="zone-scale-unit">%</span>
+                    </div>
+                  </div>
+                  <!-- Mindanao zones -->
+                  <div class="zone-scale-group">
+                    <div class="zone-scale-group-header">Mindanao</div>
+                    <div class="zone-scale-row" v-for="zone in ALL_ZONES.filter(z => ZONE_TO_REGION[z] === 'CMIN')" :key="'settings-' + zone">
+                      <label class="zone-label">{{ zone }}</label>
+                      <input
+                        type="number"
+                        class="zone-scale-input"
+                        :value="getZoneScale(zone)"
+                        @change="(e: Event) => { setZoneScale(zone, parseFloat((e.target as HTMLInputElement).value) || 0); markConfigDirty(); }"
+                        placeholder="0"
+                        min="-50"
+                        max="50"
+                        step="0.5"
+                      />
+                      <span class="zone-scale-unit">%</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
 
             <!-- Save/Reset Buttons -->
@@ -3543,6 +4984,9 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
         >
           Clear
         </button>
+
+        <!-- Note: Models are auto-saved by CLI with --save-model flag -->
+        <!-- Users can view/manage them in the Models tab -->
       </div>
 
       <div class="terminal-content" v-if="terminalExpanded">
@@ -3722,6 +5166,8 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
         </div>
       </div>
     </div>
+
+    <!-- Save Model Dialog removed - models are auto-saved by CLI with --save-model flag -->
 
   </div>
 </template>
@@ -4038,6 +5484,40 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
   padding: 4px 10px;
   border-radius: 4px;
   color: var(--accent-primary);
+}
+
+.preview-tag.zonal-tag {
+  background: rgba(34, 197, 94, 0.1);
+  border: 1px solid rgba(34, 197, 94, 0.2);
+  color: #22c55e;
+}
+
+.dual-mode-label {
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  padding: 4px 8px;
+  background: rgba(148, 163, 184, 0.1);
+  border-radius: 4px;
+}
+
+.toggle-group.info-badge {
+  background: transparent;
+  padding: 8px 0;
+  display: flex;
+  align-items: center;
+}
+
+.calib-indicator {
+  display: flex;
+  align-items: center;
+  margin-left: 4px;
+  color: #22c55e;
+}
+
+.calib-icon {
+  width: 14px;
+  height: 14px;
 }
 
 .naming-mode {
@@ -4433,6 +5913,107 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
   min-width: 280px;
 }
 
+/* Model Listbox Styles */
+.model-listbox-container {
+  max-height: 150px;
+  overflow-y: auto;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--surface-1);
+}
+
+.model-listbox-item {
+  display: flex;
+  flex-direction: column;
+  padding: 8px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-color);
+  transition: background 0.15s;
+}
+
+.model-listbox-item:last-child {
+  border-bottom: none;
+}
+
+.model-listbox-item:hover {
+  background: var(--surface-2);
+}
+
+.model-listbox-item.selected {
+  background: var(--primary-bg);
+  border-left: 3px solid var(--primary-color);
+}
+
+.model-listbox-item .model-name {
+  font-weight: 500;
+  font-size: 12px;
+}
+
+.model-listbox-item .model-hint,
+.model-listbox-item .model-date {
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+
+.model-listbox-item .model-metrics {
+  font-size: 10px;
+  color: var(--success-color);
+}
+
+.model-listbox-empty {
+  padding: 16px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.card-header-inline {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.card-header-inline h2 {
+  margin: 0;
+}
+
+.training-dates-section {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-color);
+}
+
+.selected-model-info {
+  margin-top: 8px;
+  padding: 8px;
+  background: var(--surface-2);
+  border-radius: 4px;
+}
+
+/* Zone Scaling Card and Grid */
+.zone-scaling-card {
+  margin-top: 16px;
+}
+
+.zone-scaling-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+}
+
+@media (max-width: 1200px) {
+  .zone-scaling-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 768px) {
+  .zone-scaling-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Zone Scaling Styles */
 .zone-scaling-section {
   border-top: 1px solid var(--border-color);
@@ -4531,6 +6112,29 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 .zone-scale-unit {
   font-size: 0.7rem;
   color: var(--text-muted);
+}
+
+/* Model Selection Styles */
+.zone-model-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.zone-model-select {
+  flex: 1;
+  padding: 4px 6px;
+  font-size: 0.75rem;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+.zone-model-select:focus {
+  outline: none;
+  border-color: var(--accent-primary);
 }
 
 .gateway-config {
@@ -5644,6 +7248,192 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
   border-radius: 0 0 12px 12px;
 }
 
+/* Model Details Modal */
+.model-details-modal {
+  max-width: 600px;
+  width: 100%;
+}
+
+.model-details-modal .modal-body {
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.detail-section {
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.detail-section:last-child {
+  margin-bottom: 0;
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.detail-section h4 {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--accent-color);
+  margin-bottom: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+
+.detail-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.detail-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+.detail-value {
+  font-size: 0.9rem;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.detail-value .status-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.detail-value .status-badge.active {
+  background: rgba(16, 185, 129, 0.2);
+  color: #10b981;
+}
+
+.detail-value .status-badge.archived {
+  background: rgba(156, 163, 175, 0.2);
+  color: #9ca3af;
+}
+
+.detail-value .status-badge.inactive {
+  background: rgba(245, 158, 11, 0.2);
+  color: #f59e0b;
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+.metric-card {
+  background: var(--bg-primary);
+  padding: 12px;
+  border-radius: 6px;
+  text-align: center;
+}
+
+.metric-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.metric-value {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.metric-value.good {
+  color: #10b981;
+}
+
+.metric-value.warn {
+  color: #f59e0b;
+}
+
+.model-id-box {
+  background: var(--bg-primary);
+  padding: 12px;
+  border-radius: 6px;
+  margin-top: 8px;
+}
+
+.model-id-box p {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.model-id {
+  display: block;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 0.85rem;
+  background: var(--bg-tertiary);
+  padding: 8px 12px;
+  border-radius: 4px;
+  color: var(--accent-color);
+  word-break: break-all;
+  user-select: all;
+}
+
+.modal-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+  gap: 12px;
+  color: var(--text-muted);
+}
+
+/* Model Comparison Grid */
+.comparison-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin-top: 16px;
+}
+
+.comparison-column {
+  background: var(--bg-secondary);
+  padding: 12px;
+  border-radius: 6px;
+}
+
+.comparison-column h5 {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+  text-align: center;
+}
+
+.comparison-column .metrics-grid {
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.comparison-column .metric-card {
+  padding: 8px;
+}
+
+.comparison-column .metric-label {
+  font-size: 0.7rem;
+}
+
+.comparison-column .metric-value {
+  font-size: 0.9rem;
+}
+
 /* Training mode toggle */
 .training-mode-section {
   margin-bottom: 16px;
@@ -6298,6 +8088,173 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
   color: var(--text-primary);
 }
 
+.alpha-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 0.25rem;
+}
+
+.calibration-info {
+  background: var(--bg-tertiary);
+  border-radius: 6px;
+  padding: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.calibration-info h4 {
+  margin: 0 0 0.5rem 0;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.calibration-info ul {
+  margin: 0;
+  padding-left: 1.25rem;
+  font-size: 0.8rem;
+}
+
+.calibration-info li {
+  margin-bottom: 0.25rem;
+}
+
+/* Progressive Disclosure Calibration Styles */
+.recommended-badge {
+  background: var(--accent-color, #4CAF50);
+  color: white;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  margin-left: 0.5rem;
+}
+
+.advanced-toggle {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0.5rem 0;
+  font-size: 0.85rem;
+}
+
+.advanced-toggle:hover {
+  color: var(--text-primary);
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+
+.checkbox-label input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+}
+
+.penalty-ratio {
+  color: var(--text-muted);
+  font-size: 0.85em;
+}
+
+.simple-calibration {
+  margin-bottom: 1rem;
+}
+
+.advanced-calibration {
+  padding: 1rem;
+  background: var(--bg-tertiary);
+  border-radius: 6px;
+  margin-top: 0.5rem;
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  padding: 0.5rem;
+  background: var(--bg-secondary);
+  border-radius: 6px;
+  margin-bottom: 1rem;
+}
+
+.settings-header:hover {
+  background: var(--bg-tertiary);
+}
+
+.expand-icon {
+  margin-left: auto;
+  font-size: 0.75rem;
+}
+
+.settings-icon {
+  font-size: 1.1rem;
+}
+
+.settings-content {
+  padding-top: 0.5rem;
+}
+
+.help-text {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  margin-top: 0.25rem;
+}
+
+.form-select {
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+.form-select:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 3px rgba(79, 209, 197, 0.1);
+}
+
+.form-range {
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-tertiary);
+  outline: none;
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 0.5rem 0;
+}
+
+.form-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent-primary);
+  cursor: pointer;
+  transition: transform 0.2s;
+}
+
+.form-range::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+
+.form-range::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent-primary);
+  cursor: pointer;
+  border: none;
+}
+
 .db-status-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -6335,6 +8292,91 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 /* =====================================================
    SCHEDULER TAB - NEW LAYOUT
    ===================================================== */
+
+/* Active Model Card */
+.active-model-card {
+  margin-bottom: 20px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+}
+
+.active-model-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.active-model-header h2 {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
+.status-indicator {
+  font-size: 1.5rem;
+  line-height: 1;
+}
+
+.status-indicator.active {
+  color: var(--success);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.active-model-details {
+  margin-bottom: 16px;
+  padding: 12px;
+  background: var(--bg-primary);
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+}
+
+.model-name-display {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+
+.model-metrics-display {
+  font-size: 0.95rem;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.training-period-display {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.no-model-selected {
+  padding: 20px;
+  text-align: center;
+  color: var(--text-muted);
+  background: var(--bg-primary);
+  border-radius: 6px;
+  border: 1px dashed var(--border-color);
+  margin-bottom: 16px;
+}
+
+.no-model-selected p {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.active-model-card .btn {
+  width: 100%;
+}
 
 /* Manual Run Card - Full Width */
 .manual-run-card {
@@ -6726,4 +8768,2172 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 .config-actions .btn {
   min-width: 150px;
 }
+
+/* Settings Tab - Data Source and Zone Scaling */
+.config-section-wide {
+  grid-column: 1 / -1;
+}
+
+.config-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.config-section-header h3 {
+  margin: 0;
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.zone-scale-active-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  background: var(--accent-primary);
+  color: var(--text-primary);
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.section-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+
+.data-source-toggle-group {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+
+.zone-scaling-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+}
+
+@media (max-width: 1200px) {
+  .zone-scaling-settings-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 768px) {
+  .zone-scaling-settings-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Manual Tab - Data Source Badge */
+.data-source-badge {
+  padding: 4px 10px;
+  background: var(--accent-primary);
+  color: var(--text-primary);
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.data-source-info-compact {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 12px;
+}
 </style>
+
+/* ============ MODELS TAB STYLES ============ */
+.models-header-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 16px;
+  gap: 8px;
+}
+
+.models-container {
+  max-width: 1200px;
+}
+
+.models-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.summary-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 16px;
+  text-align: center;
+}
+
+.summary-card h3 {
+  margin: 0 0 8px 0;
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.summary-value {
+  font-size: 32px;
+  font-weight: bold;
+  color: var(--text-primary);
+}
+
+.empty-state {
+  text-align: center;
+  padding: 48px;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+}
+
+.models-list {
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  padding: 24px;
+  border: 1px solid var(--border-color);
+}
+
+.models-filters {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 24px;
+  align-items: flex-end;
+}
+
+.models-filters .form-group {
+  flex: 1;
+  margin: 0;
+}
+
+.models-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.models-table th {
+  text-align: left;
+  padding: 12px;
+  border-bottom: 2px solid var(--border-color);
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.models-table td {
+  padding: 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.models-table tr:hover {
+  background: var(--bg-primary);
+}
+
+.models-table tr.active-model {
+  background: rgba(52, 199, 89, 0.1);
+}
+
+.status-badge {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.status-badge.active {
+  background: var(--success);
+  color: white;
+}
+
+.status-badge.inactive {
+  background: var(--text-muted);
+  color: white;
+}
+
+.status-badge.archived {
+  background: var(--warning);
+  color: white;
+}
+
+.actions-cell {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-small {
+  padding: 4px 12px;
+  font-size: 12px;
+  border-radius: 4px;
+  border: none;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.btn-small.btn-success {
+  background: var(--success);
+  color: white;
+}
+
+.btn-small.btn-secondary {
+  background: var(--text-muted);
+  color: white;
+}
+
+.btn-small.btn-danger {
+  background: var(--danger);
+  color: white;
+}
+
+.btn-small:hover {
+  opacity: 0.9;
+}
+
+/* ============ MODELS TAB REDESIGN ============ */
+.models-page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 20px;
+}
+
+.models-page-header .models-header-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.models-split-view {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  height: calc(100vh - 180px);
+}
+
+.models-table-section {
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  flex: 0 0 auto;
+  max-height: 45%;
+  display: flex;
+  flex-direction: column;
+}
+
+.models-filters {
+  display: flex;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-color);
+  align-items: center;
+}
+
+.filter-select {
+  padding: 6px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.models-count {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.models-table-wrapper {
+  overflow-y: auto;
+  flex: 1;
+}
+
+.models-table.compact {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.models-table.compact th {
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-color);
+  font-weight: 600;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  position: sticky;
+  top: 0;
+  background: var(--bg-secondary);
+}
+
+.models-table.compact td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.models-table.compact tbody tr {
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.models-table.compact tbody tr:hover {
+  background: var(--bg-primary);
+}
+
+.models-table.compact tbody tr.selected {
+  background: rgba(59, 130, 246, 0.15);
+}
+
+.models-table.compact tbody tr.active-model {
+  border-left: 3px solid var(--success);
+}
+
+.type-cell {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.status-dot.active {
+  background: var(--success);
+}
+
+.status-dot.inactive {
+  background: var(--text-muted);
+}
+
+.status-dot.archived {
+  background: var(--warning);
+}
+
+/* MAPE Color Coding */
+.mape-excellent { color: #10b981; font-weight: 600; }
+.mape-good { color: #22c55e; }
+.mape-fair { color: #f59e0b; }
+.mape-poor { color: #ef4444; }
+
+/* Model Details Panel (inline) */
+.model-details-panel {
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+}
+
+.model-details-placeholder {
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+
+.details-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  color: var(--text-muted);
+}
+
+.details-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.details-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.details-title h2 {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+.entity-type-badge {
+  background: var(--bg-primary);
+  color: var(--text-muted);
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+
+.details-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.btn-close {
+  background: transparent;
+  border: none;
+  font-size: 24px;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0 8px;
+  line-height: 1;
+}
+
+.btn-close:hover {
+  color: var(--text-primary);
+}
+
+.details-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+
+.details-column h4 {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--accent-color);
+  margin-bottom: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.metrics-compact {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.metric-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: var(--bg-primary);
+  border-radius: 4px;
+}
+
+.metric-name {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.metric-val {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.info-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.info-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.info-row:last-child {
+  border-bottom: none;
+}
+
+.info-label {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.info-value {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.action-section {
+  margin-top: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.hint-text {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.model-id-section {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color);
+}
+
+.model-id-code {
+  display: block;
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: var(--bg-primary);
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+/* Comparison Section */
+.comparison-section {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-color);
+}
+
+.comparison-section summary {
+  cursor: pointer;
+  color: var(--accent-color);
+  font-weight: 500;
+  font-size: 14px;
+  padding: 8px 0;
+}
+
+.comparison-content {
+  padding-top: 12px;
+}
+
+.comparison-content .model-dropdown {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.comparison-table {
+  margin-top: 12px;
+}
+
+.comparison-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.comparison-table th,
+.comparison-table td {
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.comparison-table th {
+  color: var(--text-muted);
+  font-weight: 500;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.comparison-better {
+  color: var(--success);
+}
+
+.comparison-worse {
+  color: var(--danger);
+}
+
+.comparison-same {
+  color: var(--text-muted);
+}
+
+/* Training Instance Two-Panel Layout */
+.models-two-panel {
+  display: flex;
+  gap: 20px;
+  height: calc(100vh - 200px);
+  min-height: 400px;
+}
+
+.instances-panel {
+  width: 320px;
+  min-width: 280px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  overflow: hidden;
+}
+
+.panel-header {
+  padding: 16px;
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.panel-header h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.instance-count {
+  font-size: 12px;
+  color: var(--text-muted);
+  background: var(--bg-primary);
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.instances-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.instance-card {
+  padding: 12px;
+  margin-bottom: 8px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.instance-card:hover {
+  border-color: var(--accent-color);
+  background: var(--bg-tertiary);
+}
+
+.instance-card.selected {
+  border-color: var(--accent-color);
+  background: var(--accent-color);
+  background: rgba(59, 130, 246, 0.1);
+  border-width: 2px;
+}
+
+.instance-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.instance-type {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.instance-count-badge {
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-secondary);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.instance-date {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.instance-stats {
+  display: flex;
+  gap: 12px;
+  font-size: 11px;
+}
+
+.stat-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.stat-label {
+  color: var(--text-muted);
+}
+
+.stat-value {
+  font-weight: 600;
+}
+
+.models-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  overflow: hidden;
+}
+
+.panel-placeholder {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  padding: 40px;
+  text-align: center;
+}
+
+.panel-placeholder p {
+  margin: 0;
+  font-size: 14px;
+}
+
+.panel-placeholder .hint {
+  margin-top: 8px;
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.models-panel-header {
+  padding: 16px;
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.models-panel-header h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.panel-subtitle {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-left: 8px;
+  font-weight: normal;
+}
+
+.models-panel-content {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.filter-select-small {
+  padding: 4px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+.active-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  background: var(--success);
+  color: white;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
+.instance-stats {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.instance-stats .divider {
+  color: var(--border-color);
+}
+
+.instance-period {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border-color);
+}
+
+.model-details-inline {
+  border-top: 1px solid var(--border-color);
+  padding: 16px;
+  background: var(--bg-tertiary);
+}
+
+.model-details-inline .details-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.model-details-inline .details-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.model-details-inline .details-title h4 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.status-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
+.status-badge.active {
+  background: var(--success);
+  color: white;
+}
+
+.btn-sm {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+/* CLI Hint in empty state */
+.cli-hint {
+  background: var(--bg-tertiary);
+  padding: 16px;
+  border-radius: 8px;
+  font-family: monospace;
+  font-size: 12px;
+  text-align: left;
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+.cli-hint .hint-label {
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.cli-hint code {
+  color: var(--accent-primary);
+  display: block;
+}
+
+/* Model type tags in instance cards */
+.instance-model-types {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.model-type-tag {
+  font-size: 10px;
+  padding: 2px 6px;
+  background: var(--primary-color);
+  color: white;
+  border-radius: 3px;
+  opacity: 0.85;
+}
+
+.model-type-cell {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* Model details rows */
+.details-row {
+  display: flex;
+  gap: 24px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border-color);
+}
+
+.detail-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.detail-item.full-width {
+  width: 100%;
+}
+
+.detail-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+}
+
+.detail-value {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+/* Settings tags */
+.settings-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.setting-tag {
+  font-size: 11px;
+  padding: 3px 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+}
+
+.setting-tag.default {
+  opacity: 0.6;
+  font-style: italic;
+}
+
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal-content {
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  padding: 24px;
+  max-width: 600px;
+  width: 90%;
+  max-height: 80vh;
+  overflow-y: auto;
+  border: 1px solid var(--border-color);
+}
+
+/* ============ TRAINING PLANS STYLES ============ */
+.training-plans-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.training-plans-card .card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.training-plans-card .card-header h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.empty-state-small {
+  padding: 32px 16px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.plans-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.plan-item {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 12px 16px;
+  transition: border-color 0.2s;
+}
+
+.plan-item:hover {
+  border-color: var(--primary-color);
+}
+
+.plan-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.plan-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.plan-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.plan-details {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.plan-detail {
+  display: flex;
+  align-items: center;
+}
+
+.plan-settings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.setting-badge {
+  font-size: 11px;
+  padding: 3px 8px;
+  background: var(--primary-color);
+  color: white;
+  border-radius: 4px;
+  opacity: 0.8;
+}
+
+/* Plan Editor Modal */
+.plan-editor-modal {
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  width: 90%;
+  max-width: 700px;
+  max-height: 85vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-color);
+}
+
+.modal-header {
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.modal-header h3 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.modal-body {
+  padding: 24px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.modal-footer {
+  padding: 16px 24px;
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.form-section {
+  margin-bottom: 24px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.form-section:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+}
+
+.form-section h4 {
+  margin: 0 0 16px 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.radio-group {
+  display: flex;
+  gap: 24px;
+  margin-bottom: 16px;
+}
+
+.radio-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.radio-label input[type="radio"] {
+  cursor: pointer;
+}
+
+.checkbox-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.checkbox-label input[type="checkbox"] {
+  cursor: pointer;
+}
+
+.date-range-inputs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.input-field {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.input-field:focus {
+  outline: none;
+  border-color: var(--primary-color);
+}
+
+textarea.input-field {
+  resize: vertical;
+  font-family: inherit;
+}
+
+.field-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
+.modal-dialog {
+  position: relative;
+}
+
+.btn-xs {
+  padding: 4px 8px;
+  font-size: 11px;
+  border-radius: 3px;
+  border: none;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.btn-xs:hover {
+  opacity: 0.8;
+}
+
+/* CFAC Calibrations Styles */
+.calibrations-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.calibration-item {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 12px 16px;
+  transition: border-color 0.2s;
+}
+
+.calibration-item:hover {
+  border-color: var(--primary-color);
+}
+
+.calibration-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.calibration-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.calibration-date {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.active-indicator {
+  font-size: 10px;
+  padding: 3px 8px;
+  background: var(--success-color);
+  color: white;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.calibration-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.calibration-details {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.cal-detail {
+  display: flex;
+  align-items: center;
+}
+
+.calibration-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.metric-badge {
+  font-size: 11px;
+  padding: 4px 10px;
+  background: var(--primary-color);
+  color: white;
+  border-radius: 4px;
+  opacity: 0.85;
+}
+
+/* Calibration Details Modal */
+.calibration-details-modal {
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  width: 90%;
+  max-width: 900px;
+  max-height: 85vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-color);
+}
+
+.calibration-detail-section {
+  margin-bottom: 24px;
+}
+
+.calibration-detail-section h4 {
+  margin-bottom: 12px;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 8px;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+
+.detail-item {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px;
+  background: var(--bg-primary);
+  border-radius: 4px;
+}
+
+.detail-label {
+  font-weight: 500;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.detail-value {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.metrics-row {
+  display: flex;
+  gap: 16px;
+  justify-content: flex-start;
+}
+
+.metric-card {
+  flex: 1;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 16px;
+  text-align: center;
+}
+
+.metric-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.metric-value {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.hourly-scale-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.hour-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.hour-label {
+  font-size: 11px;
+  width: 30px;
+  color: var(--text-secondary);
+}
+
+.bar-container {
+  flex: 1;
+  height: 20px;
+  background: var(--bg-primary);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.bar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--primary-color), var(--success-color));
+  transition: width 0.3s;
+}
+
+.hour-value {
+  font-size: 11px;
+  width: 50px;
+  text-align: right;
+  color: var(--text-primary);
+}
+
+.station-scales-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  background: var(--bg-primary);
+  border-radius: 4px;
+}
+
+.scale-category {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.config-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.config-badge {
+  font-size: 12px;
+  padding: 6px 12px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-secondary);
+}
+
+.config-badge.active {
+  background: var(--primary-color);
+  color: white;
+  border-color: var(--primary-color);
+}
+
+/* ============ SIMPLIFIED MODELS TAB STYLES ============ */
+.models-tab {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+.models-split-layout {
+  display: flex;
+  flex-direction: row;
+  gap: 16px;
+  height: calc(100vh - 140px);
+  min-height: 500px;
+  width: 100%;
+  align-items: stretch;
+}
+
+/* Left panel - Instances list */
+.models-list-panel {
+  width: 280px;
+  min-width: 240px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+}
+
+.list-panel-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.list-panel-header h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.list-panel-actions {
+  display: flex;
+  gap: 6px;
+}
+
+/* Phase 1A: Search and Filter */
+.models-search-filter {
+  padding: 8px 12px;
+  display: flex;
+  gap: 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.models-search-filter .search-input {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  font-size: 12px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+.models-search-filter .search-input:focus {
+  outline: none;
+  border-color: var(--primary-color);
+}
+
+.models-search-filter .filter-select {
+  padding: 6px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  font-size: 12px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  min-width: 120px;
+}
+
+.list-empty-state {
+  padding: 32px 16px;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.list-empty-state p {
+  margin: 0 0 4px 0;
+  font-size: 13px;
+}
+
+.list-empty-state .hint {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+/* Instances listbox */
+.instances-listbox {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.instance-list-item {
+  padding: 12px 14px;
+  margin-bottom: 8px;
+  background: var(--bg-primary);
+  border: 2px solid var(--border-color);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.instance-list-item:hover {
+  border-color: var(--accent-color);
+  transform: translateX(2px);
+}
+
+.instance-list-item.selected {
+  border-color: var(--accent-color);
+  background: rgba(59, 130, 246, 0.15);
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.2);
+}
+
+.instance-row-main {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.instance-type-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent-color);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.instance-date-short {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.instance-row-stats {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.mape-value.mape-good { color: var(--success); }
+.mape-value.mape-warning { color: var(--warning); }
+.mape-value.mape-bad { color: var(--danger); }
+
+/* Active instance styling */
+.instance-list-item.is-active {
+  border-left: 3px solid var(--success-color, #10b981);
+}
+
+.instance-active-badges {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.active-badge {
+  font-size: 9px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.active-badge.scheduler {
+  background: rgba(99, 102, 241, 0.15);
+  color: #6366f1;
+}
+
+.active-badge.manual {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+}
+
+/* Header active status */
+.header-active-status {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.status-indicator {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.status-indicator.scheduler {
+  background: rgba(99, 102, 241, 0.15);
+  color: #6366f1;
+}
+
+.status-indicator.manual {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+}
+
+/* Set Active dropdown */
+.set-active-dropdown {
+  position: relative;
+}
+
+.set-active-dropdown .dropdown-arrow {
+  font-size: 10px;
+  margin-left: 4px;
+}
+
+.set-active-dropdown .dropdown-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 100;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  min-width: 200px;
+  margin-top: 4px;
+  overflow: hidden;
+}
+
+.set-active-dropdown .dropdown-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 14px;
+  border: none;
+  background: none;
+  text-align: left;
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.set-active-dropdown .dropdown-menu button:hover:not(:disabled) {
+  background: var(--bg-secondary);
+}
+
+.set-active-dropdown .dropdown-menu button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.set-active-dropdown .dropdown-menu .menu-icon {
+  font-size: 14px;
+}
+
+/* Right panel - Details */
+.models-detail-panel {
+  flex: 1;
+  min-width: 400px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  overflow: hidden;
+}
+
+.detail-placeholder {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.detail-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.detail-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.detail-header h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.detail-subtitle {
+  margin: 4px 0 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.detail-header-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Summary stats */
+.detail-summary {
+  display: flex;
+  gap: 24px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-primary);
+}
+
+.summary-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.summary-stat .stat-value {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.summary-stat .stat-value-small {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.summary-stat .stat-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+/* Phase 1B: Instance Detail Tabs */
+.instance-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border-color);
+  padding: 0 20px;
+  background: var(--bg-primary);
+}
+
+.instance-tabs button {
+  padding: 10px 16px;
+  border: none;
+  background: none;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: all 0.2s;
+}
+
+.instance-tabs button:hover {
+  color: var(--text-primary);
+}
+
+.instance-tabs button.active {
+  color: var(--primary-color, #6366f1);
+  border-bottom-color: var(--primary-color, #6366f1);
+  font-weight: 500;
+}
+
+.instance-tab-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+}
+
+/* Configuration Tab */
+.config-tab-panel h3,
+.calibration-tab-panel h3,
+.evaluation-tab-panel h3 {
+  margin: 0 0 16px 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.config-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px;
+}
+
+.config-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.config-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.config-value {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+/* Evaluation Tab */
+.evaluation-summary {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 16px;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  margin-bottom: 20px;
+}
+
+.overall-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.overall-metric .metric-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+.overall-metric .metric-value {
+  font-size: 24px;
+  font-weight: 600;
+}
+
+.mape-range {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.models-breakdown {
+  margin-top: 16px;
+}
+
+.models-breakdown h4 {
+  margin: 0 0 12px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.model-mape-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.model-mape-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.model-mape-item .model-code {
+  width: 80px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.mape-bar-container {
+  flex: 1;
+  height: 8px;
+  background: var(--bg-tertiary, #e5e7eb);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.mape-bar {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+
+.model-mape-item .model-mape {
+  width: 50px;
+  text-align: right;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+/* Calibration Details Section */
+.calibration-details-section {
+  padding: 12px 20px;
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+}
+
+.calibration-details-section h3 {
+  margin: 0 0 12px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.calibration-info-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px 16px;
+  margin-bottom: 12px;
+}
+
+.calibration-info-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.calibration-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.calibration-value {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.calibration-value.positive {
+  color: var(--success-color, #10b981);
+}
+
+.calibration-value.negative {
+  color: var(--warning-color, #f59e0b);
+}
+
+.calibration-mode-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.calibration-mode-badge.mode-hybrid {
+  background: rgba(99, 102, 241, 0.15);
+  color: #6366f1;
+}
+
+.calibration-mode-badge.mode-iterative {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+}
+
+.calibration-mode-badge.mode-xgboost {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+}
+
+.calibration-mode-badge.mode-none {
+  background: rgba(156, 163, 175, 0.15);
+  color: #9ca3af;
+}
+
+.calibration-pass-section {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border-color);
+}
+
+.calibration-pass-section h4 {
+  margin: 0 0 8px 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.zone-scales-section {
+  margin-top: 8px;
+}
+
+.zone-scales-section h5 {
+  margin: 0 0 6px 0;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.zone-scales-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+  gap: 4px 12px;
+  font-size: 11px;
+}
+
+.zone-scale-item {
+  display: flex;
+  gap: 4px;
+}
+
+.zone-scale-item .zone-name {
+  color: var(--text-muted);
+}
+
+.zone-scale-item .zone-value {
+  font-weight: 500;
+}
+
+.zone-scale-item .zone-value.positive {
+  color: var(--success-color, #10b981);
+}
+
+.zone-scale-item .zone-value.negative {
+  color: var(--warning-color, #f59e0b);
+}
+
+.no-calibration {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-style: italic;
+  margin: 0;
+}
+
+/* Models section */
+.detail-models-section {
+  flex: 1;
+  padding: 16px 20px;
+  overflow-y: auto;
+}
+
+.detail-models-section h3 {
+  margin: 0 0 12px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+/* Simple models table */
+.models-table-simple {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.models-table-simple th {
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-muted);
+  font-weight: 500;
+  font-size: 11px;
+}
+
+.models-table-simple td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.models-table-simple tr:hover {
+  background: var(--bg-tertiary);
+}
+
+.models-table-simple tr.active-row {
+  background: rgba(34, 197, 94, 0.05);
+}
+
+.status-active {
+  color: var(--success);
+  font-weight: 500;
+  font-size: 11px;
+}
+
+.status-inactive {
+  color: var(--text-muted);
+}
+
+.actions-cell {
+  white-space: nowrap;
+}
+
+.btn-link {
+  background: none;
+  border: none;
+  color: var(--accent-color);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 6px;
+  margin-right: 4px;
+}
+
+.btn-link:hover {
+  text-decoration: underline;
+}
+
+.btn-link.danger {
+  color: var(--danger);
+}

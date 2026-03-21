@@ -5,9 +5,74 @@ All notable changes to the Vantage Forecaster project will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 2026-03-12
+## [Unreleased] - 2026-03-21
+
+### Added
+- **Full Model Details with Per-Zone/Region Metrics**
+  - CLI `--model-name <name>` option for custom model naming with `--save-model`
+  - GUI model name input field in Manual tab Training Settings section
+  - Per-zone MAPE calculation for zonal forecasts (all 14 zones)
+  - Per-region MAPE calculation for regional forecasts (CLUZ, CVIS, CMIN)
+  - Database columns `per_zone_mape` and `per_region_mape` storing JSON breakdowns
+  - Models tab displays per-zone/region performance grids with color-coded MAPE values
+
+- **Model Management System (Phases 1-4)**
+  - New SQLite-based model registry (`models/registry.db`) for tracking trained forecast models
+  - Binary model file storage using MessagePack serialization (.vfm files)
+  - Model metadata tracking: entity type/code, version, training period, performance metrics
+  - Support for regional demand (3), zonal demand (14), and CFAC models (wind, solar, hydro, etc.)
+  - Group model capability for CFAC (e.g., "all_solar" applies to all solar stations)
+  - Model lifecycle management: save, activate, archive, delete operations
+  - Training run history tracking with status and metrics
+
+- **Model Management CLI Commands**
+  - `models init` - Initialize model store (database + directory structure)
+  - `models list` - List all models with filtering by entity type/code/status
+  - `models info <id>` - Show detailed model information including metrics
+  - `models activate <id>` - Activate a model (deactivates others for same entity)
+  - `models archive <id>` - Archive a model
+  - `models delete <id>` - Delete a model (removes registry + binary file)
+  - `models groups` - List model groups
+  - `models runs` - List recent training runs
+  - `models train` - Train new models (stub - full integration pending)
+
+- **Model Management GUI Tab**
+  - New "Models" tab in GUI with model browser and management controls
+  - Model summary cards: total models, active models, entities covered
+  - Filterable model list by entity type and status
+  - Model actions: activate, view details, delete
+  - Initialize model store button for first-time setup
+  - IPC handlers for all model operations
+
+- **Model Storage Services**
+  - `src/services/modelStore.ts` - Core model registry and file operations
+  - `src/services/modelSerializer.ts` - Binary serialization with MessagePack and checksum validation
+  - `src/services/modelTrainer.ts` - Training pipeline framework (stub)
+  - `src/services/forecastGenerator.ts` - Fast forecast generation using pre-trained models (stub)
+  - `src/services/intradayRefresh.ts` - Hourly forecast refresh logic (stub)
+
+- **Model Type Definitions**
+  - `src/types/models.ts` - Complete type system for model management
+  - Interfaces: SavedModel, ModelMetadata, ModelMetrics, ModelRegistry, ModelGroup, TrainingRun
+  - Entity types: regional, zonal, wind, solar, hydro, biomass, geothermal, battery
+  - Model types: xgboost, hybrid, regression (demand), 4tier, mrec, physics (CFAC)
+
+### Added
+- **Gateway File Listing in GUI (Phase 2)**
+  - New file listing table in Gateway Storage tab showing individual files on gateway
+  - Filter dropdowns for type (day-ahead/week-ahead), category (demand/mhcf), geography (regional/zonal)
+  - Geography badges: green "REG (3)" for regional, yellow "ZONAL (14)" for zonal files
+  - IPC handler `get-gateway-files` calls gateway `GET /admin/files` endpoint
+  - Preload bridge `getGatewayFiles()` method with filter parameters
+  - Auto-loads file listing when Gateway tab is activated
 
 ### Fixed
+- **Solar Hour Constraints Expanded for Seasonal Variation**
+  - Changed daylight hour constraints from 6 AM - 6 PM to 5 AM - 7 PM
+  - Allows solar forecasts to capture earlier sunrise during summer months
+  - Updated in: SolarMRECHybridModel.ts, SolarHybridModel.ts, SolarPremiumHybridModel.ts, index.ts
+  - Fixes user-reported issue where solar forecasts always started at hour 7
+
 - **Geography Option in Scheduler Backfill Command**
   - Added `--geography <type>` CLI option (regional, zonal, both) with default "both"
   - CLI now properly passes `demandGeography` from config to ForecastSchedulerService
