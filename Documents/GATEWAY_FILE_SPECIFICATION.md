@@ -1,3 +1,10 @@
+---
+Status: Active
+Last-Verified: 2026-03-22
+Verified-Against: v1.0
+Updated-By: codebase-documenter
+---
+
 # Vantage Forecaster - Gateway File Specification
 
 **Version:** 1.0

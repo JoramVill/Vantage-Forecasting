@@ -1,0 +1,33 @@
+---
+Status: Active
+Last-Updated: 2026-03-22
+Updated-By: codebase-documenter
+---
+
+# CLAUDE.md - Vantage Forecaster
+
+This file provides guidance to Claude Code when working with the Vantage Forecaster codebase.
+
+This project follows the **iEnergy Documentation Protocol v1.0** (see DOCUMENTATION_PROTOCOL.md).
+
+---
+
+## Session Initialization (MANDATORY)
+
+Before starting ANY work, follow these steps in order:
+
+```
+Step 1: Read this file (CLAUDE.md)
+Step 2: Read context.md
+Step 3: Read DECISIONS.md (latest 10 entries minimum)
+Step 4: Staleness Check
+        - Scan Documentation Index at bottom of this file
+        - Compare Last Updated dates to recent code changes
+        - Check for completed plans not in archive/
+        - If ANY staleness: HARD BLOCK — fix docs before proceeding
+Step 5: Read task-relevant reference documents
+Step 6: Begin work
+```
+
+**Never skip Steps 1-4.** They are the project's memory.
+

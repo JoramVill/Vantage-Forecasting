@@ -109,6 +109,7 @@ export function initializeModelStore(): void {
       calibration_pass2_train_mape REAL,
       calibration_pass2_val_mape REAL,
       calibration_pass2_alpha REAL,
+      calibration_json TEXT,
 
       -- Status
       is_active INTEGER DEFAULT 0,
@@ -196,6 +197,7 @@ export function initializeModelStore(): void {
     { name: 'holiday_mape', type: 'REAL' },
     { name: 'per_zone_mape', type: 'TEXT' },
     { name: 'per_region_mape', type: 'TEXT' },
+    { name: 'calibration_json', type: 'TEXT' },
     { name: 'is_scheduler_active', type: 'INTEGER DEFAULT 0' },
     { name: 'is_manual_active', type: 'INTEGER DEFAULT 0' },
     { name: 'last_used_at', type: 'TEXT' },
@@ -277,6 +279,12 @@ export function saveModel(
   // Extract calibration settings if present
   const calibration = model.metadata.calibrationSettings;
 
+  // Extract CFAC calibration from modelData (for wind/solar models)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const modelDataAny = model.modelData as any;
+  const cfacCalibration = modelDataAny?.data?.calibration;
+  const calibrationJson = cfacCalibration ? JSON.stringify(cfacCalibration) : null;
+
   // Insert into registry
   const stmt = db.prepare(`
     INSERT INTO models (
@@ -290,6 +298,7 @@ export function saveModel(
       calibration_pass1_peak_scale, calibration_pass1_offpeak_scale, calibration_pass1_zone_scales,
       calibration_pass1_converged, calibration_pass1_iterations,
       calibration_pass2_train_mape, calibration_pass2_val_mape, calibration_pass2_alpha,
+      calibration_json,
       is_active, is_archived,
       file_path, file_size, checksum,
       created_by, notes
@@ -304,6 +313,7 @@ export function saveModel(
       ?, ?, ?,
       ?, ?,
       ?, ?, ?,
+      ?,
       0, 0,
       ?, ?, ?,
       ?, ?
@@ -348,6 +358,7 @@ export function saveModel(
     calibration?.pass2?.trainMAPE || null,
     calibration?.pass2?.validationMAPE || null,
     calibration?.pass2?.alpha || null,
+    calibrationJson,
     filePath,
     fileSize,
     checksum,

@@ -1,3 +1,9 @@
+---
+Status: Active
+Last-Updated: 2026-03-22
+Updated-By: codebase-documenter
+---
+
 # Vantage Forecaster
 
 A comprehensive electricity demand and renewable capacity factor forecasting system for the Philippines power grid. Features a desktop GUI, CLI tools, automated scheduling, and gateway integration.

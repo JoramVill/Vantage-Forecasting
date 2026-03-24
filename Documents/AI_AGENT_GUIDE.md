@@ -1,3 +1,10 @@
+---
+Status: Active
+Last-Verified: 2026-03-22
+Verified-Against: current
+Updated-By: codebase-documenter
+---
+
 # AI Agent Onboarding Guide
 
 **Start Here:** This guide provides essential context for AI agents working with this codebase.
@@ -336,7 +343,7 @@ Zone configuration: `src/data/zones.json`
 | `TECHNICAL_OVERVIEW.md` | Architecture and code structure |
 | `DEPLOYMENT_GUIDE.md` | Building portable distributions |
 
-Historical documents are in `Documents/archive/`.
+Historical documents have been archived and removed from the repository.
 
 ## Quick Reference: Common CLI Commands
 

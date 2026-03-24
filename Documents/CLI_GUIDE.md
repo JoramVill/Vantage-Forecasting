@@ -1,3 +1,10 @@
+---
+Status: Active
+Last-Verified: 2026-03-22
+Verified-Against: current
+Updated-By: codebase-documenter
+---
+
 # CLI Guide
 
 Complete command-line reference for the iLoad Forecasting Utility.

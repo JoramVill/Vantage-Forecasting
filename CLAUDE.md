@@ -1,3 +1,9 @@
+---
+Status: Active
+Last-Updated: 2026-03-22
+Updated-By: codebase-documenter
+---
+
 # CLAUDE.md - Vantage Forecaster
 
 This file provides guidance to Claude Code (claude.ai/code) when working with the Vantage Forecaster codebase.
@@ -43,51 +49,185 @@ Before starting work on this codebase, read the following files:
 
 ---
 
+## ⚠️ Forecast Pipeline Rules (MANDATORY)
+
+**Every code change must comply with these rules. No exceptions.**
+
+### The Two Modes
+
+| Mode | Where | What Happens | Retrains? |
+|------|-------|--------------|-----------|
+| **Training** | Manual tab / `forecast` CLI | Trains model from scratch, evaluates, optionally saves instance | YES |
+| **Inference** | Scheduler tab / `scheduler run --use-model <id>` | Loads frozen weights, fetches fresh weather, generates forecast | **NEVER** |
+
+### The Pipeline (One Direction Only)
+
+```
+Manual Tab (Train) ──→ Models Tab (Review) ──→ Scheduler Tab (Run)
+"The Forge"          "The Audit"            "Production"
+```
+
+1. **Manual Tab** trains a model, evaluates it, and saves a "training instance" (frozen weights + config + metrics)
+2. **Models Tab** displays all saved instances with detailed metrics (MAPE, per-zone breakdown, peak/off-peak). User reviews quality and clicks "Send to Scheduler" to activate.
+3. **Scheduler Tab** loads the activated instance via `--use-model <id>` and runs **inference only** — no retraining.
+
+### What "Inference Only" Means (Scheduler)
+
+When the scheduler runs with `--use-model <id>`:
+1. Load serialized model weights from `.vfm` file — **DO NOT retrain**
+2. Load saved calibration factors — **DO NOT recalculate**
+3. Load saved feature configuration — **DO NOT re-engineer from training data**
+4. Fetch **NEW** weather data for the forecast period (this is the only new input)
+5. Apply frozen model to new weather data → produce forecast
+6. Archive forecast and push to gateway
+
+### What "Training" Means (Manual Tab)
+
+When running a forecast WITHOUT `--use-model`:
+1. Load historical demand/CFAC data from training path
+2. Engineer features from the full training period
+3. Train XGBoost/Hybrid model from scratch
+4. Calculate calibration factors from recent actuals
+5. Evaluate on holdout period → compute MAPE and per-zone metrics
+6. Optionally save as training instance (`--save-model --model-name "name"`)
+
+### Retraining Frequency
+
+- **Training**: 1-2 times per week via Manual tab (or when new training data arrives)
+- **Inference**: Daily (day-ahead) and weekly (week-ahead) via Scheduler using the last activated model
+- **The scheduler does NOT decide when to retrain.** The user retrains manually, reviews in Models tab, and activates when satisfied.
+
+### Hard Rules
+
+1. **The Scheduler NEVER trains.** It always requires `--use-model <id>`. No model selected = refuse to run.
+2. **Training happens in Manual Tab ONLY.** No "Train Fresh" option exists in the Scheduler.
+3. **A training instance is immutable.** Once saved, weights/config/calibration are frozen forever.
+4. **The GUI never contains forecast logic.** It calls CLI commands via Electron IPC. All business logic lives in `src/`.
+5. **One active model per entity type.** Activating a new model deactivates the previous one for that entity.
+
+### CLI ↔ GUI Mapping
+
+| GUI Action | CLI Equivalent | Mode |
+|------------|---------------|------|
+| Manual → "Run Forecast" + save | `forecast -d ... --save-model --model-name "X"` | TRAINING |
+| Manual → "Run Forecast" (no save) | `forecast -d ...` | TRAINING (ephemeral) |
+| Models → "Send to Scheduler" | `models activate <id>` | CONFIG |
+| Scheduler → "Run Now" | `scheduler run --use-model <id>` | INFERENCE |
+| Scheduler → no model selected | ❌ BLOCKED — must activate model first | — |
+
+### ⛔ Anti-Patterns (NEVER implement)
+
+1. **Scheduler retraining** — if you're writing `trainModel()` inside scheduler code, STOP
+2. **Duplicate controls** — a setting in Settings tab must NOT also appear in Scheduler or Manual
+3. **Bypassing the pipeline** — no shortcut from Manual → Scheduler that skips Models tab review
+4. **Ephemeral scheduler weights** — scheduler must ALWAYS load from a saved `.vfm` file, never in-memory-only weights
+5. **GUI forecast logic** — the GUI calls CLI via IPC, never runs models directly
+
+---
+
+## Session Initialization (MANDATORY)
+
+Before starting any work on this codebase, follow these steps:
+
+```
+Step 1: Read this file (CLAUDE.md)
+        → Establishes project rules, architecture, and forecast pipeline rules
+
+Step 2: Read context.md
+        → Establishes current task state and what was last completed
+
+Step 3: Read DECISIONS.md (latest 10 entries minimum)
+        → Establishes recent decisions, known bugs, corrections
+
+Step 4: Staleness Check
+        → Scan Documentation Index (below)
+        → Compare Last Updated dates to recent code changes
+        → Check for completed plans not in archive/
+        → If ANY staleness: HARD BLOCK — fix docs before proceeding
+
+Step 5: Read task-relevant reference documents
+        → Based on the task, read relevant docs from Documents/ folder
+
+Step 6: Begin work
+```
+
+**Never skip Steps 1-4.** They are the project's memory.
+
+---
+
+## Document Maintenance (MANDATORY)
+
+This project follows the **iEnergy Documentation Protocol v1.0** (see `DOCUMENTATION_PROTOCOL.md`).
+
+### During Work (Every Code Change)
+
+```
+1. Make the code change
+2. Ask: "Which documents does this affect?"
+3. Update ALL affected documents immediately
+4. Update CHANGELOG.md
+5. Update context.md with progress
+```
+
+### Session End (Every Session)
+
+```
+1. Update context.md with completion status and next steps
+2. Move completed/abandoned plans to archive/
+3. Add decisions, bugs, or corrections to DECISIONS.md
+4. Verify Documentation Index is accurate
+```
+
+**The code change and its documentation update are ONE unit of work. Not separate. Not later.**
+
+---
+
 ## Documentation Index
 
-All documentation files in this project (verified 2026-03-11):
+All documentation files in this project (Category A = Living, B = Decision, C = Reference, D = Plan):
 
 ### Root Files
 
-| File | Purpose | Last Verified |
-|------|---------|---------------|
-| `CLAUDE.md` | Primary AI agent reference - commands, models, architecture | 2026-03-04 |
-| `README.md` | Project overview, quick start, installation | 2026-03-04 |
-| `CHANGELOG.md` | Version history (Keep a Changelog format) | 2026-03-04 |
-| `GATEKEEPER_LICENSE_INTEGRATION.md` | License validation for Apollo clients | 2026-03-04 |
-| `context.md` | Current task tracking (temporary) | 2026-03-04 |
+| Document | Category | Status | Last Updated | Purpose |
+|----------|----------|--------|--------------|---------|
+| `CLAUDE.md` | A - Living | Active | 2026-03-22 | Agent instructions, architecture, documentation index |
+| `context.md` | A - Living | Active | 2026-03-22 | Current session task tracking |
+| `CHANGELOG.md` | A - Living | Active | 2026-03-22 | Version history (Keep a Changelog format) |
+| `DECISIONS.md` | B - Decision | Active | 2026-03-22 | Architectural decisions and bug records (append-only) |
+| `DOCUMENTATION_PROTOCOL.md` | C - Reference | Active | 2026-03-22 | iEnergy Documentation Protocol v1.0 |
+| `README.md` | A - Living | Active | 2026-03-22 | Project overview, quick start, installation |
+| `GATEKEEPER_LICENSE_INTEGRATION.md` | C - Reference | Active | 2026-03-22 | License validation for Apollo clients |
 
 ### Documents/ Folder (Active)
 
-| File | Purpose | Last Verified |
-|------|---------|---------------|
-| `DOCUMENTATION_INDEX.md` | Master index for all documentation | 2026-03-04 |
-| `QUICK_START.md` | 5-minute getting started guide | 2026-03-04 |
-| `CLI_GUIDE.md` | Complete CLI command reference | 2026-03-04 |
-| `GUI_GUIDE.md` | Desktop GUI user manual | 2026-03-04 |
-| `MODEL_OVERVIEW.md` | Forecasting models and performance | 2026-03-04 |
-| `TECHNICAL_OVERVIEW.md` | Architecture and code structure | 2026-03-04 |
-| `DEPLOYMENT_GUIDE.md` | Portable Windows deployment | 2026-03-04 |
-| `AI_AGENT_GUIDE.md` | AI agent onboarding guide | 2026-03-04 |
-| `GATEWAY_FILE_SPECIFICATION.md` | Gateway file format and naming | 2026-03-04 |
-| `FORECAST_FILE_API_SPEC.md` | Forecast file API specification | 2026-03-04 |
+| Document | Category | Status | Last Updated | Purpose |
+|----------|----------|--------|--------------|---------|
+| `Documents/DOCUMENTATION_INDEX.md` | A - Living | Active | 2026-03-22 | Master index for all documentation |
+| `Documents/AI_AGENT_GUIDE.md` | C - Reference | Active | 2026-03-22 | AI agent onboarding guide |
+| `Documents/CLI_GUIDE.md` | C - Reference | Active | 2026-03-22 | Complete CLI command reference |
+| `Documents/DEPLOYMENT_GUIDE.md` | C - Reference | Active | 2026-03-22 | Portable Windows deployment instructions |
+| `Documents/FORECAST_FILE_API_SPEC.md` | C - Reference | Active | 2026-03-22 | Forecast file API specification |
+| `Documents/GATEWAY_FILE_SPECIFICATION.md` | C - Reference | Active | 2026-03-22 | Gateway file format and naming |
+| `Documents/GUI_GUIDE.md` | C - Reference | Active | 2026-03-22 | Desktop GUI user manual |
+| `Documents/GUI_CLI_INTEGRATION.md` | C - Reference | Active | 2026-03-24 | GUI architecture and CLI command mapping |
+| `Documents/MODEL_OVERVIEW.md` | C - Reference | Active | 2026-03-22 | Forecasting models and performance |
+| `Documents/DEMAND_FORECASTING_METHODOLOGY.md` | C - Reference | Active | 2026-03-24 | Detailed demand forecasting methodology |
+| `Documents/CFAC_FORECASTING_METHODOLOGY.md` | C - Reference | Active | 2026-03-24 | Detailed CFAC forecasting methodology |
+| `Documents/QUICK_START.md` | A - Living | Active | 2026-03-22 | 5-minute getting started guide |
+| `Documents/TECHNICAL_OVERVIEW.md` | C - Reference | Active | 2026-03-22 | Architecture and code structure |
 
-### Documents/archive/ (Historical)
+### archive/ Folder (Completed Plans)
 
-| File | Purpose | Last Verified |
-|------|---------|---------------|
-| `DEVELOPER_GUIDE.md` | Legacy developer guide (superseded by CLAUDE.md) | 2026-03-04 |
-| `USER_GUIDE.md` | Legacy user guide (superseded by GUI_GUIDE.md) | 2026-03-04 |
-| `AI_QUICK_REFERENCE.md` | Legacy AI reference | 2026-03-04 |
-| `CFAC_MODEL_COMPARISON_REPORT.md` | Historical model comparison | 2026-03-04 |
-| `DEEP_TRAINING_SPECIFICATION.md` | LSTM training specs | 2026-03-04 |
-| `PHASE2_IMPLEMENTATION_SUMMARY.md` | Phase 2 summary | 2026-03-04 |
-| `PLAN_LSTM_*.md` | LSTM planning documents (3 files) | 2026-03-04 |
-| `outage_analysis_report.md` | Historical outage analysis | 2026-03-04 |
-| `plan.md` | Legacy planning document | 2026-03-04 |
-| `interconnector_analysis/*.md` | Interconnector analysis reports (7 files) | 2026-03-04 |
-| `planning/*.md` | Planning documents (6 files) | 2026-03-04 |
-| `vantage-gateway/*.md` | Gateway setup docs (3 files) | 2026-03-04 |
+| Document | Category | Status | Archived | Purpose |
+|----------|----------|--------|----------|---------|
+| `archive/.agent-task-phase1.md` | D - Plan | Done | 2026-03-21 | Model storage foundation (completed) |
+| `archive/.agent-task-phase-e1.md` | D - Plan | Done | 2026-03-21 | CFAC calibration extraction (completed) |
+| `archive/GUI_CALIBRATION_UNIFICATION_PLAN.md` | D - Plan | Done | 2026-03-22 | Hybrid calibration architecture (completed) |
+| `archive/HYBRID_CALIBRATION_IMPLEMENTATION.md` | D - Plan | Done | 2026-03-21 | Hybrid calibration implementation (completed) |
+| `archive/MODELS_PAGE_REDESIGN.md` | D - Plan | Done | 2026-03-21 | Models page redesign (completed) |
+| `archive/SCHEDULER_SIMPLIFICATION_PLAN.md` | D - Plan | Done | 2026-03-22 | Scheduler UI cleanup (completed) |
+| `archive/SETTINGS_TAB_OVERHAUL_SUMMARY.md` | D - Plan | Done | 2026-03-21 | Settings tab overhaul (completed) |
+| `archive/UNIFIED_ARCHITECTURE.md` | D - Plan | Done | 2026-03-22 | Training instance pipeline (completed) |
 
 ---
 
@@ -158,11 +298,6 @@ See `Documents/DEPLOYMENT_GUIDE.md` for full deployment documentation.
 | `train` | Train XGBoost/Regression on demand + weather |
 | `forecast` | Generate demand forecasts (regional or zonal) |
 | `evaluate` | Compare forecast vs actual |
-
-**LSTM Trainer (Python):**
-| Command | Description |
-|---------|-------------|
-| `python scripts/train_demand_lstm.py` | Train enhanced LSTM correction models for zonal demand |
 
 ### Configuration Management
 | Command | Description |
@@ -284,8 +419,6 @@ Default: Last 14 days of training data. Override with `--no-auto-calibrate` to d
 
 **Hybrid is the recommended model for all station types.** Use `cfac forecast2` (default command).
 
-**Note on LSTM:** Legacy LSTM models for capacity factor forecasting have been removed. Hybrid models (physics + ML) provide superior performance for all station types.
-
 ### Weekend Correction Factors
 The demand hybrid model applies learned correction factors to fix systematic weekend over-forecasting:
 ```typescript
@@ -392,6 +525,8 @@ node dist/index.js forecast \
 | `--weather-forecast <files...>` | Forecast weather CSV files |
 | `--use-db` | Use database-stored model |
 | `--growth <rate>` | Daily growth rate adjustment (e.g., 0.001 for 0.1%) |
+| `--save-model` | Save trained model as a reusable instance |
+| `--model-name <name>` | Custom name for saved model instance |
 
 ### 3. Train Demand Model
 
@@ -517,6 +652,7 @@ node dist/index.js config reset
 | `--refresh-weather` | Force weather cache refresh (recommended for future dates) |
 | `--no-push` | Skip gateway push |
 | `--no-archive` | Skip forecast archiving |
+| `--use-model <id>` | Use saved model instance for inference (no retraining) |
 
 **All scheduler backfill flags:**
 | Flag | Description |
@@ -530,6 +666,7 @@ node dist/index.js config reset
 | `--db <path>` | Database path (default: `./forecast.db`) |
 | `--overwrite` | Regenerate existing forecasts |
 | `--suffix <text>` | Append custom suffix to archived filenames |
+| `--geography <type>` | Geography mode: regional, zonal, both (default: both) |
 
 **Global configuration keys:**
 

@@ -214,7 +214,25 @@ export function saveDemandModel(
     },
     modelData: {
       type: 'hybrid',
-      data: model.toJSON(),
+      data: (() => {
+        const modelState = model.toJSON();
+        // Extract structured calibration summary from model state
+        const weekendFactors: Record<string, { saturday: number; sunday: number }> = {};
+        for (const { region, factors } of modelState.weekendCorrectionFactors || []) {
+          weekendFactors[region] = factors;
+        }
+        const calibration = {
+          weekend_factors: weekendFactors,
+          xgboost_correction: !!modelState.calibrator,
+          pass1_calibrator: modelState.iterativeCalibrator?.calibrationResult || null,
+          pass2_calibrator: modelState.calibrator?.metrics || null,
+        };
+        return {
+          model: modelState,
+          calibration,
+          config: { geography: entityType, modelType: 'hybrid' }
+        };
+      })(),
     },
   };
 

@@ -73,8 +73,8 @@ export class SolarMRECHybridModel {
     const Y: number[][] = [];
 
     for (const sample of stationSamples) {
-      // Skip nighttime samples
-      if (sample.hour < 6 || sample.hour > 18 || sample.weather.solarRadiation <= 0) {
+      // Skip nighttime samples (allow 5 AM to 7 PM for seasonal variation)
+      if (sample.hour < 5 || sample.hour > 19 || sample.weather.solarRadiation <= 0) {
         continue;
       }
 
@@ -114,7 +114,7 @@ export class SolarMRECHybridModel {
     const meanActual = stationSamples.reduce((sum, s) => sum + s.actualCFac, 0) / stationSamples.length;
 
     for (const sample of stationSamples) {
-      if (sample.hour < 6 || sample.hour > 18 || sample.weather.solarRadiation <= 0) {
+      if (sample.hour < 5 || sample.hour > 19 || sample.weather.solarRadiation <= 0) {
         continue;
       }
 
@@ -208,8 +208,8 @@ export class SolarMRECHybridModel {
   predict(weather: CFacWeatherFeatures, datetime: Date): number {
     const hour = datetime.getHours();
 
-    // Night time
-    if (hour < 6 || hour > 18 || weather.solarRadiation <= 0) {
+    // Night time (allow 5 AM to 7 PM for seasonal variation)
+    if (hour < 5 || hour > 19 || weather.solarRadiation <= 0) {
       return 0;
     }
 

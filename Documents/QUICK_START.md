@@ -1,3 +1,10 @@
+---
+Status: Active
+Last-Verified: 2026-03-22
+Verified-Against: current
+Updated-By: codebase-documenter
+---
+
 # Quick Start Guide
 
 Get running with the iLoad Forecasting Utility in 5 minutes. This tool forecasts power generation and demand for the Philippine grid.

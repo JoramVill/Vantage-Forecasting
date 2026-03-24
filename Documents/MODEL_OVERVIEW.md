@@ -1,3 +1,10 @@
+---
+Status: Active
+Last-Verified: 2026-03-22
+Verified-Against: current
+Updated-By: codebase-documenter
+---
+
 # Model Overview
 
 This document provides a comprehensive technical overview of ALL forecasting models in the iLoad Forecasting Utility for the Philippine power grid (WESM).
@@ -151,7 +158,6 @@ Adds physics-inspired boost and ML correction on top of MREC.
 **Performance:**
 - **Measured accuracy:** ~40-50% MAPE (varies by validation)
 - **Best for:** Experimental wind forecasting
-- **Usage:** `cfac forecast3` with `--smooth 0.5` for EMA smoothing
 
 ---
 

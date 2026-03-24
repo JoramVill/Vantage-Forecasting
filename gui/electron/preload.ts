@@ -70,6 +70,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveSchedulerConfig: (config: any) =>
     ipcRenderer.invoke('save-scheduler-config', config),
 
+  // Zones configuration (loaded from zones.json)
+  getZonesConfig: () =>
+    ipcRenderer.invoke('get-zones-config'),
+
   getRecentRuns: (limit: number) =>
     ipcRenderer.invoke('get-recent-runs', limit),
 
@@ -85,7 +89,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     endDate?: string | null;
     verbose?: boolean;
     pushGateway?: boolean;
-    useCalibrationId?: number | null;
+    useCalibrationId?: string | number | null; // String UUID from CFAC calibration service or legacy number
+    useModelId?: string | null; // Use saved trained model from model store (skips training)
     useDb?: boolean;
     dataDbPath?: string | null;
     maxIterations?: number;
@@ -110,6 +115,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getGatewayStorage: () =>
     ipcRenderer.invoke('get-gateway-storage'),
 
+  getGatewayFiles: (filters?: { type?: string; category?: string; geography?: string; limit?: number }) =>
+    ipcRenderer.invoke('get-gateway-files', filters),
+
   archiveGatewayFiles: (options: { olderThanDays: number; deleteAfterArchive?: boolean }) =>
     ipcRenderer.invoke('archive-gateway-files', options),
 
@@ -128,6 +136,121 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   resetGlobalConfig: () =>
     ipcRenderer.invoke('reset-global-config'),
+
+  updateModelSelection: (modelSelection: any) =>
+    ipcRenderer.invoke('update-model-selection', modelSelection),
+
+  // Model Management
+  initModelStore: () =>
+    ipcRenderer.invoke('init-model-store'),
+
+  listModels: (filters?: { entityType?: string; entityCode?: string; isActive?: boolean }) =>
+    ipcRenderer.invoke('list-models', filters),
+
+  getTrainingInstances: () =>
+    ipcRenderer.invoke('get-training-instances'),
+
+  getModelById: (id: string) =>
+    ipcRenderer.invoke('get-model-by-id', id),
+
+  getActiveModel: (entityType: string, entityCode: string) =>
+    ipcRenderer.invoke('get-active-model', entityType, entityCode),
+
+  activateModel: (id: string) =>
+    ipcRenderer.invoke('activate-model', id),
+
+  archiveModel: (id: string) =>
+    ipcRenderer.invoke('archive-model', id),
+
+  deleteModel: (id: string) =>
+    ipcRenderer.invoke('delete-model', id),
+
+  setSchedulerActiveModel: (id: string) =>
+    ipcRenderer.invoke('set-scheduler-active', id),
+
+  setManualActiveModel: (id: string) =>
+    ipcRenderer.invoke('set-manual-active', id),
+
+  trainModel: (options: {
+    type: 'regional' | 'zonal';
+    demandPath: string;
+    startDate: string;
+    endDate: string;
+    modelType: string;
+    holdoutDays: number;
+    autoActivate: boolean;
+  }) =>
+    ipcRenderer.invoke('train-model', options),
+
+  listModelGroups: () =>
+    ipcRenderer.invoke('list-model-groups'),
+
+  listTrainingRuns: (limit: number) =>
+    ipcRenderer.invoke('list-training-runs', limit),
+
+  reEvaluateModel: (id: string, options?: { days?: number; update?: boolean }) =>
+    ipcRenderer.invoke('re-evaluate-model', id, options),
+
+  saveTrainedModel: (modelData: any) =>
+    ipcRenderer.invoke('save-trained-model', modelData),
+
+  exportModel: (id: string) =>
+    ipcRenderer.invoke('export-model', id),
+
+  importModel: () =>
+    ipcRenderer.invoke('import-model'),
+
+  // Training Plan management
+  listTrainingPlans: () =>
+    ipcRenderer.invoke('training-plan:list'),
+
+  getTrainingPlan: (id: string) =>
+    ipcRenderer.invoke('training-plan:get', id),
+
+  createTrainingPlan: (plan: any) =>
+    ipcRenderer.invoke('training-plan:create', plan),
+
+  updateTrainingPlan: (id: string, updates: any) =>
+    ipcRenderer.invoke('training-plan:update', id, updates),
+
+  deleteTrainingPlan: (id: string) =>
+    ipcRenderer.invoke('training-plan:delete', id),
+
+  // CFAC Calibration management
+  listCfacCalibrations: () =>
+    ipcRenderer.invoke('cfac-calibration:list'),
+
+  getCfacCalibrationDetails: (id: string) =>
+    ipcRenderer.invoke('cfac-calibration:get', id),
+
+  setActiveCfacCalibration: (id: string) =>
+    ipcRenderer.invoke('cfac-calibration:set-active', id),
+
+  deleteCfacCalibration: (id: string) =>
+    ipcRenderer.invoke('cfac-calibration:delete', id),
+
+  // Demand Calibration management
+  demandCalibration: {
+    runIterative: (options: { forecastPath: string; actualPath: string; dateTimeColumn?: string }) =>
+      ipcRenderer.invoke('demand-calibration:run-iterative', options),
+    runHybrid: (options: { forecastPath: string; actualPath: string; alpha?: number; dateTimeColumn?: string }) =>
+      ipcRenderer.invoke('demand-calibration:run-hybrid', options),
+    list: () => ipcRenderer.invoke('demand-calibration:list'),
+    load: (filename: string) => ipcRenderer.invoke('demand-calibration:load', filename),
+    save: (data: any, filename: string) => ipcRenderer.invoke('demand-calibration:save', data, filename),
+  },
+
+  // Unified forecast with calibration
+  runDemandForecastCalibrated: (options: {
+    startDate: string;
+    endDate: string;
+    outputPath: string;
+    geography: 'regional' | 'zonal' | 'both';
+    trainingPath?: string;
+    actualPath?: string;
+    calibrationMode?: 'hybrid' | 'iterative' | 'xgboost' | 'none';
+    quantileAlpha?: number;
+  }) => ipcRenderer.invoke('run-demand-forecast-calibrated', options),
 });
 
 // Type declaration for window.electronAPI
@@ -229,7 +352,8 @@ declare global {
         endDate?: string | null;
         verbose?: boolean;
         pushGateway?: boolean;
-        useCalibrationId?: number | null;
+        useCalibrationId?: string | number | null; // String UUID from CFAC calibration service or legacy number
+        useModelId?: string | null; // Use saved trained model from model store (skips training)
         useDb?: boolean;
         dataDbPath?: string | null;
         maxIterations?: number;
@@ -237,9 +361,6 @@ declare global {
         overwrite?: boolean;
         suffix?: string | null;
         outputDir?: string;
-        useXgboost?: boolean;
-        asymmetricLoss?: boolean;
-        biasCorrection?: boolean;
         weatherCacheDir?: string;
       }) => Promise<{
         success: boolean;
@@ -277,6 +398,22 @@ declare global {
         oldestFile?: string;
         newestFile?: string;
       }>;
+      getGatewayFiles: (filters?: { type?: string; category?: string; geography?: string; limit?: number }) => Promise<{
+        success: boolean;
+        error?: string;
+        files?: Array<{
+          filename: string;
+          type: string;
+          category: string;
+          geography: string | null;
+          size: number;
+          sizeFormatted: string;
+          date: string;
+          modified: string;
+          path: string;
+        }>;
+        count?: number;
+      }>;
       archiveGatewayFiles: (options: { olderThanDays: number; deleteAfterArchive?: boolean }) => Promise<{
         success: boolean;
         error?: string;
@@ -301,6 +438,80 @@ declare global {
       saveGlobalConfig: (config: any) => Promise<{ success: boolean }>;
       validateGlobalConfig: (config: any) => Promise<{ valid: boolean; errors: string[] }>;
       resetGlobalConfig: () => Promise<any>;
+      updateModelSelection: (modelSelection: any) => Promise<{ success: boolean; error?: string }>;
+
+      // Model Management
+      initModelStore: () => Promise<void>;
+      listModels: (filters?: { entityType?: string; entityCode?: string; isActive?: boolean }) => Promise<any[]>;
+      getTrainingInstances: () => Promise<any[]>;
+      getModelById: (id: string) => Promise<any | null>;
+      getActiveModel: (entityType: string, entityCode: string) => Promise<any | null>;
+      activateModel: (id: string) => Promise<void>;
+      archiveModel: (id: string) => Promise<void>;
+      deleteModel: (id: string) => Promise<void>;
+      setSchedulerActiveModel: (id: string) => Promise<{ success: boolean; error?: string }>;
+      setManualActiveModel: (id: string) => Promise<{ success: boolean; error?: string }>;
+      trainModel: (options: any) => Promise<any[]>;
+      listModelGroups: () => Promise<any[]>;
+      listTrainingRuns: (limit: number) => Promise<any[]>;
+      reEvaluateModel: (id: string, options?: { days?: number; update?: boolean }) => Promise<any>;
+      saveTrainedModel: (modelData: any) => Promise<{ success: boolean; error?: string }>;
+      exportModel: (id: string) => Promise<{ success: boolean; path?: string; error?: string }>;
+      importModel: () => Promise<{ success: boolean; id?: string; error?: string }>;
+
+      // Training Plan management
+      listTrainingPlans: () => Promise<any[]>;
+      getTrainingPlan: (id: string) => Promise<any | null>;
+      createTrainingPlan: (plan: any) => Promise<any>;
+      updateTrainingPlan: (id: string, updates: any) => Promise<any>;
+      deleteTrainingPlan: (id: string) => Promise<void>;
+
+      // CFAC Calibration management
+      listCfacCalibrations: () => Promise<any[]>;
+      getCfacCalibrationDetails: (id: string) => Promise<any | null>;
+      setActiveCfacCalibration: (id: string) => Promise<void>;
+      deleteCfacCalibration: (id: string) => Promise<boolean>;
+
+      // Demand Calibration management
+      demandCalibration: {
+        runIterative: (options: { forecastPath: string; actualPath: string; dateTimeColumn?: string }) => Promise<{
+          success: boolean;
+          error?: string;
+          calibration?: any;
+          metrics?: any;
+        }>;
+        runHybrid: (options: { forecastPath: string; actualPath: string; alpha?: number; dateTimeColumn?: string }) => Promise<{
+          success: boolean;
+          error?: string;
+          calibration?: any;
+          metrics?: any;
+        }>;
+        list: () => Promise<any[]>;
+        load: (filename: string) => Promise<any | null>;
+        save: (data: any, filename: string) => Promise<{ success: boolean; error?: string }>;
+      };
+
+      // Unified forecast with calibration
+      runDemandForecastCalibrated: (options: {
+        startDate: string;
+        endDate: string;
+        outputPath: string;
+        geography: 'regional' | 'zonal' | 'both';
+        trainingPath?: string;
+        actualPath?: string;
+        calibrationMode?: 'hybrid' | 'iterative' | 'xgboost' | 'none';
+        quantileAlpha?: number;
+      }) => Promise<{
+        success: boolean;
+        error?: string;
+        outputPath?: string;
+        calibration?: {
+          mode: string;
+          applied: boolean;
+          reason?: string;
+          result?: any;
+        };
+      }>;
     };
   }
 }

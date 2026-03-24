@@ -5,7 +5,42 @@ All notable changes to the Vantage Forecaster project will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 2026-03-21
+## [Unreleased] - 2026-03-22
+
+### Added
+- **GUI Architecture and CLI Integration Guide**
+  - New technical document: `Documents/GUI_CLI_INTEGRATION.md`
+  - Explains Electron GUI architecture and IPC bridge
+  - Documents how each GUI tab maps to CLI commands
+  - Covers Manual tab (training/inference modes), Scheduler tab (run/backfill)
+  - Includes complete CLI command mapping for all GUI actions
+  - Details portable mode detection and path resolution
+  - Reference for developers working on GUI-CLI integration
+
+- **CFAC Forecasting Methodology Report**
+  - New comprehensive technical document: `Documents/CFAC_FORECASTING_METHODOLOGY.md`
+  - Covers wind 4-tier MREC + ML hybrid models
+  - Documents solar physics + ML residual correction approach
+  - Explains profile-based models for hydro, geothermal, biomass
+  - Details auto-calibration system and per-station bias correction
+  - Includes station configuration, weather integration, and output format
+  - Suitable for external technical review
+
+- **Demand Forecasting Methodology Report**
+  - New comprehensive technical document: `Documents/DEMAND_FORECASTING_METHODOLOGY.md`
+  - Covers model architecture, feature engineering, calibration system
+  - Includes mathematical formulas and configuration parameters
+  - Suitable for external technical review
+
+- **iEnergy Documentation Protocol v1.0 Adoption**
+  - Created `DOCUMENTATION_PROTOCOL.md` with full protocol specification
+  - Created `DECISIONS.md` with historical decisions (DEC-001 through DEC-006, BUG-001, BUG-002)
+  - Created `archive/` directory for completed/abandoned plans
+  - Added metadata headers to all .md files (Category A/B/C/D classification)
+  - Added Session Initialization protocol to CLAUDE.md (mandatory 6-step process)
+  - Added Document Maintenance rules to CLAUDE.md
+  - Updated Documentation Index with Category column and full project coverage
+  - Moved 5 completed plans to archive/ (.agent-task-phase1.md, .agent-task-phase-e1.md, SETTINGS_TAB_OVERHAUL_SUMMARY.md, HYBRID_CALIBRATION_IMPLEMENTATION.md, MODELS_PAGE_REDESIGN.md)
 
 ### Added
 - **Full Model Details with Per-Zone/Region Metrics**
@@ -67,6 +102,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Auto-loads file listing when Gateway tab is activated
 
 ### Fixed
+- **Zonal Demand Peak Shape Mismatch (BUG-003)**
+  - Fixed 14-zone demand forecasts producing generic/averaged peak shapes instead of zone-specific patterns
+  - Added `ZONE_TO_PARENT_REGION` mapping for weekend correction fallback
+  - Weekend corrections now apply to zones via parent region fallback (01NLUZ→CLUZ, etc.)
+  - Removed dangerous profile fallback that could silently use wrong zone's profile
+  - Zonal forecasts now maintain zone-specific demand curves from training data
+
+- **Hardcoded Weekend Corrections (DEC-007)**
+  - Removed stale hardcoded weekend correction factors for CLUZ/CVIS/CMIN
+  - All weekend corrections now learned fresh from training data every run
+  - Added calibration settings visibility banner showing mode, alpha, zone scaling status
+  - Improved diagnostic output to confirm calibration is running
+
 - **Solar Hour Constraints Expanded for Seasonal Variation**
   - Changed daylight hour constraints from 6 AM - 6 PM to 5 AM - 7 PM
   - Allows solar forecasts to capture earlier sunrise during summer months

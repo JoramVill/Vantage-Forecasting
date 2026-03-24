@@ -236,6 +236,74 @@ export function getZoneByCode(code: string): ZoneConfig | undefined {
   return config.zones.find(z => z.code === code);
 }
 
+// Get all region codes from config
+export function getRegionCodes(): string[] {
+  const config = loadZonalConfig();
+  if (config.regions && config.regions.length > 0) {
+    return config.regions.map(r => r.code);
+  }
+  // Fallback: derive from zones
+  const parentRegions = new Set(config.zones.map(z => z.parentRegion));
+  const regionMap: Record<string, string> = {
+    'luzon': 'CLUZ',
+    'visayas': 'CVIS',
+    'mindanao': 'CMIN'
+  };
+  return [...parentRegions].map(p => regionMap[p] || p.toUpperCase());
+}
+
+// Get zone-to-parent-region mapping
+export function getZoneToRegionMap(): Record<string, string> {
+  const config = loadZonalConfig();
+  const mapping: Record<string, string> = {};
+
+  // Build parentKey -> regionCode lookup from regions config
+  const parentKeyToRegion: Record<string, string> = {};
+  if (config.regions) {
+    for (const region of config.regions) {
+      parentKeyToRegion[region.parentKey] = region.code;
+    }
+  } else {
+    // Fallback for backwards compatibility
+    parentKeyToRegion['luzon'] = 'CLUZ';
+    parentKeyToRegion['visayas'] = 'CVIS';
+    parentKeyToRegion['mindanao'] = 'CMIN';
+  }
+
+  // Map each zone code to its parent region code
+  for (const zone of config.zones) {
+    const regionCode = parentKeyToRegion[zone.parentRegion] || zone.parentRegion.toUpperCase();
+    mapping[zone.code] = regionCode;
+  }
+
+  return mapping;
+}
+
+// Get full zones config for GUI (includes regions array)
+export function getZonesConfigForGUI(): {
+  zones: Array<{ code: string; name: string; parentRegion: string }>;
+  regions: Array<{ code: string; name: string; parentKey: string }>;
+  zoneToRegion: Record<string, string>;
+} {
+  const config = loadZonalConfig();
+
+  const zones = config.zones.map(z => ({
+    code: z.code,
+    name: z.name,
+    parentRegion: z.parentRegion
+  }));
+
+  const regions = config.regions || [
+    { code: 'CLUZ', name: 'Luzon', parentKey: 'luzon' },
+    { code: 'CVIS', name: 'Visayas', parentKey: 'visayas' },
+    { code: 'CMIN', name: 'Mindanao', parentKey: 'mindanao' }
+  ];
+
+  const zoneToRegion = getZoneToRegionMap();
+
+  return { zones, regions, zoneToRegion };
+}
+
 // Zonal feature names - extends base FEATURE_NAMES with 3-city weather
 export const ZONAL_WEATHER_FEATURES = [
   // City 1 weather

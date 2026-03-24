@@ -1,6 +1,6 @@
 // Database schema definitions
 
-export const SCHEMA_VERSION = 8;  // Added scheduler enhancements: config, archive, enhanced tracking
+export const SCHEMA_VERSION = 11;  // Added cfac_calibration_id to training_instances (unify models)
 
 export const CREATE_TABLES_SQL = `
 -- Schema version tracking
@@ -604,6 +604,98 @@ CREATE INDEX IF NOT EXISTS idx_demand_hourly_run ON demand_forecast_hourly(run_i
 CREATE INDEX IF NOT EXISTS idx_demand_hourly_dt ON demand_forecast_hourly(datetime);
 CREATE INDEX IF NOT EXISTS idx_cfac_hourly_run ON cfac_forecast_hourly(run_id);
 CREATE INDEX IF NOT EXISTS idx_cfac_hourly_dt ON cfac_forecast_hourly(datetime);
+
+-- ============================================
+-- TRAINING PLAN TEMPLATES (v9 - Phase A)
+-- Model Workflow Vision Part 5.1
+-- ============================================
+
+-- Training plan templates - reusable training configurations
+CREATE TABLE IF NOT EXISTS training_plan_templates (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT,
+
+  -- Date range config
+  date_range_mode TEXT NOT NULL,           -- 'fixed' | 'rolling'
+  fixed_start TEXT,
+  fixed_end TEXT,
+  rolling_days INTEGER,
+
+  -- Model settings
+  train_demand INTEGER DEFAULT 1,
+  train_cfac INTEGER DEFAULT 1,
+  demand_model_type TEXT DEFAULT 'hybrid',
+  cfac_model_type TEXT DEFAULT '4tier',
+
+  -- Calibration defaults
+  calibration_enabled INTEGER DEFAULT 1,
+  calibration_iterations INTEGER DEFAULT 3,
+  calibration_threshold REAL DEFAULT 5.0,
+
+  -- Overrides (JSON)
+  overrides_json TEXT,
+
+  -- Advanced
+  holdout_days INTEGER DEFAULT 7,
+  auto_activate INTEGER DEFAULT 1,
+
+  -- Audit
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  created_by TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_training_plan_templates_name ON training_plan_templates(name);
+CREATE INDEX IF NOT EXISTS idx_training_plan_templates_created ON training_plan_templates(created_at DESC);
+
+-- ============================================
+-- TRAINING INSTANCES (v9 - Phase C)
+-- Model Workflow Vision Part 3 and Part 5.2
+-- ============================================
+
+-- Training instances - results of running training plans
+CREATE TABLE IF NOT EXISTS training_instances (
+  id TEXT PRIMARY KEY,
+  template_id TEXT,                       -- Link to training plan template
+  template_name TEXT,                     -- Snapshot of template name
+
+  -- Execution
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  status TEXT DEFAULT 'running',          -- running, completed, failed, partial
+  error_message TEXT,
+
+  -- Resolved date range
+  date_range_start TEXT,
+  date_range_end TEXT,
+
+  -- Results summary (JSON)
+  demand_regional_summary TEXT,           -- JSON array of ModelSummary
+  demand_zonal_summary TEXT,              -- JSON array of ModelSummary
+  cfac_summary TEXT,                      -- JSON object by type
+
+  -- Aggregate metrics
+  demand_regional_mape REAL,
+  demand_zonal_mape REAL,
+  cfac_wind_mape REAL,
+  cfac_solar_mape REAL,
+
+  -- Applied overrides (JSON)
+  applied_overrides_json TEXT,
+
+  -- Link to CFAC calibration generated during this training
+  cfac_calibration_id TEXT,
+
+  -- Audit
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+  FOREIGN KEY (template_id) REFERENCES training_plan_templates(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_training_instances_status ON training_instances(status);
+CREATE INDEX IF NOT EXISTS idx_training_instances_date ON training_instances(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_training_instances_template ON training_instances(template_id);
 `;
 
 export const REGION_MAPPING: Record<string, string> = {

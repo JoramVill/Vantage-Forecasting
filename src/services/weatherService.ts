@@ -894,15 +894,23 @@ export class WeatherService {
       mkdirSync(outputDir, { recursive: true });
     }
 
+    const totalLocations = this.locations.length;
+    let locationIndex = 0;
+
     for (const location of this.locations) {
-      const result = await this.fetchWeatherData(location, startDate, endDate, onProgress);
+      locationIndex++;
+      onProgress?.(`[${locationIndex}/${totalLocations}] Fetching: ${location.name} (${location.demandColumn})`);
+
+      const result = await this.fetchWeatherData(location, startDate, endDate);
 
       if (result.success && result.data) {
         const filename = `Weather_hourly_${location.id}_${startDate}_${endDate}.csv`;
         const filePath = join(outputDir, filename);
         writeFileSync(filePath, result.data, 'utf8');
         savedFiles.push(filePath);
-        onProgress?.(`Saved: ${filename}`);
+        onProgress?.(`  ✓ ${result.cached} cached, ${result.downloaded} downloaded`);
+      } else {
+        onProgress?.(`  ✗ Failed: ${result.error || 'Unknown error'}`);
       }
     }
 

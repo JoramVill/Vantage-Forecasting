@@ -1,0 +1,107 @@
+{
+  "id": "cfac-cal-2026-03-21-232328",
+  "createdAt": "2026-03-21T13:23:28.069Z",
+  "trainingPeriod": {
+    "start": "2026-02-15",
+    "end": "2026-02-28"
+  },
+  "config": {
+    "useXgboost": false,
+    "asymmetricLoss": false,
+    "biasCorrection": false,
+    "autoCalibrateDays": 14,
+    "excludeOutages": true
+  },
+  "globalFactors": {
+    "windBias": 1,
+    "solarBias": 1,
+    "otherBias": 1
+  },
+  "solarHourlyScale": {
+    "0": 1,
+    "1": 1,
+    "2": 1,
+    "3": 1,
+    "4": 1,
+    "5": 1,
+    "6": 1,
+    "7": 1,
+    "8": 1,
+    "9": 1,
+    "10": 1,
+    "11": 1,
+    "12": 1,
+    "13": 1,
+    "14": 1,
+    "15": 1,
+    "16": 1,
+    "17": 1,
+    "18": 1,
+    "19": 1,
+    "20": 1,
+    "21": 1,
+    "22": 1,
+    "23": 1
+  },
+  "windMRECFactors": {
+    "01BURGOS": {
+      "stationCode": "01BURGOS",
+      "vL": 0,
+      "vH": 0,
+      "tL": 0,
+      "tH": 0,
+      "calibrated": true
+    },
+    "01LAOAG": {
+      "stationCode": "01LAOAG",
+      "vL": 0,
+      "vH": 0,
+      "tL": 0,
+      "tH": 0,
+      "calibrated": true
+    },
+    "01PAGUDPUD": {
+      "stationCode": "01PAGUDPUD",
+      "vL": 0,
+      "vH": 0,
+      "tL": 0,
+      "tH": 0,
+      "calibrated": true
+    },
+    "02DOLORES": {
+      "stationCode": "02DOLORES",
+      "vL": 0,
+      "vH": 0,
+      "tL": 0,
+      "tH": 0,
+      "calibrated": true
+    },
+    "08BVISTA": {
+      "stationCode": "08BVISTA",
+      "vL": 0,
+      "vH": 0,
+      "tL": 0,
+      "tH": 0,
+      "calibrated": true
+    },
+    "08NABAS_W": {
+      "stationCode": "08NABAS_W",
+      "vL": 0,
+      "vH": 0,
+      "tL": 0,
+      "tH": 0,
+      "calibrated": true
+    }
+  },
+  "stationScales": {
+    "wind": {},
+    "solar": {},
+    "other": {}
+  },
+  "trainingMetrics": {
+    "windMAPE": 0,
+    "solarMAPE": 0,
+    "stationCount": 118,
+    "trainingRecords": 473673
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "id": "c1806484-d251-41c8-bef8-bec90d52d435",
+  "name": "Test2",
+  "notes": "",
+  "entityType": "forecast",
+  "entityCode": "manual_forecast",
+  "version": 2,
+  "createdAt": "2026-03-21T00:21:05.302Z",
+  "isActive": false,
+  "forecastConfig": {
+    "forecastStart": "2026-03-21",
+    "forecastEnd": "2026-03-27",
+    "demandEnabled": true,
+    "cfacEnabled": true,
+    "zonalMode": true,
+    "demandModel": "hybrid-calibrated",
+    "cfacModel": "hybrid"
+  },
+  "trainingMetadata": {
+    "trainingStart": "2025-08-01",
+    "trainingEnd": "2026-03-20",
+    "dataSource": "database"
+  }
+}

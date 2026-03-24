@@ -418,28 +418,67 @@ export class WindEnhancedHybridModel {
   }
 
   /**
-   * Serialize for storage
+   * Serialize model state to JSON-compatible object
+   * Returns an object that can be saved to model store
    */
-  toJSON(): string {
-    return JSON.stringify({
+  toJSON(): WindEnhancedHybridState {
+    return {
+      version: 1,
       stationCode: this.stationCode,
       mrecFactors: this.mrecModel.getFactors(),
       enhancedFactors: this.factors,
-    });
+      residualModel: this.residualModel ? {
+        weights: (this.residualModel as any).weights,
+        inputs: (this.residualModel as any).inputs,
+        outputs: (this.residualModel as any).outputs,
+      } : null,
+    };
   }
 
   /**
-   * Load from serialized data
+   * Restore model state from serialized data
+   * Static factory method for creating a new model from saved state
    */
-  fromJSON(json: string): void {
-    const data = JSON.parse(json);
-    if (data.mrecFactors) {
-      this.mrecModel.loadFactors(data.mrecFactors);
+  static fromJSON(state: WindEnhancedHybridState): WindEnhancedHybridModel {
+    const model = new WindEnhancedHybridModel(state.stationCode);
+
+    // Restore MREC factors
+    if (state.mrecFactors) {
+      model.mrecModel.loadFactors(state.mrecFactors);
     }
-    if (data.enhancedFactors) {
-      this.factors = data.enhancedFactors;
+
+    // Restore enhanced factors
+    if (state.enhancedFactors) {
+      model.factors = state.enhancedFactors;
     }
+
+    // Restore residual model (ML correction)
+    if (state.residualModel) {
+      const mockX = [[0]];
+      const mockY = [[0]];
+      model.residualModel = new MultivariateLinearRegression(mockX, mockY);
+      (model.residualModel as any).weights = state.residualModel.weights;
+      (model.residualModel as any).inputs = state.residualModel.inputs;
+      (model.residualModel as any).outputs = state.residualModel.outputs;
+    }
+
+    return model;
   }
+}
+
+/**
+ * Serialized state for WindEnhancedHybridModel
+ */
+export interface WindEnhancedHybridState {
+  version: number;
+  stationCode: string;
+  mrecFactors: MRECFactors | null;
+  enhancedFactors: EnhancedHybridFactors | null;
+  residualModel: {
+    weights: number[][];
+    inputs: number;
+    outputs: number;
+  } | null;
 }
 
 /**

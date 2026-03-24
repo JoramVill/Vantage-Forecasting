@@ -2,7 +2,8 @@ import { DateTime } from 'luxon';
 import { FeatureVector, TrainingSample } from '../types/index.js';
 import { FEATURE_NAMES } from '../constants/index.js';
 import MultivariateLinearRegression from 'ml-regression-multivariate-linear';
-import { DemandCalibrator } from './DemandCalibrator.js';
+import { DemandCalibrator, TreeNode, CalibrationMetrics } from './DemandCalibrator.js';
+import { IterativeScalingCalibrator, ScalingFactors } from './IterativeScalingCalibrator.js';
 
 /**
  * Time period definitions for different demand drivers
@@ -13,6 +14,37 @@ enum TimePeriod {
   MIDDAY = 'midday',         // 10-16: Temperature/cooling dominant
   EVENING_PEAK = 'evening',  // 17-22: Residential surge
   LATE_NIGHT = 'late'        // 23: Transition
+}
+
+/**
+ * Maps 14-zone codes to their parent 3-region codes.
+ * Used for weekend correction fallback when zone-specific corrections aren't available.
+ */
+const ZONE_TO_PARENT_REGION: Record<string, string> = {
+  // Luzon zones → CLUZ
+  '01NLUZ': 'CLUZ',
+  '02METRO': 'CLUZ',
+  '03SLUZ': 'CLUZ',
+  // Visayas zones → CVIS
+  '04LEYTE': 'CVIS',
+  '05CEBU': 'CVIS',
+  '06NEGROS': 'CVIS',
+  '07BOHOL': 'CVIS',
+  '08PANAY': 'CVIS',
+  // Mindanao zones → CMIN
+  '09NWMIN': 'CMIN',
+  '10LANAO': 'CMIN',
+  '11NCMIN': 'CMIN',
+  '12NEMIN': 'CMIN',
+  '13SEMIN': 'CMIN',
+  '14SWMIN': 'CMIN',
+};
+
+/**
+ * Get parent region code for a zone (or return the code itself if it's already a region)
+ */
+function getParentRegion(zoneOrRegion: string): string {
+  return ZONE_TO_PARENT_REGION[zoneOrRegion] || zoneOrRegion;
 }
 
 /**
@@ -75,16 +107,17 @@ export class HybridModel {
   private regionCharacteristics: Map<string, RegionCharacteristics> = new Map();
   private growthFactor: number = 0; // Daily growth rate (e.g., 0.0001 = 0.01% per day)
   private recentDaysCount: number = 7;
-  // Weekend correction factors learned from validation data
-  // These correct for systematic over-forecasting on weekends (especially CLUZ)
-  // Key: region, Value: { saturday: factor, sunday: factor }
-  private weekendCorrectionFactors: Map<string, { saturday: number; sunday: number }> = new Map([
-    ['CLUZ', { saturday: 0.947, sunday: 0.951 }],  // CLUZ weekends over-forecast by ~5%
-    ['CVIS', { saturday: 1.009, sunday: 0.980 }],  // CVIS close to accurate
-    ['CMIN', { saturday: 0.999, sunday: 1.018 }],  // CMIN close to accurate
-  ]);
-  // XGBoost calibrator for post-hybrid correction
+  // Weekend correction factors learned dynamically from training data
+  // These correct for systematic over-forecasting on weekends
+  // Key: region/zone, Value: { saturday: factor, sunday: factor }
+  // NOTE: No hardcoded values - all corrections are learned fresh during training
+  // Default fallback values (used when insufficient data to learn):
+  private static readonly DEFAULT_WEEKEND_CORRECTION = { saturday: 1.0, sunday: 1.0 };
+  private weekendCorrectionFactors: Map<string, { saturday: number; sunday: number }> = new Map();
+  // XGBoost calibrator for post-hybrid correction (Pass 2)
   private calibrator: DemandCalibrator | null = null;
+  // Iterative scaling calibrator for systematic bias correction (Pass 1)
+  private iterativeCalibrator: IterativeScalingCalibrator | null = null;
 
   constructor(options?: { growthFactor?: number; recentDaysCount?: number }) {
     if (options?.growthFactor !== undefined) {
@@ -193,12 +226,14 @@ export class HybridModel {
   /**
    * Learn weekend correction factors dynamically from training data.
    * Computes Saturday and Sunday correction factors per region/zone.
-   * For the old 3-region system, falls back to hardcoded values.
-   * For the 14-zone system, learns from data.
+   * ALL regions/zones learn fresh corrections - no hardcoded values.
    */
   public learnWeekendCorrections(
     trainingData: { datetime: Date; region: string; demand: number; predictedDemand: number }[]
   ): void {
+    // Clear any existing corrections - always learn fresh from current training data
+    this.weekendCorrectionFactors.clear();
+
     // Group data by region
     const regionData = new Map<string, { actual: number[]; predicted: number[]; dayType: string[] }>();
 
@@ -218,11 +253,8 @@ export class HybridModel {
       rd.dayType.push(dayType);
     }
 
-    // For each region, compute weekend correction
+    // For each region/zone, compute weekend correction from training data
     for (const [region, data] of regionData) {
-      // Skip if we already have hardcoded values for this region (CLUZ, CVIS, CMIN)
-      if (this.weekendCorrectionFactors.has(region)) continue;
-
       let satActualSum = 0, satPredSum = 0, satCount = 0;
       let sunActualSum = 0, sunPredSum = 0, sunCount = 0;
 
@@ -238,11 +270,11 @@ export class HybridModel {
         }
       }
 
-      // Need at least 4 samples per day type (about 1 weekend)
+      // Need at least 4 samples per day type (about 1 weekend) for reliable correction
       const saturday = satCount >= 4 ? satActualSum / satPredSum : 1.0;
       const sunday = sunCount >= 4 ? sunActualSum / sunPredSum : 1.0;
 
-      // Clamp to reasonable range (0.85 - 1.15)
+      // Clamp to reasonable range (0.85 - 1.15) to prevent extreme corrections
       const clamp = (v: number) => Math.max(0.85, Math.min(1.15, v));
 
       this.weekendCorrectionFactors.set(region, {
@@ -250,8 +282,15 @@ export class HybridModel {
         sunday: clamp(sunday)
       });
 
-      console.log(`  Weekend correction for ${region}: Sat=${clamp(saturday).toFixed(3)}, Sun=${clamp(sunday).toFixed(3)} (${satCount}/${sunCount} samples)`);
+      // Log corrections that deviate significantly from 1.0 (>2% adjustment)
+      const satAdj = clamp(saturday);
+      const sunAdj = clamp(sunday);
+      if (Math.abs(satAdj - 1.0) > 0.02 || Math.abs(sunAdj - 1.0) > 0.02) {
+        console.log(`  Weekend correction for ${region}: Sat=${satAdj.toFixed(3)}, Sun=${sunAdj.toFixed(3)} (${satCount}/${sunCount} samples)`);
+      }
     }
+
+    console.log(`  Learned weekend corrections for ${this.weekendCorrectionFactors.size} regions/zones`);
   }
 
   /**
@@ -349,12 +388,28 @@ export class HybridModel {
 
   /**
    * Train the ML model to predict position within the statistical range
+   * @param samples Training samples
+   * @param onProgress Optional progress callback for logging
    */
-  async train(samples: TrainingSample[]): Promise<{ r2Score: number; mape: number }> {
+  async train(
+    samples: TrainingSample[],
+    onProgress?: (msg: string) => void
+  ): Promise<{ r2Score: number; mape: number; perRegionMape?: Map<string, number> }> {
+    // Get unique regions for logging
+    const regions = [...new Set(samples.map(s => s.region))];
+    const totalRegions = regions.length;
+
     // First build statistical profiles
+    onProgress?.(`Building statistical profiles for ${totalRegions} regions...`);
+    let regionIdx = 0;
+    for (const region of regions) {
+      regionIdx++;
+      onProgress?.(`  [${regionIdx}/${totalRegions}] ${region}: building profile...`);
+    }
     this.buildProfiles(samples);
 
     // Prepare training data for position prediction
+    onProgress?.('Training ML regression model...');
     const X: number[][] = [];
     const Y: number[][] = [];
 
@@ -383,13 +438,20 @@ export class HybridModel {
     // Train regression model to predict position
     this.model = new MultivariateLinearRegression(X, Y);
 
-    // Calculate metrics
+    // Calculate metrics (overall and per-region)
+    onProgress?.('Evaluating model performance...');
     let totalError = 0;
     let totalPercentError = 0;
     let ssRes = 0;
     let ssTot = 0;
     let validSamples = 0;
     const meanDemand = samples.reduce((sum, s) => sum + s.demand, 0) / samples.length;
+
+    // Per-region tracking
+    const regionErrors = new Map<string, { sumError: number; sumDemand: number; count: number }>();
+    for (const region of regions) {
+      regionErrors.set(region, { sumError: 0, sumDemand: 0, count: 0 });
+    }
 
     for (const sample of samples) {
       const region = sample.region;
@@ -402,12 +464,30 @@ export class HybridModel {
       totalPercentError += error / Math.max(sample.demand, 1) * 100;
       ssRes += Math.pow(predicted - sample.demand, 2);
       ssTot += Math.pow(sample.demand - meanDemand, 2);
+
+      // Track per-region errors
+      const regionStats = regionErrors.get(region);
+      if (regionStats) {
+        regionStats.sumError += error;
+        regionStats.sumDemand += sample.demand;
+        regionStats.count++;
+      }
     }
 
     const r2Score = 1 - (ssRes / ssTot);
     const mape = validSamples > 0 ? totalPercentError / validSamples : 0;
 
-    return { r2Score, mape };
+    // Calculate per-region MAPE (demand-weighted)
+    const perRegionMape = new Map<string, number>();
+    for (const [region, stats] of regionErrors) {
+      if (stats.sumDemand > 0) {
+        const regionMape = (stats.sumError / stats.sumDemand) * 100;
+        perRegionMape.set(region, regionMape);
+        onProgress?.(`  ${region}: MAPE = ${regionMape.toFixed(2)}%`);
+      }
+    }
+
+    return { r2Score, mape, perRegionMape };
   }
 
   /**
@@ -459,6 +539,10 @@ export class HybridModel {
 
   /**
    * Predict demand using hybrid interpolation
+   *
+   * NOTE: This method requires an exact profile match for the region/zone.
+   * It does NOT fall back to other zones' profiles, which would cause
+   * incorrect peak shapes in zonal mode.
    */
   predict(features: FeatureVector, region?: string): number | undefined {
     if (!this.model) return undefined;
@@ -470,12 +554,8 @@ export class HybridModel {
 
     const profile = this.profiles.get(key);
     if (!profile) {
-      // Fallback: try to find any profile for this hour/dayType
-      for (const [k, p] of this.profiles) {
-        if (k.endsWith(`_${hour}_${dayType}`)) {
-          return this.interpolate(features, p);
-        }
-      }
+      // No fallback - require exact zone/region profile match
+      // Falling back to other zones' profiles causes incorrect peak shapes
       return undefined;
     }
 
@@ -510,8 +590,16 @@ export class HybridModel {
 
     // Apply weekend correction factor to fix systematic over-forecasting
     // This correction is based on observed forecast vs actual bias
+    // For zones, first try zone-specific correction, then fall back to parent region
     if (prediction !== undefined) {
-      const correction = this.weekendCorrectionFactors.get(region);
+      let correction = this.weekendCorrectionFactors.get(region);
+      if (!correction) {
+        // Fall back to parent region correction for zones
+        const parentRegion = getParentRegion(region);
+        if (parentRegion !== region) {
+          correction = this.weekendCorrectionFactors.get(parentRegion);
+        }
+      }
       if (correction) {
         if (features.isSaturday === 1) {
           prediction *= correction.saturday;
@@ -701,6 +789,64 @@ export class HybridModel {
   }
 
   /**
+   * Set the iterative scaling calibrator for Pass 1 bias correction
+   */
+  setIterativeCalibrator(calibrator: IterativeScalingCalibrator): void {
+    this.iterativeCalibrator = calibrator;
+  }
+
+  /**
+   * Get the iterative scaling calibrator
+   */
+  getIterativeCalibrator(): IterativeScalingCalibrator | null {
+    return this.iterativeCalibrator;
+  }
+
+  /**
+   * Check if iterative calibrator is available
+   */
+  hasIterativeCalibrator(): boolean {
+    return this.iterativeCalibrator !== null;
+  }
+
+  /**
+   * Apply iterative scaling to a prediction (Pass 1)
+   */
+  applyIterativeScaling(prediction: number, hour: number, zone?: string): number {
+    if (!this.iterativeCalibrator) {
+      return prediction;
+    }
+    return this.iterativeCalibrator.apply(prediction, hour, zone);
+  }
+
+  /**
+   * Apply full hybrid calibration (Pass 1 + Pass 2)
+   * Pass 1: Iterative scaling for systematic bias
+   * Pass 2: XGBoost for residual patterns
+   */
+  applyHybridCalibration(
+    hybridPrediction: number,
+    sample: TrainingSample,
+    zone?: string
+  ): number {
+    let result = hybridPrediction;
+
+    // Pass 1: Iterative scaling
+    if (this.iterativeCalibrator) {
+      const hour = sample.datetime?.getHours() ?? sample.features?.hour ?? 12;
+      result = this.iterativeCalibrator.apply(result, hour, zone);
+    }
+
+    // Pass 2: XGBoost calibration
+    if (this.calibrator && this.calibrator.isReady()) {
+      // Create a modified sample with the scaled prediction for proper calibration
+      result = this.calibrator.calibrate(result, sample);
+    }
+
+    return result;
+  }
+
+  /**
    * Apply calibration to a hybrid prediction
    * Returns the calibrated prediction, or the original if calibrator is not ready
    */
@@ -714,4 +860,186 @@ export class HybridModel {
     return this.calibrator.calibrate(hybridPrediction, sample);
   }
 
+  /**
+   * Serialize model state for storage
+   * Returns a JSON-serializable object containing all model state
+   */
+  toJSON(): HybridModelState {
+    return {
+      version: 1,
+      model: this.model ? {
+        weights: (this.model as any).weights,
+        inputs: (this.model as any).inputs,
+        outputs: (this.model as any).outputs,
+      } : null,
+      profiles: Array.from(this.profiles.entries()).map(([key, profile]) => ({
+        key,
+        profile: {
+          min: profile.min,
+          median: profile.median,
+          max: profile.max,
+          count: profile.count,
+          recentDays: profile.recentDays,
+          tempCoefficient: profile.tempCoefficient,
+          baseTemp: profile.baseTemp,
+          timePeriod: profile.timePeriod,
+          swingAmplitude: profile.swingAmplitude,
+          region: profile.region,
+        }
+      })),
+      regionCharacteristics: Array.from(this.regionCharacteristics.entries()).map(([key, chars]) => ({
+        key,
+        characteristics: chars,
+      })),
+      growthFactor: this.growthFactor,
+      recentDaysCount: this.recentDaysCount,
+      weekendCorrectionFactors: Array.from(this.weekendCorrectionFactors.entries()).map(([key, factors]) => ({
+        region: key,
+        factors,
+      })),
+      // Include calibrator state if available (Pass 2)
+      calibrator: this.calibrator && this.calibrator.isReady() ? {
+        version: 1,
+        trees: (this.calibrator as any).trees,
+        basePrediction: (this.calibrator as any).basePrediction,
+        metrics: this.calibrator.getMetrics(),
+        featureNames: (this.calibrator as any).featureNames || [],
+      } : undefined,
+      // Include iterative calibrator state if available (Pass 1)
+      iterativeCalibrator: this.iterativeCalibrator ? {
+        factors: (this.iterativeCalibrator as any).factors,
+        trained: (this.iterativeCalibrator as any).trained,
+        calibrationResult: this.iterativeCalibrator.getResult(),
+      } : undefined,
+    };
+  }
+
+  /**
+   * Restore model state from serialized data
+   */
+  static fromJSON(state: HybridModelState): HybridModel {
+    const model = new HybridModel({
+      growthFactor: state.growthFactor,
+      recentDaysCount: state.recentDaysCount,
+    });
+
+    // Restore regression model
+    if (state.model) {
+      // Reconstruct the MultivariateLinearRegression with stored weights
+      const mockX = [[0]]; // Dummy data to initialize
+      const mockY = [[0]];
+      model.model = new MultivariateLinearRegression(mockX, mockY);
+      // Override with stored weights
+      (model.model as any).weights = state.model.weights;
+      (model.model as any).inputs = state.model.inputs;
+      (model.model as any).outputs = state.model.outputs;
+    }
+
+    // Restore profiles (handle both array and object formats from MessagePack)
+    const profilesArray = Array.isArray(state.profiles)
+      ? state.profiles
+      : state.profiles ? Object.values(state.profiles) : [];
+    for (const item of profilesArray as Array<{ key: string; profile: StatisticalBounds }>) {
+      if (item && item.key && item.profile) {
+        model.profiles.set(item.key, item.profile as StatisticalBounds);
+      }
+    }
+
+    // Restore region characteristics (handle both array and object formats)
+    const regionCharsArray = Array.isArray(state.regionCharacteristics)
+      ? state.regionCharacteristics
+      : state.regionCharacteristics ? Object.values(state.regionCharacteristics) : [];
+    for (const item of regionCharsArray as Array<{ key: string; characteristics: RegionCharacteristics }>) {
+      if (item && item.key && item.characteristics) {
+        model.regionCharacteristics.set(item.key, item.characteristics);
+      }
+    }
+
+    // Restore weekend correction factors (handle both array and object formats)
+    model.weekendCorrectionFactors.clear();
+    const weekendFactorsArray = Array.isArray(state.weekendCorrectionFactors)
+      ? state.weekendCorrectionFactors
+      : state.weekendCorrectionFactors ? Object.values(state.weekendCorrectionFactors) : [];
+    for (const item of weekendFactorsArray as Array<{ region: string; factors: { saturday: number; sunday: number } }>) {
+      if (item && item.region && item.factors) {
+        model.weekendCorrectionFactors.set(item.region, item.factors);
+      }
+    }
+
+    // Restore calibrator if present (Pass 2)
+    if (state.calibrator) {
+      const calibrator = new DemandCalibrator();
+      // Restore internal state using type assertion
+      (calibrator as any).trees = state.calibrator.trees;
+      (calibrator as any).basePrediction = state.calibrator.basePrediction;
+      (calibrator as any).metrics = state.calibrator.metrics;
+      (calibrator as any).featureNames = state.calibrator.featureNames;
+      (calibrator as any).trained = true;
+      model.setCalibrator(calibrator);
+    }
+
+    // Restore iterative calibrator if present (Pass 1)
+    if (state.iterativeCalibrator) {
+      const iterativeCalibrator = new IterativeScalingCalibrator();
+      // Restore internal state using type assertion
+      (iterativeCalibrator as any).factors = state.iterativeCalibrator.factors;
+      (iterativeCalibrator as any).trained = state.iterativeCalibrator.trained;
+      (iterativeCalibrator as any).calibrationResult = state.iterativeCalibrator.calibrationResult;
+      model.setIterativeCalibrator(iterativeCalibrator);
+    }
+
+    return model;
+  }
+}
+
+/**
+ * Serialized state of HybridModel
+ */
+export interface HybridModelState {
+  version: number;
+  model: {
+    weights: number[][];
+    inputs: number;
+    outputs: number;
+  } | null;
+  profiles: Array<{
+    key: string;
+    profile: {
+      min: number;
+      median: number;
+      max: number;
+      count: number;
+      recentDays: Array<{ date: string; demand: number; temp: number }>;
+      tempCoefficient: number;
+      baseTemp: number;
+      timePeriod: TimePeriod;
+      swingAmplitude: number;
+      region: string;
+    };
+  }>;
+  regionCharacteristics: Array<{
+    key: string;
+    characteristics: RegionCharacteristics;
+  }>;
+  growthFactor: number;
+  recentDaysCount: number;
+  weekendCorrectionFactors: Array<{
+    region: string;
+    factors: { saturday: number; sunday: number };
+  }>;
+  scalingPercent?: number; // Per-entity scaling override (e.g., -5 for -5%, +10 for +10%)
+  // Calibrator state (XGBoost correction layer - Pass 2)
+  calibrator?: {
+    version: number;
+    trees: TreeNode[];
+    basePrediction: number;
+    metrics: CalibrationMetrics | null;
+    featureNames: string[];
+  };
+  // Iterative scaling calibrator state (Pass 1)
+  iterativeCalibrator?: {
+    factors: ScalingFactors;
+    trained: boolean;
+    calibrationResult: any;
+  };
 }

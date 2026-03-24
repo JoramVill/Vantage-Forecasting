@@ -67,6 +67,11 @@ interface Window {
       archiveRetention: number;
     }>;
     saveSchedulerConfig: (config: any) => Promise<{ success: boolean; error?: string }>;
+    getZonesConfig: () => Promise<{
+      zones: Array<{ code: string; name: string; parentRegion: string }>;
+      regions: Array<{ code: string; name: string; parentKey: string }>;
+      zoneToRegion: Record<string, string>;
+    }>;
     getRecentRuns: (limit: number) => Promise<Array<{
       id: number;
       run_date: string;
@@ -102,7 +107,8 @@ interface Window {
       endDate?: string | null;
       verbose?: boolean;
       pushGateway?: boolean;
-      useCalibrationId?: number | null;
+      useCalibrationId?: string | number | null; // String UUID from CFAC calibration service or legacy number
+      useModelId?: string | null; // Use saved trained model from model store (skips training)
       useDb?: boolean;
       dataDbPath?: string | null;
       maxIterations?: number;
@@ -188,6 +194,248 @@ interface Window {
       results?: {
         deleted: { file: string; date: string }[];
         errors: string[];
+      };
+    }>;
+    // Model management
+    initModelStore: () => Promise<void>;
+    listModels: (filters?: { entityType?: string; entityCode?: string; isActive?: boolean }) => Promise<Array<{
+      id: string;
+      entity_type: string;
+      entity_code: string;
+      model_type: string;
+      version: number;
+      trained_at: string;
+      mape?: number;
+      rmse?: number;
+      is_active: boolean;
+      is_archived: boolean;
+      file_path: string;
+    }>>;
+    getTrainingInstances: () => Promise<Array<{
+      id: string;
+      entityType: string;
+      trainedAt: string;
+      modelCount: number;
+      activeCount: number;
+      avgMape: number | null;
+      minMape: number | null;
+      maxMape: number | null;
+      trainingPeriod: { start: string; end: string } | null;
+      models: any[];
+    }>>;
+    getModelById: (id: string) => Promise<any>;
+    getActiveModel: (entityType: string, entityCode: string) => Promise<any>;
+    activateModel: (id: string) => Promise<void>;
+    archiveModel: (id: string) => Promise<void>;
+    deleteModel: (id: string) => Promise<void>;
+    setSchedulerActiveModel: (id: string) => Promise<{ success: boolean; error?: string }>;
+    setManualActiveModel: (id: string) => Promise<{ success: boolean; error?: string }>;
+    trainModel: (options: {
+      demandPath: string;
+      startDate: string;
+      endDate: string;
+      modelType: string;
+      type: string;
+      holdoutDays?: number;
+      autoActivate?: boolean;
+    }) => Promise<any>;
+    listModelGroups: () => Promise<Array<{ group_code: string; group_type: string; description?: string }>>;
+    listTrainingRuns: (limit?: number) => Promise<Array<{
+      id: string;
+      started_at: string;
+      completed_at?: string;
+      status: string;
+      entities_trained?: number;
+    }>>;
+    // Save trained model from Manual tab
+    saveTrainedModel: (options: {
+      name: string;
+      notes: string;
+      modelData: any;
+      entityType: string;
+      entityCode: string;
+    }) => Promise<{ success: boolean; id?: string; path?: string; error?: string }>;
+    // Re-evaluate model
+    reEvaluateModel: (id: string, options?: { days?: number; update?: boolean }) => Promise<any>;
+    // Export model
+    exportModel: (id: string) => Promise<{ success: boolean; path?: string; error?: string }>;
+    // Import model
+    importModel: () => Promise<{ success: boolean; id?: string; error?: string }>;
+    // Update model selection config
+    updateModelSelection: (modelSelection: any) => Promise<{ success: boolean; error?: string }>;
+    // Training plan management
+    listTrainingPlans: () => Promise<Array<{
+      id: string;
+      name: string;
+      description?: string;
+      dateRange: {
+        mode: 'fixed' | 'rolling';
+        fixedStart?: string;
+        fixedEnd?: string;
+        rollingDays?: 14 | 30 | 90 | 180 | 365;
+      };
+      trainDemand: boolean;
+      trainCfac: boolean;
+      demandModelType: 'hybrid' | 'xgboost' | 'regression';
+      cfacModelType: '4tier' | 'hybrid' | 'mrec' | 'physics';
+      calibrationEnabled: boolean;
+      calibrationIterations: number;
+      calibrationThreshold: number;
+      holdoutDays: number;
+      autoActivate: boolean;
+      createdAt: string;
+      updatedAt: string;
+    }>>;
+    createTrainingPlan: (plan: {
+      name: string;
+      description?: string;
+      dateRange: {
+        mode: 'fixed' | 'rolling';
+        fixedStart?: string;
+        fixedEnd?: string;
+        rollingDays?: 14 | 30 | 90 | 180 | 365;
+      };
+      trainDemand: boolean;
+      trainCfac: boolean;
+      demandModelType: 'hybrid' | 'xgboost' | 'regression';
+      cfacModelType: '4tier' | 'hybrid' | 'mrec' | 'physics';
+      calibrationEnabled: boolean;
+      calibrationIterations: number;
+      calibrationThreshold: number;
+      holdoutDays: number;
+      autoActivate: boolean;
+    }) => Promise<{
+      id: string;
+      name: string;
+      description?: string;
+      dateRange: {
+        mode: 'fixed' | 'rolling';
+        fixedStart?: string;
+        fixedEnd?: string;
+        rollingDays?: 14 | 30 | 90 | 180 | 365;
+      };
+      trainDemand: boolean;
+      trainCfac: boolean;
+      demandModelType: 'hybrid' | 'xgboost' | 'regression';
+      cfacModelType: '4tier' | 'hybrid' | 'mrec' | 'physics';
+      calibrationEnabled: boolean;
+      calibrationIterations: number;
+      calibrationThreshold: number;
+      holdoutDays: number;
+      autoActivate: boolean;
+      createdAt: string;
+      updatedAt: string;
+    }>;
+    updateTrainingPlan: (id: string, updates: Partial<{
+      name: string;
+      description?: string;
+      dateRange: {
+        mode: 'fixed' | 'rolling';
+        fixedStart?: string;
+        fixedEnd?: string;
+        rollingDays?: 14 | 30 | 90 | 180 | 365;
+      };
+      trainDemand: boolean;
+      trainCfac: boolean;
+      demandModelType: 'hybrid' | 'xgboost' | 'regression';
+      cfacModelType: '4tier' | 'hybrid' | 'mrec' | 'physics';
+      calibrationEnabled: boolean;
+      calibrationIterations: number;
+      calibrationThreshold: number;
+      holdoutDays: number;
+      autoActivate: boolean;
+    }>) => Promise<{
+      id: string;
+      name: string;
+      description?: string;
+      dateRange: {
+        mode: 'fixed' | 'rolling';
+        fixedStart?: string;
+        fixedEnd?: string;
+        rollingDays?: 14 | 30 | 90 | 180 | 365;
+      };
+      trainDemand: boolean;
+      trainCfac: boolean;
+      demandModelType: 'hybrid' | 'xgboost' | 'regression';
+      cfacModelType: '4tier' | 'hybrid' | 'mrec' | 'physics';
+      calibrationEnabled: boolean;
+      calibrationIterations: number;
+      calibrationThreshold: number;
+      holdoutDays: number;
+      autoActivate: boolean;
+      createdAt: string;
+      updatedAt: string;
+    }>;
+    deleteTrainingPlan: (id: string) => Promise<void>;
+    // CFAC Calibration management
+    listCfacCalibrations: () => Promise<Array<{
+      id: string;
+      createdAt: string;
+      trainingStart: string;
+      trainingEnd: string;
+      windMAPE: number;
+      solarMAPE: number;
+      stationCount: number;
+      isActive: boolean;
+    }>>;
+    getCfacCalibrationDetails: (id: string) => Promise<{
+      id: string;
+      createdAt: string;
+      trainingPeriod: { start: string; end: string };
+      config: {
+        useXgboost: boolean;
+        asymmetricLoss: boolean;
+        biasCorrection: boolean;
+        autoCalibrateDays: number;
+        excludeOutages: boolean;
+      };
+      globalFactors: {
+        windBias: number;
+        solarBias: number;
+        otherBias: number;
+      };
+      solarHourlyScale: Record<number, number>;
+      windMRECFactors: Record<string, {
+        stationCode: string;
+        vL: number;
+        vH: number;
+        tL: number;
+        tH: number;
+        calibrated: boolean;
+      }>;
+      stationScales: {
+        wind: Record<string, number>;
+        solar: Record<string, number>;
+        other: Record<string, number>;
+      };
+      trainingMetrics: {
+        windMAPE: number;
+        solarMAPE: number;
+        stationCount: number;
+        trainingRecords: number;
+      };
+    } | null>;
+    setActiveCfacCalibration: (id: string) => Promise<void>;
+    deleteCfacCalibration: (id: string) => Promise<boolean>;
+    // Unified forecast with calibration
+    runDemandForecastCalibrated: (options: {
+      startDate: string;
+      endDate: string;
+      outputPath: string;
+      geography: 'regional' | 'zonal' | 'both';
+      trainingPath?: string;
+      actualPath?: string;
+      calibrationMode?: 'hybrid' | 'iterative' | 'xgboost' | 'none';
+      quantileAlpha?: number;
+    }) => Promise<{
+      success: boolean;
+      error?: string;
+      outputPath?: string;
+      calibration?: {
+        mode: string;
+        applied: boolean;
+        reason?: string;
+        result?: any;
       };
     }>;
   };

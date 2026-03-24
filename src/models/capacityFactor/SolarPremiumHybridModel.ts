@@ -229,9 +229,9 @@ export class SolarPremiumHybridModel {
     // Filter samples for this station
     const stationSamples = samples.filter(s => s.stationCode === this.stationCode);
 
-    // Filter for daylight hours with actual generation
+    // Filter for daylight hours with actual generation (allow 5 AM to 7 PM for seasonal variation)
     const daylightSamples = stationSamples.filter(s =>
-      s.hour >= 6 && s.hour <= 18 && s.actualCFac > 0.01 && s.weather.solarRadiation > 10
+      s.hour >= 5 && s.hour <= 19 && s.actualCFac > 0.01 && s.weather.solarRadiation > 10
     );
 
     if (daylightSamples.length < 50) {

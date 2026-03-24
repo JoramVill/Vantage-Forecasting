@@ -1,11 +1,18 @@
 /**
- * DemandCalibrator - XGBoost-based calibration layer for hybrid demand model
+ * DemandCalibrator - Quantile Loss XGBoost calibration for hybrid demand model
  *
- * Learns zone-specific, hour-specific, day-type-specific correction factors
- * by analyzing hybrid model prediction errors on training data.
+ * HYBRID CALIBRATION ARCHITECTURE (Pass 2):
+ * This calibrator learns residual corrections AFTER Iterative Scaling (Pass 1).
+ * It uses Quantile Loss to penalize under-predictions more heavily than
+ * over-predictions, solving the "peak crushing" problem of symmetric MSE.
  *
- * The calibrator predicts a multiplicative correction factor (centered at 1.0)
- * that is applied to hybrid predictions to reduce systematic biases.
+ * Key improvements over original MSE-based calibrator:
+ * 1. Quantile Loss with configurable alpha (default 0.80 = 4:1 penalty ratio)
+ * 2. Relaxed clamping (±50% vs restrictive ±15%)
+ * 3. Momentum feature (rolling 24h error average)
+ * 4. Forecast horizon awareness
+ *
+ * Reference: Documents/planning/HYBRID_CALIBRATION_IMPLEMENTATION.md
  */
 
 import { TrainingSample, FeatureVector } from '../types/index.js';
@@ -27,7 +34,7 @@ interface CalibrationSample {
   target: number; // correction factor: actual / hybridPrediction
 }
 
-interface CalibrationMetrics {
+export interface CalibrationMetrics {
   trainMAPE: number;
   validationMAPE: number;
   avgCorrection: number;
@@ -35,7 +42,7 @@ interface CalibrationMetrics {
   sampleCount: number;
 }
 
-interface TreeNode {
+export interface TreeNode {
   featureIdx?: number;
   threshold?: number;
   left?: TreeNode;
@@ -50,7 +57,15 @@ export class DemandCalibrator {
   private trained: boolean = false;
   private metrics: CalibrationMetrics | null = null;
 
-  // Feature names for interpretability
+  // Quantile regression parameter
+  // alpha > 0.5 penalizes under-predictions more heavily
+  // 0.80 = 4:1 penalty ratio (under vs over)
+  private alpha: number = 0.80;
+
+  // Learning rate for gradient boosting
+  private learningRate: number = 0.1;
+
+  // Feature names for interpretability (expanded for Phase 3)
   private featureNames: string[] = [
     'zoneIdx',
     'hour', 'hourSin', 'hourCos',
@@ -58,10 +73,25 @@ export class DemandCalibrator {
     'temp', 'humidity', 'cloudCover',
     'hybridPrediction',
     'demandLag24h',
-    'month', 'monthSin', 'monthCos'
+    'month', 'monthSin', 'monthCos',
+    // Phase 3 features
+    'momentum24h',      // Rolling 24h error average
+    'errorTrend',       // Error direction (improving/worsening)
+    'forecastHorizon',  // Hours ahead in prediction
+    'tempRamp'          // Rate of temperature change
   ];
 
-  constructor() {}
+  // Track recent errors for momentum calculation
+  private recentErrors: number[] = [];
+
+  constructor(options?: { alpha?: number; learningRate?: number }) {
+    if (options?.alpha !== undefined) {
+      this.alpha = Math.max(0.5, Math.min(0.95, options.alpha));
+    }
+    if (options?.learningRate !== undefined) {
+      this.learningRate = options.learningRate;
+    }
+  }
 
   /**
    * Get day type from sample features
@@ -76,10 +106,21 @@ export class DemandCalibrator {
 
   /**
    * Build calibration features from a sample and hybrid prediction
+   *
+   * Extended with Phase 3 features:
+   * - momentum24h: Rolling 24h error average
+   * - errorTrend: Whether errors are improving or worsening
+   * - forecastHorizon: How far ahead the prediction is
+   * - tempRamp: Rate of temperature change
    */
   private buildCalibrationFeatures(
     sample: TrainingSample,
-    hybridPrediction: number
+    hybridPrediction: number,
+    context?: {
+      recentErrors?: number[];
+      forecastHorizon?: number;
+      prevTemp?: number;
+    }
   ): number[] {
     const features = sample.features;
     const hour = features.hour;
@@ -114,6 +155,29 @@ export class DemandCalibrator {
     const monthSin = Math.sin(month * 2 * Math.PI / 12);
     const monthCos = Math.cos(month * 2 * Math.PI / 12);
 
+    // Phase 3: New context-aware features
+    const recentErrors = context?.recentErrors || this.recentErrors;
+
+    // Momentum: Rolling 24h error average (positive = under-predicting)
+    const momentum24h = recentErrors.length > 0
+      ? recentErrors.slice(-24).reduce((a, b) => a + b, 0) / Math.min(recentErrors.length, 24)
+      : 0;
+
+    // Error trend: Compare recent 6h vs older 6h (positive = getting worse)
+    let errorTrend = 0;
+    if (recentErrors.length >= 12) {
+      const recent6h = recentErrors.slice(-6).reduce((a, b) => a + b, 0) / 6;
+      const older6h = recentErrors.slice(-12, -6).reduce((a, b) => a + b, 0) / 6;
+      errorTrend = (recent6h - older6h) / 10; // Normalize
+    }
+
+    // Forecast horizon (normalized to 0-1 for a week)
+    const forecastHorizon = (context?.forecastHorizon ?? 24) / 168;
+
+    // Temperature ramp (rate of change)
+    const prevTemp = context?.prevTemp ?? temp;
+    const tempRamp = (temp - prevTemp) / 10; // Normalize
+
     return [
       zoneIdx >= 0 ? zoneIdx : 0,
       hour, hourSin, hourCos,
@@ -121,12 +185,22 @@ export class DemandCalibrator {
       temp, humidity, cloudCover,
       hybridNorm,
       demandLag24h,
-      month, monthSin, monthCos
+      month, monthSin, monthCos,
+      // Phase 3 features
+      momentum24h,
+      errorTrend,
+      forecastHorizon,
+      tempRamp
     ];
   }
 
   /**
-   * Train the calibrator on hybrid model errors
+   * Train the calibrator on hybrid model errors using Quantile Loss
+   *
+   * Key difference from MSE-based training:
+   * - Uses quantile loss with alpha parameter to penalize under-predictions
+   * - Default alpha=0.80 means 4:1 penalty ratio (under vs over)
+   * - This prevents "peak crushing" seen with symmetric MSE
    *
    * @param samples Training samples with actual demand
    * @param hybridPredictor Function that returns hybrid model prediction for a sample
@@ -141,6 +215,7 @@ export class DemandCalibrator {
       learningRate?: number;
       minChildWeight?: number;
       validationSplit?: number;
+      alpha?: number;  // Quantile parameter (default: 0.80)
     }
   ): Promise<CalibrationMetrics> {
     const opts = {
@@ -148,8 +223,15 @@ export class DemandCalibrator {
       nEstimators: options?.nEstimators ?? 50,
       learningRate: options?.learningRate ?? 0.1,
       minChildWeight: options?.minChildWeight ?? 10,
-      validationSplit: options?.validationSplit ?? 0.2
+      validationSplit: options?.validationSplit ?? 0.2,
+      alpha: options?.alpha ?? this.alpha
     };
+
+    // Update instance alpha if provided
+    if (options?.alpha !== undefined) {
+      this.alpha = opts.alpha;
+    }
+    this.learningRate = opts.learningRate;
 
     console.log('  Building calibration dataset...');
 
@@ -269,7 +351,36 @@ export class DemandCalibrator {
   }
 
   /**
-   * Fallback gradient boosting implementation with subsampling for speed
+   * Calculate quantile loss gradient
+   *
+   * For quantile regression with alpha:
+   * - gradient = alpha * residual if actual > predicted (under-prediction)
+   * - gradient = (1-alpha) * residual if actual < predicted (over-prediction)
+   *
+   * alpha = 0.5 → symmetric (standard MSE behavior)
+   * alpha > 0.5 → penalize under-predictions more
+   *
+   * Penalty ratio = alpha / (1 - alpha)
+   * alpha = 0.80 → 4:1 ratio
+   * alpha = 0.90 → 9:1 ratio
+   */
+  private calculateQuantileGradient(actual: number, predicted: number): number {
+    const residual = actual - predicted;
+    if (residual > 0) {
+      // Under-prediction: weight by alpha
+      return this.alpha * residual;
+    } else {
+      // Over-prediction: weight by (1 - alpha)
+      return (1 - this.alpha) * residual;
+    }
+  }
+
+  /**
+   * Fallback gradient boosting with QUANTILE LOSS
+   *
+   * Key difference from original:
+   * - Uses calculateQuantileGradient instead of simple residuals
+   * - This penalizes under-predictions more heavily (based on alpha)
    */
   private trainFallbackModel(X: number[][], y: number[], opts: any): void {
     // Subsample for faster training (limit to 10k samples)
@@ -284,32 +395,37 @@ export class DemandCalibrator {
       trainY = indices.map(i => y[i]);
     }
 
-    // Reduce trees for fallback (10 instead of 50)
-    const nTrees = Math.min(opts.nEstimators, 10);
+    // Use more trees now that we have proper quantile loss
+    const nTrees = Math.min(opts.nEstimators, 30);
 
     this.basePrediction = trainY.reduce((a, b) => a + b, 0) / trainY.length;
     const predictions = new Array(trainY.length).fill(this.basePrediction);
-    let residuals = trainY.map((actual, i) => actual - predictions[i]);
 
     this.trees = [];
 
+    console.log(`  Training with Quantile Loss (alpha=${this.alpha.toFixed(2)}, penalty ratio=${(this.alpha / (1 - this.alpha)).toFixed(1)}:1)`);
+
     for (let round = 0; round < nTrees; round++) {
-      const tree = this.buildTree(trainX, residuals, 0, opts.maxDepth, opts.minChildWeight);
+      // Calculate QUANTILE gradients instead of simple residuals
+      const gradients = trainY.map((actual, i) =>
+        this.calculateQuantileGradient(actual, predictions[i])
+      );
+
+      const tree = this.buildTree(trainX, gradients, 0, opts.maxDepth, opts.minChildWeight);
       this.trees.push(tree);
 
-      // Update predictions and residuals
+      // Update predictions
       for (let i = 0; i < trainX.length; i++) {
         const treePred = this.predictTree(tree, trainX[i]);
         predictions[i] += opts.learningRate * treePred;
-        residuals[i] = trainY[i] - predictions[i];
       }
 
       // Progress indicator
-      if ((round + 1) % 5 === 0) {
+      if ((round + 1) % 10 === 0) {
         console.log(`    Tree ${round + 1}/${nTrees} trained`);
       }
     }
-    console.log(`  Fallback model trained with ${nTrees} trees`);
+    console.log(`  Quantile Loss model trained with ${nTrees} trees`);
   }
 
   /**
@@ -448,21 +564,28 @@ export class DemandCalibrator {
       return this.clampCorrection(pred);
     }
 
-    // Use fallback model
+    // Use fallback model with configurable learning rate
     let prediction = this.basePrediction;
     for (const tree of this.trees) {
-      prediction += 0.1 * this.predictTree(tree, features); // learningRate = 0.1
+      prediction += this.learningRate * this.predictTree(tree, features);
     }
 
     return this.clampCorrection(prediction);
   }
 
   /**
-   * Clamp correction factor to reasonable bounds
+   * Clamp correction factor to safety bounds only
+   *
+   * CHANGED: Relaxed from ±15% to ±50%
+   * The restrictive ±15% clamping was identified as a cause of
+   * "peak crushing" - preventing the model from reaching true peaks.
+   *
+   * Now allows corrections up to ±50% (safety limit only).
+   * The quantile loss function handles proper penalty weighting.
    */
   private clampCorrection(correction: number): number {
-    // Don't allow corrections more than 15% in either direction
-    return Math.max(0.85, Math.min(1.15, correction));
+    // Safety bounds only - allow corrections up to ±50%
+    return Math.max(0.50, Math.min(1.50, correction));
   }
 
   /**
@@ -559,14 +682,42 @@ export class DemandCalibrator {
   }
 
   /**
+   * Track an error for momentum calculation
+   * Call this after each prediction to build momentum history
+   */
+  trackError(error: number): void {
+    this.recentErrors.push(error);
+    // Keep only last 48 hours of errors
+    if (this.recentErrors.length > 48) {
+      this.recentErrors.shift();
+    }
+  }
+
+  /**
+   * Clear error history (call at start of new forecast)
+   */
+  clearErrorHistory(): void {
+    this.recentErrors = [];
+  }
+
+  /**
+   * Get current alpha parameter
+   */
+  getAlpha(): number {
+    return this.alpha;
+  }
+
+  /**
    * Save calibrator state to a JSON file
    */
   save(filepath: string): void {
     const state = {
-      version: 1,
+      version: 2,  // Bumped for quantile loss support
       type: 'demand-calibrator',
       trees: this.trees,
       basePrediction: this.basePrediction,
+      alpha: this.alpha,
+      learningRate: this.learningRate,
       metrics: this.metrics,
       featureNames: this.featureNames,
       trainedAt: new Date().toISOString(),
@@ -597,7 +748,10 @@ export class DemandCalibrator {
       throw new Error('Invalid calibrator file format');
     }
 
-    const calibrator = new DemandCalibrator();
+    const calibrator = new DemandCalibrator({
+      alpha: state.alpha ?? 0.80,
+      learningRate: state.learningRate ?? 0.1
+    });
     calibrator.trees = state.trees;
     calibrator.basePrediction = state.basePrediction;
     calibrator.metrics = state.metrics;

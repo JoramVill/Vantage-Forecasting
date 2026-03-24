@@ -1,0 +1,24 @@
+{
+  "id": "65191187-997c-49ec-b624-66d180def1ac",
+  "name": "Save1",
+  "notes": "",
+  "entityType": "forecast",
+  "entityCode": "manual_forecast",
+  "version": 5,
+  "createdAt": "2026-03-21T08:47:12.899Z",
+  "isActive": false,
+  "forecastConfig": {
+    "forecastStart": "2026-03-01",
+    "forecastEnd": "2026-03-28",
+    "demandEnabled": true,
+    "cfacEnabled": true,
+    "zonalMode": true,
+    "demandModel": "hybrid-calibrated",
+    "cfacModel": "hybrid"
+  },
+  "trainingMetadata": {
+    "trainingStart": "2026-02-01",
+    "trainingEnd": "2026-03-21",
+    "dataSource": "database"
+  }
+}

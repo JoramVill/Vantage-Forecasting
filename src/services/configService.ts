@@ -49,7 +49,10 @@ export class ConfigService {
         enabled: true,
         days: 7,
         threshold: 5,
-        maxIterations: 10
+        maxIterations: 10,
+        mode: 'hybrid',
+        quantileAlpha: 0.80,
+        enableZoneScaling: true
       },
 
       cfac: {

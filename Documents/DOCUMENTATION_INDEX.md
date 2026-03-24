@@ -1,3 +1,9 @@
+---
+Status: Active
+Last-Updated: 2026-03-24
+Updated-By: Claude Code
+---
+
 # Vantage Forecaster - Documentation Index
 
 **For AI Agents:** Start with `../CLAUDE.md` for quick reference, then use this index.
@@ -11,8 +17,11 @@
 | Run my first forecast | [QUICK_START.md](QUICK_START.md) |
 | Use the desktop GUI | [GUI_GUIDE.md](GUI_GUIDE.md) |
 | Use CLI commands | [CLI_GUIDE.md](CLI_GUIDE.md) or [../CLAUDE.md](../CLAUDE.md) |
+| Understand GUI-to-CLI mapping | [GUI_CLI_INTEGRATION.md](GUI_CLI_INTEGRATION.md) |
 | Deploy to users | [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) |
 | Understand the models | [MODEL_OVERVIEW.md](MODEL_OVERVIEW.md) |
+| Review demand methodology | [DEMAND_FORECASTING_METHODOLOGY.md](DEMAND_FORECASTING_METHODOLOGY.md) |
+| Review CFAC methodology | [CFAC_FORECASTING_METHODOLOGY.md](CFAC_FORECASTING_METHODOLOGY.md) |
 | Work on the codebase | [AI_AGENT_GUIDE.md](AI_AGENT_GUIDE.md) |
 
 ---
@@ -24,7 +33,10 @@
 | [QUICK_START.md](QUICK_START.md) | 5-minute getting started guide |
 | [CLI_GUIDE.md](CLI_GUIDE.md) | Complete CLI command reference |
 | [GUI_GUIDE.md](GUI_GUIDE.md) | Desktop GUI user manual |
+| [GUI_CLI_INTEGRATION.md](GUI_CLI_INTEGRATION.md) | **GUI architecture** - How GUI invokes CLI commands |
 | [MODEL_OVERVIEW.md](MODEL_OVERVIEW.md) | Forecasting models and performance |
+| [DEMAND_FORECASTING_METHODOLOGY.md](DEMAND_FORECASTING_METHODOLOGY.md) | **Detailed demand methodology** - Technical review document |
+| [CFAC_FORECASTING_METHODOLOGY.md](CFAC_FORECASTING_METHODOLOGY.md) | **Detailed CFAC methodology** - Wind, solar, hydro forecasting |
 | [TECHNICAL_OVERVIEW.md](TECHNICAL_OVERVIEW.md) | Architecture and code structure |
 | [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) | Building portable Windows distributions |
 | [AI_AGENT_GUIDE.md](AI_AGENT_GUIDE.md) | Onboarding guide for AI agents |
@@ -68,12 +80,6 @@ node dist/index.js scheduler run
 # Build portable distribution
 node scripts/build-portable.cjs --zip --clean
 ```
-
----
-
-## Archived Documents
-
-Historical planning documents, analysis reports, and outdated guides are in `Documents/archive/`.
 
 ---
 

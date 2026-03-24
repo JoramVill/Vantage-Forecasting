@@ -1,3 +1,10 @@
+---
+Status: Active
+Last-Verified: 2026-03-22
+Verified-Against: current
+Updated-By: codebase-documenter
+---
+
 # Vantage Forecaster - Deployment Guide
 
 This guide covers creating and distributing portable Windows builds of Vantage Forecaster.
@@ -81,7 +88,6 @@ VantageForecaster/
 │   │   ├── stations.json   # Station metadata
 │   │   └── zones.json      # Zone configuration
 │   └── config/
-│       └── lstm_config.json
 │
 ├── data/                    # Databases (updateable)
 │   ├── iload.db            # Regional demand data

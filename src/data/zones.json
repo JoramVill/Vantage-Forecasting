@@ -1,4 +1,9 @@
 {
+  "regions": [
+    { "code": "CLUZ", "name": "Luzon", "parentKey": "luzon" },
+    { "code": "CVIS", "name": "Visayas", "parentKey": "visayas" },
+    { "code": "CMIN", "name": "Mindanao", "parentKey": "mindanao" }
+  ],
   "zones": [
     {
       "code": "01NLUZ",

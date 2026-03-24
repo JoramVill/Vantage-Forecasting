@@ -32,11 +32,32 @@ const forecastEnd = ref('');
 // Tab navigation
 const activeTab = ref<'manual' | 'scheduler' | 'gateway' | 'models' | 'settings'>('manual');
 
-// Forecast options
-const enableDemand = ref(true);
-const enableCfac = ref(true);
-// enableZonal is now a computed property that syncs with globalConfig.demand.geography
-// Manual tab checkbox: ON = zonal or both, OFF = regional
+// Forecast options - three independent forecast type toggles
+const enableDemandRegional = ref(true);
+const enableDemandZonal = ref(true);
+const enableCfac = ref(false);
+
+// Per-type mode: 'train' or 'inference'
+const demandRegionalMode = ref<'train' | 'inference'>('train');
+const demandZonalMode = ref<'train' | 'inference'>('train');
+const cfacMode = ref<'train' | 'inference'>('train');
+
+// Per-type selected instance (for inference mode)
+const demandRegionalInstanceId = ref<number | null>(null);
+const demandZonalInstanceId = ref<number | null>(null);
+const cfacWindInstanceId = ref<number | null>(null);
+const cfacSolarInstanceId = ref<number | null>(null);
+
+// Per-type model names (for saving when training)
+const demandRegionalModelName = ref('');
+const demandZonalModelName = ref('');
+const cfacModelName = ref('');
+
+// Options
+const pushToGateway = ref(false); // Push forecasts to Vantage-Gateway server
+const refreshWeather = ref(false); // Force weather cache refresh
+
+// Legacy enableZonal computed for scheduler tab backward compatibility
 const enableZonal = computed({
   get: () => {
     const geo = globalConfig.value?.demand?.geography;
@@ -44,25 +65,12 @@ const enableZonal = computed({
   },
   set: (val: boolean) => {
     if (globalConfig.value?.demand) {
-      // When toggling checkbox: zonal/regional only (not both - that's scheduler-only)
       globalConfig.value.demand.geography = val ? 'zonal' : 'regional';
-      // Also sync scheduler dropdown
       schedulerConfig.value.demandGeography = globalConfig.value.demand.geography;
-      // Save config so CLI reads updated value
       saveGlobalConfig();
     }
   }
 });
-const scalingPercent = ref(100);
-const scalingWind = ref(100); // Per-type scaling for wind
-const scalingSolar = ref(100); // Per-type scaling for solar
-const usePerTypeScaling = ref(false); // Enable per-type scaling mode
-const cfacModel = ref<'hybrid' | 'hybrid-lstm' | 'legacy'>('hybrid'); // Hybrid (physics + ML) is the best performer
-const demandModel = ref<'hybrid' | 'hybrid-calibrated'>('hybrid-calibrated'); // Hybrid + XGBoost calibration is best (4.77% MAPE)
-const pushToGateway = ref(false); // Push forecasts to Vantage-Gateway server
-const demandGrowthRate = ref(0); // Daily demand growth rate (e.g., 0.001 = 0.1%)
-const trainingEndDate = ref(''); // Optional training data cutoff date
-const modelName = ref(''); // Name for saved model (used with --save-model)
 
 // Scheduler state - OLD (legacy, not used by new scheduler tab)
 // const schedulerMode = ref<'run' | 'backfill'>('run');
@@ -251,7 +259,7 @@ const comparisonInstance = ref<any | null>(null);
 // const comparisonModelDetails = ref<any | null>(null);
 
 // ============ MANUAL/SCHEDULER INSTANCE SELECTION ============
-const selectedTrainingInstanceId = ref<string | null>(null);  // For Manual Forecast tab
+// Note: Old selectedTrainingInstanceId removed - replaced by per-type demandRegionalInstanceId/demandZonalInstanceId
 const activeTrainingInstanceId = ref<string | null>(null);     // For Scheduler tab
 const showInstanceSelector = ref(false); // Modal for scheduler instance selection
 
@@ -339,11 +347,7 @@ const filteredInstances = computed(() => {
   });
 });
 
-// Get selected training instance for manual forecast tab
-const selectedTrainingInstance = computed(() => {
-  if (!selectedTrainingInstanceId.value) return null;
-  return trainingInstances.value.find((i: any) => i.id === selectedTrainingInstanceId.value);
-});
+// Note: Old selectedTrainingInstance removed - replaced by selectedRegionalInstance/selectedZonalInstance
 
 // Get active training instance for scheduler (uses same logic but different ref)
 // TODO: Phase D - Add Training Instance selector UI to Scheduler tab
@@ -351,6 +355,41 @@ const selectedTrainingInstance = computed(() => {
 const activeTrainingInstance = computed(() => {
   if (!activeTrainingInstanceId.value) return null;
   return trainingInstances.value.find((i: any) => i.id === activeTrainingInstanceId.value);
+});
+
+// Filtered instances by entity type for Manual Forecast tab
+const regionalInstances = computed(() =>
+  trainingInstances.value.filter((i: any) => i.entityType === 'regional'));
+const zonalInstances = computed(() =>
+  trainingInstances.value.filter((i: any) => i.entityType === 'zonal'));
+const windInstances = computed(() =>
+  trainingInstances.value.filter((i: any) => i.entityType === 'wind'));
+const solarInstances = computed(() =>
+  trainingInstances.value.filter((i: any) => i.entityType === 'solar'));
+
+// Get selected instance for regional demand (inference mode)
+// Note: demandRegionalInstanceId stores the database model ID (models[0].id), not the composite instance key
+const selectedRegionalInstance = computed(() => {
+  if (!demandRegionalInstanceId.value) return null;
+  return trainingInstances.value.find((i: any) => i.models?.[0]?.id === demandRegionalInstanceId.value);
+});
+
+// Get selected instance for zonal demand (inference mode)
+const selectedZonalInstance = computed(() => {
+  if (!demandZonalInstanceId.value) return null;
+  return trainingInstances.value.find((i: any) => i.models?.[0]?.id === demandZonalInstanceId.value);
+});
+
+// Get selected instance for CFAC wind (inference mode)
+const selectedWindInstance = computed(() => {
+  if (!cfacWindInstanceId.value) return null;
+  return trainingInstances.value.find((i: any) => i.models?.[0]?.id === cfacWindInstanceId.value);
+});
+
+// Get selected instance for CFAC solar (inference mode)
+const selectedSolarInstance = computed(() => {
+  if (!cfacSolarInstanceId.value) return null;
+  return trainingInstances.value.find((i: any) => i.models?.[0]?.id === cfacSolarInstanceId.value);
 });
 
 // Compute penalty ratio from alpha for demand calibration
@@ -539,18 +578,23 @@ function saveSettings() {
     weatherDataDir: weatherDataDir.value,
     demandOutputDir: demandOutputDir.value,
     cfacOutputDir: cfacOutputDir.value,
-    enableDemand: enableDemand.value,
+    // Manual tab forecast type toggles
+    enableDemandRegional: enableDemandRegional.value,
+    enableDemandZonal: enableDemandZonal.value,
     enableCfac: enableCfac.value,
-    // enableZonal removed - now derived from globalConfig.demand.geography
-    scalingPercent: scalingPercent.value,
-    cfacModel: cfacModel.value,
-    demandModel: demandModel.value,
+    // Per-type modes and instances
+    demandRegionalMode: demandRegionalMode.value,
+    demandZonalMode: demandZonalMode.value,
+    cfacMode: cfacMode.value,
+    demandRegionalInstanceId: demandRegionalInstanceId.value,
+    demandZonalInstanceId: demandZonalInstanceId.value,
+    // Per-type model names
+    demandRegionalModelName: demandRegionalModelName.value,
+    demandZonalModelName: demandZonalModelName.value,
+    cfacModelName: cfacModelName.value,
+    // Options
     pushToGateway: pushToGateway.value,
-    // Removed: Old calibration settings - now using unified Training Instances
-    // calibrationMode: calibrationMode.value,
-    // selectedCalibrator: selectedCalibrator.value,
-    // saveCalibrator: saveCalibrator.value,
-    selectedTrainingInstanceId: selectedTrainingInstanceId.value, // Manual tab selection
+    refreshWeather: refreshWeather.value,
     // Output naming
     demandPrefix: demandPrefix.value,
     demandZonalPrefix: demandZonalPrefix.value,
@@ -597,21 +641,20 @@ function saveSettings() {
     schedulerRefreshWeather: schedulerRefreshWeather.value,
     schedulerOverwrite: schedulerOverwrite.value,
     schedulerSuffix: schedulerSuffix.value,
-    // Manual forecast advanced options
-    scalingWind: scalingWind.value,
-    scalingSolar: scalingSolar.value,
-    usePerTypeScaling: usePerTypeScaling.value,
-    demandGrowthRate: demandGrowthRate.value,
-    trainingEndDate: trainingEndDate.value,
-    // Demand calibration settings
+    // Demand calibration settings (used in Settings tab)
     demandCalibrationMode: demandCalibrationMode.value,
     quantileAlpha: quantileAlpha.value,
   });
 }
 
 // Watch for settings changes and persist them
-// Removed: calibrationMode, selectedCalibrator, saveCalibrator, schedulerCalibrationMode, schedulerDailyEnabled, schedulerWeeklyEnabled, schedulerDemandEnabled, schedulerCfacEnabled, schedulerCalibrationPeriod, schedulerVerboseOutput - now using unified Training Instances
-watch([dataSource, databasePath, demandDataDir, cfacDataDir, weatherDataDir, demandOutputDir, cfacOutputDir, enableDemand, enableCfac, enableZonal, scalingPercent, scalingWind, scalingSolar, usePerTypeScaling, cfacModel, demandModel, pushToGateway, demandGrowthRate, trainingEndDate, demandPrefix, demandZonalPrefix, cfacPrefix, outputSuffix, useCustomName, customDemandName, customCfacName, activeTab, schedulerDemandGeography, schedulerOutputDir, schedulerDemandModel, schedulerCalibDays, schedulerCalibThreshold, schedulerMaxIterations, schedulerRefreshWeather, schedulerOverwrite, schedulerSuffix, globalRegionalDemandDb, globalZonalDemandDb, globalSchedulerDb, globalDemandCsvPath, globalCfacCsvPath, globalWeatherCacheDir, globalSchedulerOutputDir, autoImportBeforeRun, autoFetchWeather, activeTrainingInstanceId], () => {
+watch([dataSource, databasePath, demandDataDir, cfacDataDir, weatherDataDir, demandOutputDir, cfacOutputDir,
+  enableDemandRegional, enableDemandZonal, enableCfac,
+  demandRegionalMode, demandZonalMode, cfacMode,
+  demandRegionalInstanceId, demandZonalInstanceId,
+  demandRegionalModelName, demandZonalModelName, cfacModelName,
+  pushToGateway, refreshWeather,
+  demandPrefix, demandZonalPrefix, cfacPrefix, outputSuffix, useCustomName, customDemandName, customCfacName, activeTab, schedulerDemandGeography, schedulerOutputDir, schedulerDemandModel, schedulerCalibDays, schedulerCalibThreshold, schedulerMaxIterations, schedulerRefreshWeather, schedulerOverwrite, schedulerSuffix, globalRegionalDemandDb, globalZonalDemandDb, globalSchedulerDb, globalDemandCsvPath, globalCfacCsvPath, globalWeatherCacheDir, globalSchedulerOutputDir, autoImportBeforeRun, autoFetchWeather, activeTrainingInstanceId], () => {
   saveSettings();
 });
 
@@ -644,21 +687,24 @@ onMounted(async () => {
     if (settings.weatherDataDir) weatherDataDir.value = settings.weatherDataDir;
     if (settings.demandOutputDir) demandOutputDir.value = settings.demandOutputDir;
     if (settings.cfacOutputDir) cfacOutputDir.value = settings.cfacOutputDir;
-    if (typeof settings.enableDemand === 'boolean') enableDemand.value = settings.enableDemand;
+    // Manual tab forecast type toggles
+    if (typeof settings.enableDemandRegional === 'boolean') enableDemandRegional.value = settings.enableDemandRegional;
+    if (typeof settings.enableDemandZonal === 'boolean') enableDemandZonal.value = settings.enableDemandZonal;
     if (typeof settings.enableCfac === 'boolean') enableCfac.value = settings.enableCfac;
-    // enableZonal removed - now derived from globalConfig.demand.geography
+    // Per-type modes
+    if (settings.demandRegionalMode === 'train' || settings.demandRegionalMode === 'inference') demandRegionalMode.value = settings.demandRegionalMode;
+    if (settings.demandZonalMode === 'train' || settings.demandZonalMode === 'inference') demandZonalMode.value = settings.demandZonalMode;
+    if (settings.cfacMode === 'train') cfacMode.value = settings.cfacMode;
+    // Per-type selected instances
+    if (typeof settings.demandRegionalInstanceId === 'number') demandRegionalInstanceId.value = settings.demandRegionalInstanceId;
+    if (typeof settings.demandZonalInstanceId === 'number') demandZonalInstanceId.value = settings.demandZonalInstanceId;
+    // Per-type model names
+    if (settings.demandRegionalModelName) demandRegionalModelName.value = settings.demandRegionalModelName;
+    if (settings.demandZonalModelName) demandZonalModelName.value = settings.demandZonalModelName;
+    if (settings.cfacModelName) cfacModelName.value = settings.cfacModelName;
+    // Options
     if (typeof settings.pushToGateway === 'boolean') pushToGateway.value = settings.pushToGateway;
-    if (typeof settings.scalingPercent === 'number') scalingPercent.value = settings.scalingPercent;
-    if (settings.cfacModel === 'hybrid' || settings.cfacModel === 'hybrid-lstm' || settings.cfacModel === 'legacy') cfacModel.value = settings.cfacModel;
-    // Migration: convert old 'lstm' setting to 'hybrid'
-    if (settings.cfacModel === 'lstm') cfacModel.value = 'hybrid';
-    if (settings.demandModel === 'hybrid' || settings.demandModel === 'hybrid-calibrated') demandModel.value = settings.demandModel;
-    // Removed: Old calibration settings - now using unified Training Instances
-    // if (settings.calibrationMode) calibrationMode.value = settings.calibrationMode;
-    // if (settings.selectedCalibrator) selectedCalibrator.value = settings.selectedCalibrator;
-    // if (settings.saveCalibrator !== undefined) saveCalibrator.value = settings.saveCalibrator;
-    // New: unified Training Instance selection
-    if (settings.selectedTrainingInstanceId) selectedTrainingInstanceId.value = settings.selectedTrainingInstanceId;
+    if (typeof settings.refreshWeather === 'boolean') refreshWeather.value = settings.refreshWeather;
     // Output naming
     if (settings.demandPrefix) demandPrefix.value = settings.demandPrefix;
     if (settings.demandZonalPrefix) demandZonalPrefix.value = settings.demandZonalPrefix;
@@ -725,12 +771,6 @@ onMounted(async () => {
     if (typeof settings.schedulerRefreshWeather === 'boolean') schedulerRefreshWeather.value = settings.schedulerRefreshWeather;
     if (typeof settings.schedulerOverwrite === 'boolean') schedulerOverwrite.value = settings.schedulerOverwrite;
     if (settings.schedulerSuffix !== undefined) schedulerSuffix.value = settings.schedulerSuffix;
-    // Manual forecast advanced options
-    if (typeof settings.scalingWind === 'number') scalingWind.value = settings.scalingWind;
-    if (typeof settings.scalingSolar === 'number') scalingSolar.value = settings.scalingSolar;
-    if (typeof settings.usePerTypeScaling === 'boolean') usePerTypeScaling.value = settings.usePerTypeScaling;
-    if (typeof settings.demandGrowthRate === 'number') demandGrowthRate.value = settings.demandGrowthRate;
-    if (settings.trainingEndDate) trainingEndDate.value = settings.trainingEndDate;
     // Demand calibration settings
     if (settings.demandCalibrationMode) demandCalibrationMode.value = settings.demandCalibrationMode;
     if (typeof settings.quantileAlpha === 'number') quantileAlpha.value = settings.quantileAlpha;
@@ -952,13 +992,38 @@ function parseSchedulerOutput(text: string, isError: boolean) {
 
 // Validation
 const canRunForecast = computed(() => {
-  if (!enableDemand.value && !enableCfac.value) return false;
+  const anyEnabled = enableDemandRegional.value || enableDemandZonal.value || enableCfac.value;
+  if (!anyEnabled) return false;
   if (!forecastStart.value || !forecastEnd.value) return false;
-  if (dataSource.value === 'database' && !databasePath.value) return false;
+
+  // For train mode with CSV source, training dates required
+  const needsTrainingDates =
+    (enableDemandRegional.value && demandRegionalMode.value === 'train') ||
+    (enableDemandZonal.value && demandZonalMode.value === 'train') ||
+    (enableCfac.value && cfacMode.value === 'train');
+
+  if (needsTrainingDates && dataSource.value === 'csv') {
+    if (!trainingStart.value || !trainingEnd.value) return false;
+  }
+
+  // For inference mode, instance selection required
+  if (enableDemandRegional.value && demandRegionalMode.value === 'inference') {
+    if (!demandRegionalInstanceId.value) return false;
+  }
+  if (enableDemandZonal.value && demandZonalMode.value === 'inference') {
+    if (!demandZonalInstanceId.value) return false;
+  }
+  // CFAC inference mode requires at least one model (wind or solar)
+  if (enableCfac.value && cfacMode.value === 'inference') {
+    if (!cfacWindInstanceId.value && !cfacSolarInstanceId.value) return false;
+  }
+
+  // Data source validation
   if (dataSource.value === 'csv') {
-    if (enableDemand.value && !demandDataDir.value) return false;
+    if ((enableDemandRegional.value || enableDemandZonal.value) && !demandDataDir.value) return false;
     if (enableCfac.value && !cfacDataDir.value) return false;
   }
+
   return true;
 });
 
@@ -1389,200 +1454,186 @@ async function runForecast() {
   currentStatus.value = 'Starting...';
   statusHistory.value = [];
 
-  // Manual forecast always generates both regional and zonal demand (2 steps for demand)
-  const demandSteps = enableDemand.value ? 2 : 0;
-  const totalSteps = demandSteps + (enableCfac.value ? 1 : 0);
+  // Calculate total steps based on enabled forecast types
+  const regionalStep = enableDemandRegional.value ? 1 : 0;
+  const zonalStep = enableDemandZonal.value ? 1 : 0;
+  const cfacStep = enableCfac.value ? 1 : 0;
+  const totalSteps = regionalStep + zonalStep + cfacStep;
   let completedSteps = 0;
 
   try {
-    // Run Demand forecasts - BOTH regional and zonal
-    if (enableDemand.value) {
-      // Show calibration status at the start
-      const calibEnabled = demandModel.value === 'hybrid-calibrated';
-      if (calibEnabled) {
-        addStatus('Calibration: ENABLED (XGBoost correction layer will be trained)');
-      } else {
-        addStatus('Calibration: DISABLED (using Hybrid model only)');
+    // Helper function to run a single demand forecast
+    const runDemandForecast = async (isZonal: boolean, mode: 'train' | 'inference', instanceId: number | null, modelNameStr: string) => {
+      const geoLabel = isZonal ? 'Zonal (14 zones)' : 'Regional (3 regions)';
+      const modeLabel = mode === 'train' ? 'Train New' : 'Use Saved Instance';
+      addStatus(`Starting ${geoLabel} Demand Forecast (${modeLabel})...`);
+
+      const demandFilename = generateOutputFilename('demand', isZonal);
+      const dbPath = isZonal ? globalZonalDemandDb.value : globalRegionalDemandDb.value;
+
+      const demandArgs = [
+        'forecast',
+        '-d', dataSource.value === 'database' ? dbPath : demandDataDir.value,
+        '-s', forecastStart.value,
+        '-e', forecastEnd.value,
+        '-o', `${demandOutputDir.value}/${demandFilename}`,
+        '--model', 'hybrid',
+      ];
+
+      // Add database flag if using database mode
+      if (dataSource.value === 'database') {
+        demandArgs.push('--use-db');
       }
 
-      // Helper function to run a single demand forecast
-      const runSingleDemandForecast = async (isZonal: boolean) => {
-        const mode = isZonal ? 'Zonal (14 zones)' : 'Regional (3 regions)';
-        const calibStatus = calibEnabled ? ' with XGBoost calibration' : '';
-        addStatus(`Starting ${mode} Demand Forecast${calibStatus}...`);
+      // Add zonal flag for zonal forecasts
+      if (isZonal) {
+        demandArgs.push('--zonal');
+      }
 
-        const demandFilename = generateOutputFilename('demand', isZonal);
-
-        // Select appropriate database path
-        const dbPath = isZonal ? globalZonalDemandDb.value : globalRegionalDemandDb.value;
-
-        const demandArgs = [
-          'forecast',
-          '-d', dataSource.value === 'database' ? dbPath : demandDataDir.value,
-          '-s', forecastStart.value,
-          '-e', forecastEnd.value,
-          '-o', `${demandOutputDir.value}/${demandFilename}`,
-          '--model', 'hybrid',
-        ];
-
-        // Add database flag if using database mode
-        if (dataSource.value === 'database') {
-          demandArgs.push('--use-db');
-        }
-
-        // Add zonal flag for zonal forecasts
-        if (isZonal) {
-          demandArgs.push('--zonal');
-        }
-
-        // Training dates: only when NOT using a saved Training Instance
-        if (!selectedTrainingInstanceId.value && dataSource.value === 'csv' && trainingStart.value && trainingEnd.value) {
+      if (mode === 'inference' && instanceId) {
+        // Inference mode - use saved instance
+        demandArgs.push('--use-model', String(instanceId));
+      } else {
+        // Train mode
+        if (dataSource.value === 'csv' && trainingStart.value && trainingEnd.value) {
           demandArgs.push('--training-start', trainingStart.value);
           demandArgs.push('--training-end', trainingEnd.value);
         }
-
-        // When using a saved Training Instance, the calibration is included automatically
-        if (!calibEnabled) {
-          demandArgs.push('--no-calibrate');
-        }
-
-        // Add gateway push flag if enabled
-        if (pushToGateway.value) {
-          demandArgs.push('--push');
-        }
-
-        // Always save model to model store with full metrics
+        // Save model when training
         demandArgs.push('--save-model');
-
-        // Add model name if provided (appends -regional or -zonal suffix automatically)
-        if (modelName.value && modelName.value.trim()) {
-          const suffix = isZonal ? '-zonal' : '-regional';
-          demandArgs.push('--model-name', `${modelName.value.trim()}${suffix}`);
+        if (modelNameStr && modelNameStr.trim()) {
+          demandArgs.push('--model-name', modelNameStr.trim());
         }
+      }
 
-        // Add zone/region scaling from config
-        if (isZonal && globalConfig.value?.demand?.scaling?.zones) {
-          const zoneScales = Object.entries(globalConfig.value.demand.scaling.zones as Record<string, number>)
-            .filter(([_, scale]) => scale !== 0)
-            .map(([zone, scale]) => `${zone}:${scale}`)
-            .join(',');
-          if (zoneScales) {
-            demandArgs.push('--scale-zone', zoneScales);
-          }
+      // Add gateway push flag if enabled
+      if (pushToGateway.value) {
+        demandArgs.push('--push');
+      }
+
+      // Add growth rate from config if non-zero
+      const growthRate = globalConfig.value?.demand?.growthRate || 0;
+      if (growthRate !== 0) {
+        demandArgs.push('--growth', String(growthRate));
+      }
+
+      // Add zone/region scaling from config
+      if (isZonal && globalConfig.value?.demand?.scaling?.zones) {
+        const zoneScales = Object.entries(globalConfig.value.demand.scaling.zones as Record<string, number>)
+          .filter(([_, scale]) => scale !== 0)
+          .map(([zone, scale]) => `${zone}:${scale}`)
+          .join(',');
+        if (zoneScales) {
+          demandArgs.push('--scale-zone', zoneScales);
         }
-        if (!isZonal && globalConfig.value?.demand?.scaling?.regions) {
-          const regionScales = Object.entries(globalConfig.value.demand.scaling.regions as Record<string, number>)
-            .filter(([_, scale]) => scale !== 0)
-            .map(([region, scale]) => `${region}:${scale}`)
-            .join(',');
-          if (regionScales) {
-            demandArgs.push('--scale-region', regionScales);
-          }
+      }
+      if (!isZonal && globalConfig.value?.demand?.scaling?.regions) {
+        const regionScales = Object.entries(globalConfig.value.demand.scaling.regions as Record<string, number>)
+          .filter(([_, scale]) => scale !== 0)
+          .map(([region, scale]) => `${region}:${scale}`)
+          .join(',');
+        if (regionScales) {
+          demandArgs.push('--scale-region', regionScales);
         }
+      }
 
-        const demandResult = await window.electronAPI.runCommand(demandArgs);
-        completedSteps++;
-        progress.value = (completedSteps / totalSteps) * 90;
+      const demandResult = await window.electronAPI.runCommand(demandArgs);
+      completedSteps++;
+      progress.value = (completedSteps / totalSteps) * 90;
 
-        if (demandResult.code === 0) {
-          addStatus(`${mode} demand forecast completed successfully`, 'success');
-          return true;
-        } else {
-          const errorLines = demandResult.stderr?.split('\n').filter((l: string) => l.trim()).slice(-3) || [];
-          const errorMsg = errorLines.join(' ').substring(0, 200) || demandResult.error || 'Unknown error';
-          addStatus(`${mode} demand forecast failed: ${errorMsg}`, 'error');
-          hasError.value = true;
-          return false;
-        }
-      };
+      if (demandResult.code === 0) {
+        addStatus(`${geoLabel} demand forecast completed successfully`, 'success');
+        return true;
+      } else {
+        const errorLines = demandResult.stderr?.split('\n').filter((l: string) => l.trim()).slice(-3) || [];
+        const errorMsg = errorLines.join(' ').substring(0, 200) || demandResult.error || 'Unknown error';
+        addStatus(`${geoLabel} demand forecast failed: ${errorMsg}`, 'error');
+        hasError.value = true;
+        return false;
+      }
+    };
 
-      // Run Regional forecast first
-      progress.value = 5;
-      await runSingleDemandForecast(false);
+    progress.value = 5;
 
-      // Run Zonal forecast second
-      await runSingleDemandForecast(true);
+    // Run Demand Regional forecast
+    if (enableDemandRegional.value) {
+      await runDemandForecast(false, demandRegionalMode.value, demandRegionalInstanceId.value, demandRegionalModelName.value);
     }
 
-    // Run CFAC forecast
+    // Run Demand Zonal forecast
+    if (enableDemandZonal.value) {
+      await runDemandForecast(true, demandZonalMode.value, demandZonalInstanceId.value, demandZonalModelName.value);
+    }
+
+    // Run CFAC forecast (train mode only for now)
     if (enableCfac.value) {
-      const modelName = cfacModel.value === 'hybrid'
-        ? 'Hybrid (Physics + ML)'
-        : cfacModel.value === 'hybrid-lstm'
-        ? 'Hybrid + LSTM Correction'
-        : 'Legacy XGBoost';
-      addStatus(`Starting Capacity Factor Forecast (${modelName})...`);
-      if (!enableDemand.value) progress.value = 5;
+      const cfacInferenceMode = cfacMode.value === 'inference';
+      addStatus(cfacInferenceMode
+        ? 'Starting Capacity Factor Forecast (Inference - Frozen Models)...'
+        : 'Starting Capacity Factor Forecast (Hybrid Physics + ML)...');
 
       const cfacFilename = generateOutputFilename('cfac');
-      let cfacArgs: string[];
+      const cfacArgs = [
+        'cfac', 'forecast2',
+        '-t', dataSource.value === 'database' ? globalCfacCsvPath.value : cfacDataDir.value,
+        '-s', forecastStart.value,
+        '-e', forecastEnd.value,
+        '-o', `${cfacOutputDir.value}/${cfacFilename}`,
+      ];
 
-      let cfacResult;
-
-      if (cfacModel.value === 'hybrid' || cfacModel.value === 'hybrid-lstm') {
-        // Hybrid model - physics + ML correction, best accuracy
-        cfacArgs = [
-          'cfac', 'forecast2',
-          '-t', cfacDataDir.value,
-          '-s', forecastStart.value,
-          '-e', forecastEnd.value,
-          '-o', `${cfacOutputDir.value}/${cfacFilename}`,
-        ];
-
-        // Add database mode flag if using database
-        if (dataSource.value === 'database') {
-          cfacArgs.push('--use-db', '--db', databasePath.value);
+      // INFERENCE MODE: Pass saved model IDs
+      if (cfacInferenceMode) {
+        if (cfacWindInstanceId.value) {
+          cfacArgs.push('--use-wind-model', String(cfacWindInstanceId.value));
         }
-
-        // Add LSTM correction flag if selected
-        if (cfacModel.value === 'hybrid-lstm') {
-          cfacArgs.push('--lstm-correction');
+        if (cfacSolarInstanceId.value) {
+          cfacArgs.push('--use-solar-model', String(cfacSolarInstanceId.value));
         }
-
-        if (trainingEnd.value) {
-          cfacArgs.push('--training-end', trainingEnd.value);
-        }
-
-        // Add gateway push flag if enabled
-        if (pushToGateway.value) {
-          cfacArgs.push('--push');
-        }
-
-        cfacResult = await window.electronAPI.runCommand(cfacArgs);
       } else {
-        // Legacy model - use cfac forecast2 (model options read from forecast_config.json)
-        cfacArgs = [
-          'cfac', 'forecast2',
-          '-t', cfacDataDir.value,
-          '-s', forecastStart.value,
-          '-e', forecastEnd.value,
-          '-o', `${cfacOutputDir.value}/${cfacFilename}`,
-          // Note: --use-xgboost, --asymmetric-loss, --bias-correction removed - read from forecast_config.json
-        ];
-
-        // Add database mode flag if using database
+        // TRAINING MODE: Add database mode flag if using database
         if (dataSource.value === 'database') {
           cfacArgs.push('--use-db', '--db', databasePath.value);
         }
 
-        if (trainingEnd.value) {
+        // Training end date if using CSV mode
+        if (dataSource.value === 'csv' && trainingEnd.value) {
           cfacArgs.push('--training-end', trainingEnd.value);
         }
 
-        // Add gateway push flag if enabled
-        if (pushToGateway.value) {
-          cfacArgs.push('--push');
+        // Save model when training
+        cfacArgs.push('--save-model');
+        if (cfacModelName.value && cfacModelName.value.trim()) {
+          cfacArgs.push('--model-name', cfacModelName.value.trim());
         }
-
-        cfacResult = await window.electronAPI.runCommand(cfacArgs);
       }
+
+      // Add gateway push flag if enabled
+      if (pushToGateway.value) {
+        cfacArgs.push('--push');
+      }
+
+      // Add refresh weather flag if enabled (useful for both modes)
+      if (refreshWeather.value) {
+        cfacArgs.push('--refresh-weather');
+      }
+
+      // Add CFAC scaling from config if not 100%
+      const windScale = globalConfig.value?.cfac?.scaleWind ?? 100;
+      const solarScale = globalConfig.value?.cfac?.scaleSolar ?? 100;
+      if (windScale !== 100) {
+        cfacArgs.push('--scale-wind', String(windScale / 100));
+      }
+      if (solarScale !== 100) {
+        cfacArgs.push('--scale-solar', String(solarScale / 100));
+      }
+
+      const cfacResult = await window.electronAPI.runCommand(cfacArgs);
       completedSteps++;
       progress.value = (completedSteps / totalSteps) * 90;
 
       if (cfacResult.code === 0) {
-        addStatus(`Capacity Factor forecast (${modelName}) completed successfully`, 'success');
+        addStatus('Capacity Factor forecast completed successfully', 'success');
       } else {
-        // Extract meaningful error from stderr
         const errorLines = cfacResult.stderr?.split('\n').filter((l: string) => l.trim()).slice(-3) || [];
         const errorMsg = errorLines.join(' ').substring(0, 200) || cfacResult.error || 'Unknown error';
         addStatus(`CFAC forecast failed: ${errorMsg}`, 'error');
@@ -1592,6 +1643,9 @@ async function runForecast() {
 
     progress.value = 100;
     isComplete.value = true;
+
+    // Refresh training instances after run (may have created new ones)
+    await loadTrainingInstances();
 
     if (hasError.value) {
       addStatus('Forecast completed with errors', 'error');
@@ -1863,7 +1917,7 @@ async function loadTrainingInstances() {
   try {
     const instances = await window.electronAPI.getTrainingInstances();
     // Filter to only completed instances
-    trainingInstances.value = instances.filter((i: any) => i.status === 'completed');
+    trainingInstances.value = instances;
   } catch (error: any) {
     console.error('Failed to load training instances:', error);
     trainingInstances.value = [];
@@ -2585,17 +2639,8 @@ async function runSchedulerManual() {
       useCalibrationId = activeTrainingInstance.value.cfacCalibrationId || null;
 
       // Extract demand model ID for inference-only mode (no training)
-      // Priority: zonal > regional (if both exist, use zonal for more granular forecast)
-      const zonalModels = activeTrainingInstance.value.demandZonalSummary;
-      const regionalModels = activeTrainingInstance.value.demandRegionalSummary;
-
-      if (zonalModels && zonalModels.length > 0) {
-        // Use first zonal model ID (all models in same instance share training session)
-        useModelId = zonalModels[0].modelId;
-      } else if (regionalModels && regionalModels.length > 0) {
-        // Fallback to regional model if no zonal models exist
-        useModelId = regionalModels[0].modelId;
-      }
+      // The instance ID is the model ID
+      useModelId = activeTrainingInstance.value.id;
     }
     // Note: Train Fresh option removed - scheduler now requires a saved training instance
 
@@ -2806,235 +2851,238 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
           <button @click="clearFormatMessage" class="format-close">&times;</button>
         </div>
 
-        <!-- NOTE: Training model selection moved to Training Settings card in Row 2 -->
-
         <!-- Row Layout for Manual Tab -->
         <div class="manual-layout">
-          <!-- Row 1: Data Source Info (read-only, configured in Settings) -->
+          <!-- A) Data Source - Compact inline badge -->
+          <div class="data-source-inline">
+            <span class="data-source-label">Source:</span>
+            <span class="data-source-badge">{{ dataSource === 'database' ? 'Database' : 'CSV' }}</span>
+            <span v-if="dataSource === 'database' && databaseInfo" class="data-source-info">
+              ({{ databaseInfo.demand?.records?.toLocaleString() || 0 }} records)
+            </span>
+            <button @click="activeTab = 'settings'" class="btn btn-text btn-xs">Change → Settings</button>
+          </div>
+
+          <!-- B) Forecast Types - Three independent toggles -->
           <section class="card card-full-row">
-            <div class="card-header-inline">
-              <h2>Data Source</h2>
-              <span class="data-source-badge">{{ dataSource === 'database' ? 'Database' : 'CSV' }}</span>
-              <button @click="activeTab = 'settings'" class="btn btn-text btn-xs">Change</button>
-            </div>
-            <div class="data-source-info-compact">
-              <div v-if="dataSource === 'database'" class="db-stats-row">
-                <span class="db-label">{{ schedulerDemandGeography === 'zonal' ? 'Zonal' : 'Regional' }} DB:</span>
-                <span class="db-stat" v-if="databaseInfo">{{ databaseInfo.demand?.records?.toLocaleString() || 0 }} records</span>
-                <span class="db-stat hint" v-else>Loading...</span>
-              </div>
-              <span class="hint">Output: {{ globalSchedulerOutputDir || 'output/' }}</span>
+            <h2>Forecast Types</h2>
+            <div class="forecast-types-row">
+              <label class="toggle-box" :class="{ active: enableDemandRegional }">
+                <input type="checkbox" v-model="enableDemandRegional" :disabled="isRunning" />
+                <span class="toggle-box-label">Demand (Regional)</span>
+                <span class="toggle-box-hint">3 regions: CLUZ, CVIS, CMIN</span>
+              </label>
+              <label class="toggle-box" :class="{ active: enableDemandZonal }">
+                <input type="checkbox" v-model="enableDemandZonal" :disabled="isRunning" />
+                <span class="toggle-box-label">Demand (Zonal)</span>
+                <span class="toggle-box-hint">14 sub-regions</span>
+              </label>
+              <label class="toggle-box" :class="{ active: enableCfac }">
+                <input type="checkbox" v-model="enableCfac" :disabled="isRunning" />
+                <span class="toggle-box-label">CFAC (Wind and Solar)</span>
+                <span class="toggle-box-hint">All station types</span>
+              </label>
             </div>
           </section>
 
-          <!-- Row 2: 3-Column Grid -->
-          <div class="cards-grid-3">
-            <!-- Column 1: Output Naming Card (Read-Only Reference) -->
-            <section class="card card-compact">
-              <div class="card-header-inline">
-                <h2>Output Naming</h2>
-                <button @click="activeTab = 'settings'" class="btn btn-text btn-xs">Configure</button>
+          <!-- C) Forecast Period - Always visible -->
+          <section class="card card-full-row">
+            <h2>Forecast Period</h2>
+            <div class="forecast-period-row">
+              <div class="form-group compact">
+                <label>Start</label>
+                <input type="date" v-model="forecastStart" :disabled="isRunning" />
               </div>
-              <div class="output-preview">
-                <span v-if="enableDemand" class="preview-tag" title="Regional (3 regions)">{{ demandFilenamePreview }}</span>
-                <span v-if="enableDemand" class="preview-tag zonal-tag" title="Zonal (14 zones)">{{ demandZonalFilenamePreview }}</span>
-                <span v-if="enableCfac" class="preview-tag">{{ cfacFilenamePreview }}</span>
+              <div class="form-group compact">
+                <label>End</label>
+                <input type="date" v-model="forecastEnd" :disabled="isRunning" />
               </div>
-              <p class="hint" style="margin-top: 8px;">
-                Mode: {{ useCustomName ? 'Custom' : 'Prefix' }}
-                <br />
-                Configure naming patterns in Settings tab.
-              </p>
-            </section>
+            </div>
+          </section>
 
-            <!-- Column 2: Training Settings -->
-            <section class="card card-compact training-settings-card">
-              <div class="card-header-inline">
-                <h2>Training Settings</h2>
-                <button @click="loadTrainingInstances" class="btn btn-text btn-xs" :disabled="isRunning">↻</button>
-              </div>
-
-              <!-- Model Selection Listbox -->
-              <div class="model-listbox-container">
-                <div
-                  class="model-listbox-item"
-                  :class="{ 'selected': !selectedTrainingInstanceId }"
-                  @click="selectedTrainingInstanceId = null"
-                >
-                  <span class="model-name">Train Fresh</span>
-                  <span class="model-hint">Configure dates below</span>
-                </div>
-                <div
-                  v-for="instance in trainingInstances"
-                  :key="instance.id"
-                  class="model-listbox-item"
-                  :class="{ 'selected': selectedTrainingInstanceId === instance.id }"
-                  @click="selectedTrainingInstanceId = instance.id"
-                >
-                  <span class="model-name">{{ instance.templateName || 'Training Run' }}</span>
-                  <span class="model-date">{{ formatInstanceDate(instance.startedAt) }}</span>
-                  <span class="model-metrics">
-                    {{ instance.demandRegionalMape?.toFixed(1) || 'N/A' }}% MAPE
-                  </span>
-                </div>
-                <div v-if="trainingInstances.length === 0" class="model-listbox-empty">
-                  No saved models yet
-                </div>
+          <!-- D) Per-Type Configuration Cards -->
+          <div class="per-type-cards">
+            <!-- Demand Regional Card -->
+            <section v-if="enableDemandRegional" class="card card-compact">
+              <h2>Demand (Regional)</h2>
+              <div class="mode-selector">
+                <label class="radio-label">
+                  <input type="radio" v-model="demandRegionalMode" value="train" :disabled="isRunning" />
+                  <span>Train New</span>
+                </label>
+                <label class="radio-label">
+                  <input type="radio" v-model="demandRegionalMode" value="inference" :disabled="isRunning" />
+                  <span>Use Saved Instance</span>
+                </label>
               </div>
 
-              <!-- Training Period (only when Train Fresh) -->
-              <div v-if="!selectedTrainingInstanceId" class="training-dates-section">
-                <p class="hint" style="margin: 8px 0 4px; font-size: 10px;">Training data range:</p>
+              <!-- Train New fields -->
+              <div v-if="demandRegionalMode === 'train'" class="mode-fields">
                 <div class="date-row">
                   <div class="form-group compact">
-                    <label>Start</label>
+                    <label>Training Start</label>
                     <input type="date" v-model="trainingStart" :disabled="isRunning" />
                   </div>
                   <div class="form-group compact">
-                    <label>End</label>
+                    <label>Training End</label>
                     <input type="date" v-model="trainingEnd" :disabled="isRunning" />
                   </div>
                 </div>
-                <!-- Model Name for saved model -->
-                <div class="form-group compact" style="margin-top: 8px;">
+                <div class="form-group compact">
                   <label>Model Name <span class="optional">(optional)</span></label>
-                  <input type="text" v-model="modelName" :disabled="isRunning" placeholder="e.g., Dec2025-Test" style="width: 100%;" />
+                  <input type="text" v-model="demandRegionalModelName" :disabled="isRunning" placeholder="e.g., March2026-Regional" />
                 </div>
               </div>
 
-              <!-- Selected Instance Info (when saved model selected) -->
-              <div v-else-if="selectedTrainingInstance" class="selected-model-info">
-                <p class="hint" style="font-size: 10px;">
-                  Period: {{ selectedTrainingInstance.dateRangeStart }} → {{ selectedTrainingInstance.dateRangeEnd }}
-                </p>
-                <p v-if="selectedTrainingInstance.cfacCalibrationId" class="hint" style="font-size: 10px;">
-                  ✓ CFAC Calibration included
-                </p>
+              <!-- Use Saved Instance fields -->
+              <div v-else class="mode-fields">
+                <select v-model="demandRegionalInstanceId" :disabled="isRunning" class="instance-select">
+                  <option :value="null">-- Select Instance --</option>
+                  <option v-for="instance in regionalInstances" :key="instance.id" :value="instance.models[0]?.id">
+                    {{ instance.name || 'Regional Model' }} - {{ formatInstanceDate(instance.trainedAt) }} ({{ instance.avgMape?.toFixed(1) || 'N/A' }}% MAPE)
+                  </option>
+                </select>
+                <div v-if="selectedRegionalInstance" class="selected-instance-info">
+                  <span class="instance-period">Training: {{ selectedRegionalInstance.dateRangeStart }} → {{ selectedRegionalInstance.dateRangeEnd }}</span>
+                </div>
+                <p v-if="regionalInstances.length === 0" class="hint">No saved regional models. Train one first.</p>
               </div>
             </section>
 
-            <!-- Column 3: Forecast Options Card (includes Period) -->
-            <section class="card card-compact">
-              <h2>Forecast Options</h2>
-              <!-- Forecast Period -->
-              <div class="forecast-period-row">
-                <div class="form-group compact">
-                  <label>Start</label>
-                  <input type="date" v-model="forecastStart" :disabled="isRunning" />
+            <!-- Demand Zonal Card -->
+            <section v-if="enableDemandZonal" class="card card-compact">
+              <h2>Demand (Zonal)</h2>
+              <div class="mode-selector">
+                <label class="radio-label">
+                  <input type="radio" v-model="demandZonalMode" value="train" :disabled="isRunning" />
+                  <span>Train New</span>
+                </label>
+                <label class="radio-label">
+                  <input type="radio" v-model="demandZonalMode" value="inference" :disabled="isRunning" />
+                  <span>Use Saved Instance</span>
+                </label>
+              </div>
+
+              <!-- Train New fields -->
+              <div v-if="demandZonalMode === 'train'" class="mode-fields">
+                <div class="date-row">
+                  <div class="form-group compact">
+                    <label>Training Start</label>
+                    <input type="date" v-model="trainingStart" :disabled="isRunning" />
+                  </div>
+                  <div class="form-group compact">
+                    <label>Training End</label>
+                    <input type="date" v-model="trainingEnd" :disabled="isRunning" />
+                  </div>
                 </div>
                 <div class="form-group compact">
-                  <label>End</label>
-                  <input type="date" v-model="forecastEnd" :disabled="isRunning" />
+                  <label>Model Name <span class="optional">(optional)</span></label>
+                  <input type="text" v-model="demandZonalModelName" :disabled="isRunning" placeholder="e.g., March2026-Zonal" />
                 </div>
               </div>
-              <!-- Toggles -->
-              <div class="options-grid-2x2">
-                <div class="toggle-group">
-                  <label class="toggle">
-                    <input type="checkbox" v-model="enableDemand" :disabled="isRunning" />
-                    <span class="toggle-slider"></span>
-                    <span class="toggle-label">Demand</span>
-                  </label>
-                  <select v-if="enableDemand" v-model="demandModel" :disabled="isRunning" class="model-dropdown-sm"
-                    :title="demandModel === 'hybrid-calibrated' ? 'XGBoost calibration layer trained on recent data to correct systematic errors' : 'Hybrid model only (no calibration layer)'">
-                    <option value="hybrid-calibrated">+Calib</option>
-                    <option value="hybrid">Hybrid</option>
+
+              <!-- Use Saved Instance fields -->
+              <div v-else class="mode-fields">
+                <select v-model="demandZonalInstanceId" :disabled="isRunning" class="instance-select">
+                  <option :value="null">-- Select Instance --</option>
+                  <option v-for="instance in zonalInstances" :key="instance.id" :value="instance.models[0]?.id">
+                    {{ instance.name || 'Zonal Model' }} - {{ formatInstanceDate(instance.trainedAt) }} ({{ instance.avgMape?.toFixed(1) || 'N/A' }}% MAPE)
+                  </option>
+                </select>
+                <div v-if="selectedZonalInstance" class="selected-instance-info">
+                  <span class="instance-period">Training: {{ selectedZonalInstance.dateRangeStart }} → {{ selectedZonalInstance.dateRangeEnd }}</span>
+                </div>
+                <p v-if="zonalInstances.length === 0" class="hint">No saved zonal models. Train one first.</p>
+              </div>
+            </section>
+
+            <!-- CFAC Card -->
+            <section v-if="enableCfac" class="card card-compact">
+              <h2>CFAC (Wind and Solar)</h2>
+              <div class="mode-selector">
+                <label class="radio-label">
+                  <input type="radio" v-model="cfacMode" value="train" :disabled="isRunning" />
+                  <span>Train New</span>
+                </label>
+                <label class="radio-label">
+                  <input type="radio" v-model="cfacMode" value="inference" :disabled="isRunning" />
+                  <span>Use Saved Instance</span>
+                </label>
+              </div>
+
+              <!-- Train New fields -->
+              <div v-if="cfacMode === 'train'" class="mode-fields">
+                <div class="date-row">
+                  <div class="form-group compact">
+                    <label>Training Start</label>
+                    <input type="date" v-model="trainingStart" :disabled="isRunning" />
+                  </div>
+                  <div class="form-group compact">
+                    <label>Training End</label>
+                    <input type="date" v-model="trainingEnd" :disabled="isRunning" />
+                  </div>
+                </div>
+                <div class="form-group compact">
+                  <label>Model Name <span class="optional">(optional)</span></label>
+                  <input type="text" v-model="cfacModelName" :disabled="isRunning" placeholder="e.g., March2026-CFAC" />
+                </div>
+                <p class="hint" style="margin-top: 8px; font-size: 11px;">
+                  Trains all station types (wind, solar, hydro, etc.) in a single pass.
+                </p>
+              </div>
+
+              <!-- Use Saved Instance fields -->
+              <div v-else class="mode-fields">
+                <div class="form-group compact">
+                  <label>Wind Model</label>
+                  <select v-model="cfacWindInstanceId" :disabled="isRunning" class="instance-select">
+                    <option :value="null">-- Select Wind Model --</option>
+                    <option v-for="instance in windInstances" :key="instance.id" :value="instance.models[0]?.id">
+                      {{ instance.name || 'Wind Model' }} - {{ formatInstanceDate(instance.trainedAt) }} ({{ instance.avgMape?.toFixed(1) || 'N/A' }}% MAPE)
+                    </option>
                   </select>
-                  <span v-if="enableDemand && demandModel === 'hybrid-calibrated'" class="calib-indicator" title="Calibration enabled: trains XGBoost correction layer">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="calib-icon">
-                      <path d="M12 2L2 7l10 5 10-5-10-5z"/>
-                      <path d="M2 17l10 5 10-5"/>
-                      <path d="M2 12l10 5 10-5"/>
-                    </svg>
-                  </span>
-                </div>
-                <div class="toggle-group">
-                  <label class="toggle">
-                    <input type="checkbox" v-model="enableCfac" :disabled="isRunning" />
-                    <span class="toggle-slider"></span>
-                    <span class="toggle-label">CFAC</span>
-                  </label>
-                  <select v-if="enableCfac" v-model="cfacModel" :disabled="isRunning" class="model-dropdown-sm">
-                    <option value="hybrid">Hybrid</option>
-                    <option value="hybrid-lstm">+LSTM</option>
-                  </select>
-                </div>
-                <!-- Zonal toggle removed - Manual Forecast now always generates both Regional and Zonal -->
-                <div class="toggle-group info-badge" v-if="enableDemand" title="Manual Forecast generates both Regional and Zonal demand files">
-                  <span class="dual-mode-label">Regional + Zonal</span>
-                </div>
-                <div class="scaling-group-compact" v-if="!usePerTypeScaling">
-                  <label>Scale</label>
-                  <div class="scaling-input">
-                    <input type="number" v-model="scalingPercent" min="1" max="200" :disabled="isRunning" />
-                    <span class="percent">%</span>
+                  <div v-if="selectedWindInstance" class="selected-instance-info">
+                    <span class="instance-period">Training: {{ selectedWindInstance.dateRangeStart }} → {{ selectedWindInstance.dateRangeEnd }}</span>
                   </div>
                 </div>
-                <div class="toggle-group gateway-toggle">
-                  <label class="toggle">
-                    <input type="checkbox" v-model="pushToGateway" :disabled="isRunning" />
-                    <span class="toggle-slider gateway"></span>
-                    <span class="toggle-label">Push to Gateway</span>
-                  </label>
-                </div>
-              </div>
-
-              <!-- Advanced Options -->
-              <div class="advanced-options-row">
-                <!-- Per-Type Scaling Toggle -->
-                <div class="toggle-group" v-if="enableCfac">
-                  <label class="toggle">
-                    <input type="checkbox" v-model="usePerTypeScaling" :disabled="isRunning" />
-                    <span class="toggle-slider"></span>
-                    <span class="toggle-label">Per-Type Scaling</span>
-                  </label>
-                </div>
-
-                <!-- Per-Type Scaling Inputs (shown when enabled) -->
-                <template v-if="usePerTypeScaling && enableCfac">
-                  <div class="scaling-group-compact">
-                    <label>Wind</label>
-                    <div class="scaling-input">
-                      <input type="number" v-model="scalingWind" min="1" max="200" :disabled="isRunning" />
-                      <span class="percent">%</span>
-                    </div>
-                  </div>
-                  <div class="scaling-group-compact">
-                    <label>Solar</label>
-                    <div class="scaling-input">
-                      <input type="number" v-model="scalingSolar" min="1" max="200" :disabled="isRunning" />
-                      <span class="percent">%</span>
-                    </div>
-                  </div>
-                </template>
-
-                <!-- Demand Growth Rate -->
-                <div class="form-group compact" v-if="enableDemand">
-                  <label>Growth Rate</label>
-                  <div class="scaling-input">
-                    <input type="number" v-model.number="demandGrowthRate" step="0.001" min="-0.1" max="0.1" :disabled="isRunning" style="width: 70px;" />
-                    <span class="percent" title="Daily growth rate (e.g., 0.001 = 0.1%/day)">%/d</span>
-                  </div>
-                </div>
-
-                <!-- Training End Date Cutoff -->
                 <div class="form-group compact">
-                  <label>Training Cutoff</label>
-                  <input type="date" v-model="trainingEndDate" :disabled="isRunning" placeholder="Optional" style="width: 130px;" />
+                  <label>Solar Model</label>
+                  <select v-model="cfacSolarInstanceId" :disabled="isRunning" class="instance-select">
+                    <option :value="null">-- Select Solar Model --</option>
+                    <option v-for="instance in solarInstances" :key="instance.id" :value="instance.models[0]?.id">
+                      {{ instance.name || 'Solar Model' }} - {{ formatInstanceDate(instance.trainedAt) }} ({{ instance.avgMape?.toFixed(1) || 'N/A' }}% MAPE)
+                    </option>
+                  </select>
+                  <div v-if="selectedSolarInstance" class="selected-instance-info">
+                    <span class="instance-period">Training: {{ selectedSolarInstance.dateRangeStart }} → {{ selectedSolarInstance.dateRangeEnd }}</span>
+                  </div>
                 </div>
+                <p v-if="windInstances.length === 0 && solarInstances.length === 0" class="hint">No saved CFAC models. Train one first.</p>
+                <p v-else class="hint" style="margin-top: 8px; font-size: 11px;">
+                  Select at least one model. If both are selected, both will be used for inference.
+                </p>
               </div>
-
             </section>
           </div>
 
-          <!-- Row 3: Zone Scaling Reference (configured in Settings) -->
-          <section v-if="enableDemand" class="card card-full-row">
-            <div class="card-header-inline">
-              <h2>Zone Scaling</h2>
-              <span v-if="hasAnyZoneScales()" class="zone-scale-indicator">● Active</span>
-              <button @click="activeTab = 'settings'" class="btn btn-text btn-xs">Configure</button>
+          <!-- E) Options - Compact row -->
+          <section class="card card-full-row">
+            <h2>Options</h2>
+            <div class="options-row">
+              <label class="toggle">
+                <input type="checkbox" v-model="pushToGateway" :disabled="isRunning" />
+                <span class="toggle-slider gateway"></span>
+                <span class="toggle-label">Push to Gateway</span>
+              </label>
+              <label class="toggle">
+                <input type="checkbox" v-model="refreshWeather" :disabled="isRunning" />
+                <span class="toggle-slider"></span>
+                <span class="toggle-label">Refresh Weather Cache</span>
+              </label>
+              <span class="settings-link-inline" @click="activeTab = 'settings'">
+                Scaling and growth rate configured in Settings →
+              </span>
             </div>
-            <p class="hint">Zone scaling factors are applied automatically from Settings.</p>
           </section>
         </div>
 
@@ -3054,15 +3102,11 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 
           <div v-if="activeTrainingInstance" class="active-model-details">
             <div class="model-name-display">
-              {{ activeTrainingInstance.templateName || 'Training Instance' }} - {{ formatInstanceDateShort(activeTrainingInstance.startedAt) }}
+              {{ activeTrainingInstance.name || 'Training Instance' }} - {{ formatInstanceDateShort(activeTrainingInstance.trainedAt) }}
             </div>
             <div class="model-metrics-display">
-              <span v-if="activeTrainingInstance.demandRegionalMape">
-                Regional MAPE: {{ activeTrainingInstance.demandRegionalMape.toFixed(1) }}%
-              </span>
-              <span v-if="activeTrainingInstance.demandZonalMape">
-                <span v-if="activeTrainingInstance.demandRegionalMape"> | </span>
-                Zonal MAPE: {{ activeTrainingInstance.demandZonalMape.toFixed(1) }}%
+              <span v-if="activeTrainingInstance.avgMape">
+                MAPE: {{ activeTrainingInstance.avgMape.toFixed(1) }}%
               </span>
             </div>
             <div v-if="activeTrainingInstance.dateRangeStart && activeTrainingInstance.dateRangeEnd" class="training-period-display">
@@ -3139,8 +3183,8 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
                 <label>Model</label>
                 <select v-model="activeTrainingInstanceId" @change="onActiveInstanceChange" :disabled="schedulerIsRunning" class="calibrator-dropdown" style="min-width: 250px;">
                   <option v-for="instance in trainingInstances" :key="instance.id" :value="instance.id">
-                    {{ instance.templateName || 'Training' }} - {{ formatInstanceDate(instance.startedAt) }}
-                    ({{ instance.demandRegionalMape?.toFixed(1) || 'N/A' }}% MAPE)
+                    {{ instance.name || 'Training' }} - {{ formatInstanceDate(instance.trainedAt) }}
+                    ({{ instance.avgMape?.toFixed(1) || 'N/A' }}% MAPE)
                   </option>
                 </select>
               </div>
@@ -3706,7 +3750,8 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
               <div v-if="instanceDetailTab === 'calibration'">
                 <h3 style="margin: 0 0 20px 0; font-size: 18px; font-weight: 600; color: #e2e8f0;">Calibration Settings</h3>
 
-                <div v-if="selectedInstance.calibration">
+                <!-- Demand Calibration (regional/zonal) -->
+                <div v-if="selectedInstance.calibration && (selectedInstance.entityType === 'regional' || selectedInstance.entityType === 'zonal')">
                   <!-- Calibration Mode -->
                   <div style="margin-bottom: 24px; padding: 20px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
                     <div style="display: flex; align-items: center; gap: 16px; margin-bottom: 16px;">
@@ -3765,6 +3810,68 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
                       <div>
                         <div style="font-size: 11px; color: #94a3b8; text-transform: uppercase;">Alpha</div>
                         <div style="font-size: 20px; font-weight: 700; color: #e2e8f0;">{{ selectedInstance.calibration.pass2.alpha }}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Wind Calibration -->
+                <div v-else-if="selectedInstance.calibration && selectedInstance.entityType === 'wind'">
+                  <!-- Global Bias -->
+                  <div style="margin-bottom: 24px; padding: 20px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
+                    <h4 style="margin: 0 0 16px 0; color: #06b6d4; font-size: 14px;">Global Wind Bias</h4>
+                    <div style="display: flex; align-items: center; gap: 16px;">
+                      <div style="font-size: 32px; font-weight: 700;" :style="{ color: selectedInstance.calibration.global_bias >= 0 ? '#10b981' : '#f59e0b' }">
+                        {{ selectedInstance.calibration.global_bias >= 0 ? '+' : '' }}{{ (selectedInstance.calibration.global_bias * 100).toFixed(1) }}%
+                      </div>
+                      <span style="color: #94a3b8; font-size: 13px;">Applied to all wind stations</span>
+                    </div>
+                  </div>
+                  <!-- Per-Station Scales -->
+                  <div v-if="selectedInstance.calibration.per_station && Object.keys(selectedInstance.calibration.per_station).length > 0" style="padding: 20px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
+                    <h4 style="margin: 0 0 16px 0; color: #06b6d4; font-size: 14px;">Per-Station Calibration</h4>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px;">
+                      <div v-for="(data, station) in selectedInstance.calibration.per_station" :key="station" style="padding: 12px; background: #1a1a2e; border-radius: 6px;">
+                        <div style="font-size: 12px; color: #94a3b8; margin-bottom: 4px;">{{ station }}</div>
+                        <div style="font-size: 18px; font-weight: 600;" :style="{ color: data.scale >= 1 ? '#10b981' : '#f59e0b' }">
+                          {{ data.scale.toFixed(3) }}x
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Solar Calibration -->
+                <div v-else-if="selectedInstance.calibration && selectedInstance.entityType === 'solar'">
+                  <!-- Global Bias -->
+                  <div style="margin-bottom: 24px; padding: 20px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
+                    <h4 style="margin: 0 0 16px 0; color: #fbbf24; font-size: 14px;">Global Solar Bias</h4>
+                    <div style="display: flex; align-items: center; gap: 16px;">
+                      <div style="font-size: 32px; font-weight: 700;" :style="{ color: selectedInstance.calibration.global_bias >= 0 ? '#10b981' : '#f59e0b' }">
+                        {{ selectedInstance.calibration.global_bias >= 0 ? '+' : '' }}{{ (selectedInstance.calibration.global_bias * 100).toFixed(1) }}%
+                      </div>
+                      <span style="color: #94a3b8; font-size: 13px;">Applied to all solar stations</span>
+                    </div>
+                  </div>
+                  <!-- Hourly Scales -->
+                  <div v-if="selectedInstance.calibration.per_hour && Object.keys(selectedInstance.calibration.per_hour).length > 0" style="margin-bottom: 24px; padding: 20px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
+                    <h4 style="margin: 0 0 16px 0; color: #fbbf24; font-size: 14px;">Hourly Scale Factors (5 AM - 7 PM)</h4>
+                    <div style="display: flex; gap: 8px; align-items: flex-end; height: 80px;">
+                      <div v-for="hour in ['5','6','7','8','9','10','11','12','13','14','15','16','17','18','19']" :key="hour" style="flex: 1; display: flex; flex-direction: column; align-items: center;">
+                        <div style="width: 100%; background: #06b6d4; border-radius: 2px;" :style="{ height: ((selectedInstance.calibration.per_hour[hour] || 1) - 0.5) * 120 + 'px', opacity: selectedInstance.calibration.per_hour[hour] ? 1 : 0.3 }"></div>
+                        <div style="font-size: 10px; color: #64748b; margin-top: 4px;">{{ hour }}</div>
+                      </div>
+                    </div>
+                  </div>
+                  <!-- Per-Station Scales -->
+                  <div v-if="selectedInstance.calibration.per_station && Object.keys(selectedInstance.calibration.per_station).length > 0" style="padding: 20px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
+                    <h4 style="margin: 0 0 16px 0; color: #fbbf24; font-size: 14px;">Per-Station Scale Factors</h4>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px;">
+                      <div v-for="(data, station) in selectedInstance.calibration.per_station" :key="station" style="padding: 12px; background: #1a1a2e; border-radius: 6px;">
+                        <div style="font-size: 12px; color: #94a3b8; margin-bottom: 4px;">{{ station }}</div>
+                        <div style="font-size: 18px; font-weight: 600;" :style="{ color: data.scale >= 1 ? '#10b981' : '#f59e0b' }">
+                          {{ data.scale.toFixed(3) }}x
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -4396,31 +4503,6 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
             </div>
           </section>
 
-          <!-- Default Models Section -->
-          <section class="card settings-section">
-            <h2>Default Models</h2>
-            <p class="section-description">Set default models for training new instances</p>
-
-            <div class="form-group">
-              <label>Demand Model</label>
-              <select v-model="demandModel" class="path-input">
-                <option value="hybrid-calibrated">Hybrid + Calibration (Recommended)</option>
-                <option value="hybrid">Hybrid</option>
-              </select>
-              <p class="field-hint">Hybrid with calibration achieves best accuracy (2-4% MAPE)</p>
-            </div>
-
-            <div class="form-group">
-              <label>CFAC Model</label>
-              <select v-model="cfacModel" class="path-input">
-                <option value="hybrid">Hybrid (Recommended)</option>
-                <option value="hybrid-lstm">Hybrid + LSTM</option>
-                <option value="legacy">Legacy</option>
-              </select>
-              <p class="field-hint">Hybrid model provides best performance for wind and solar</p>
-            </div>
-          </section>
-
           <!-- Output Naming Section -->
           <section class="card settings-section">
             <h2>Output Naming</h2>
@@ -4879,6 +4961,70 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
                       />
                       <span class="zone-scale-unit">%</span>
                     </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- CFAC Scaling Section -->
+              <div class="config-section config-section-wide">
+                <div class="config-section-header">
+                  <h3>CFAC Scaling</h3>
+                </div>
+                <p class="section-hint">Scale capacity factor output. Use less than 100% for known outages (e.g., turbines under maintenance)</p>
+                <div class="cfac-scaling-row">
+                  <div class="form-group compact">
+                    <label>Wind Output</label>
+                    <div class="scaling-input-with-unit">
+                      <input
+                        type="number"
+                        class="zone-scale-input"
+                        :value="globalConfig?.cfac?.scaleWind ?? 100"
+                        @input="(e: Event) => { if (globalConfig?.cfac) { globalConfig.cfac.scaleWind = parseFloat((e.target as HTMLInputElement).value) || 100; markConfigDirty(); } }"
+                        min="0"
+                        max="200"
+                        step="1"
+                      />
+                      <span class="zone-scale-unit">%</span>
+                    </div>
+                  </div>
+                  <div class="form-group compact">
+                    <label>Solar Output</label>
+                    <div class="scaling-input-with-unit">
+                      <input
+                        type="number"
+                        class="zone-scale-input"
+                        :value="globalConfig?.cfac?.scaleSolar ?? 100"
+                        @input="(e: Event) => { if (globalConfig?.cfac) { globalConfig.cfac.scaleSolar = parseFloat((e.target as HTMLInputElement).value) || 100; markConfigDirty(); } }"
+                        min="0"
+                        max="200"
+                        step="1"
+                      />
+                      <span class="zone-scale-unit">%</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Demand Growth Section -->
+              <div class="config-section config-section-wide">
+                <div class="config-section-header">
+                  <h3>Demand Growth</h3>
+                </div>
+                <p class="section-hint">Applied to demand forecasts to account for load growth. 0.001 = 0.1% per day</p>
+                <div class="form-group compact">
+                  <label>Daily Growth Rate</label>
+                  <div class="scaling-input-with-unit">
+                    <input
+                      type="number"
+                      class="zone-scale-input"
+                      style="width: 100px;"
+                      :value="globalConfig?.demand?.growthRate ?? 0"
+                      @input="(e: Event) => { if (globalConfig?.demand) { globalConfig.demand.growthRate = parseFloat((e.target as HTMLInputElement).value) || 0; markConfigDirty(); } }"
+                      min="-0.1"
+                      max="0.1"
+                      step="0.001"
+                    />
+                    <span class="zone-scale-unit">%/day</span>
                   </div>
                 </div>
               </div>
@@ -7681,6 +7827,167 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 
 .card-full-row {
   width: 100%;
+}
+
+/* Data Source inline badge */
+.data-source-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-secondary);
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+.data-source-label {
+  color: var(--text-secondary);
+}
+
+.data-source-info {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+}
+
+/* Forecast Types row */
+.forecast-types-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.toggle-box {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 16px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+  flex: 1;
+  min-width: 180px;
+}
+
+.toggle-box:hover {
+  border-color: var(--accent-primary);
+}
+
+.toggle-box.active {
+  border-color: var(--accent-primary);
+  background: rgba(233, 69, 96, 0.1);
+}
+
+.toggle-box input[type="checkbox"] {
+  display: none;
+}
+
+.toggle-box-label {
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: 0.9rem;
+}
+
+.toggle-box-hint {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+/* Per-type configuration cards */
+.per-type-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.mode-selector {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.mode-selector .radio-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.mode-selector .radio-label.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.mode-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.instance-select {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+}
+
+.selected-instance-info {
+  padding: 8px;
+  background: var(--bg-primary);
+  border-radius: 4px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.instance-period {
+  color: var(--text-secondary);
+}
+
+.coming-soon-badge {
+  font-size: 0.7rem;
+  padding: 2px 6px;
+  background: var(--bg-tertiary);
+  border-radius: 3px;
+  color: var(--text-secondary);
+  margin-left: 8px;
+}
+
+/* Options row */
+.options-row {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+.settings-link-inline {
+  color: var(--accent-primary);
+  cursor: pointer;
+  font-size: 0.85rem;
+  margin-left: auto;
+}
+
+.settings-link-inline:hover {
+  text-decoration: underline;
+}
+
+/* CFAC scaling row in Settings */
+.cfac-scaling-row {
+  display: flex;
+  gap: 24px;
+}
+
+.scaling-input-with-unit {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .data-source-content {

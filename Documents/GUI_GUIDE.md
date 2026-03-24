@@ -1,3 +1,10 @@
+---
+Status: Active
+Last-Verified: 2026-03-22
+Verified-Against: current
+Updated-By: codebase-documenter
+---
+
 # Vantage Forecaster - GUI User Guide
 
 Vantage Forecaster includes an Electron-based desktop GUI that provides a streamlined interface for running demand and capacity factor forecasts.
@@ -122,12 +129,9 @@ When CFAC forecast is enabled, you can choose between three models:
 | Model | Description | Performance |
 |-------|-------------|-------------|
 | **Hybrid (Default)** | Physics-based models + ML correction with auto-calibration | Wind: ~73% MAPE, Solar: ~16% MAPE |
-| **Hybrid + LSTM Correction** | Hybrid model with additional LSTM layer for temporal dynamics | Experimental - improves temporal patterns |
 | **Legacy XGBoost** | XGBoost with physics features, asymmetric loss, bias correction | Wind: ~78% MAPE, Solar: ~55% MAPE |
 
 **Hybrid is recommended** for most use cases as it combines physics-based predictions with machine learning correction for best accuracy.
-
-**Hybrid + LSTM Correction** adds an optional LSTM neural network layer that learns to correct hybrid predictions based on weather sequences. This can improve temporal dynamics like morning ramp patterns, though it increases training time.
 
 ### SFTP Gateway Routing
 

@@ -19,7 +19,7 @@ import { ForecastResult, TrainingSample, RawWeatherData } from './types/index.js
 import { createWeatherService, DEFAULT_LOCATIONS, capacityFactorService, ClusterLocation, getConfigService } from './services/index.js';
 import { getDatabase, closeDatabase, DatabaseStats, StoredModel } from './database/index.js';
 import { ModelRouter, WindMRECModel, calibrateAllMREC, calibrateAllMRECCFBased, calibrateAllMRECMLOptimized, WindMRECHybridModel, trainAllMRECHybrid, WindWeatherHybridModel, trainAllWeatherHybrid, SolarMRECModel, calibrateAllSolarMREC, SolarHybridModel, SolarIrradianceModel, SolarMRECHybridModel, calibrateAllSolarMRECHybrid, SolarSeasonalMRECModel, calibrateAllSeasonalSolarMREC, WindShearModel, trainAllWindShear, WindCubicModel, calibrateAllCubic, WindWeibullModel, calibrateAllWeibull, WindBiasCorrectionModel, calibrateAllBiasCorrection, WindEnhancedHybridModel, trainAllEnhancedHybrid, BiasCorrector, Wind4TierHybridModel, trainAll4TierHybrid, WindPhysicsHybridModel, trainAllPhysicsHybrid } from './models/capacityFactor/index.js';
-import type { SolarMRECCalibrationData } from './models/capacityFactor/index.js';
+import type { SolarMRECCalibrationData, WindEnhancedHybridState, SolarHybridModelState } from './models/capacityFactor/index.js';
 import { MRECCalibrationData, WindCFacMethodology } from './types/capacityFactor.js';
 import { CFacWeatherFeatures, StationType, getStationTypeFromCode, CFacForecastResult, CFacTrainingSample, RawCapacityFactorData } from './types/capacityFactor.js';
 import { parseOutageDirectory } from './parsers/index.js';
@@ -51,8 +51,10 @@ import { ZonalMergedRecord } from './types/index.js';
 import { createModelsCommand } from './commands/models.js';
 import { CFACCalibrationService } from './services/cfacCalibrationService.js';
 import type { CFACCalibrationState } from './types/cfacCalibration.js';
-import { getModelById, getActiveModel } from './services/modelStore.js';
+import { getModelById, getActiveModel, saveModel as saveModelToStore } from './services/modelStore.js';
 import { saveDemandModel, TrainingResult } from './services/forecastGenerator.js';
+import crypto from 'crypto';
+import type { SavedModel, ModelMetrics, CFACEntityType, CFACModelType } from './types/models.js';
 
 // Default API key (can be overridden by env or config)
 const DEFAULT_API_KEY = 'BJYBHG8K3YS8EFK46233M8L75';
@@ -245,6 +247,9 @@ async function runZonalForecast(options: any): Promise<void> {
 
   if (options.useModel) {
     // Load saved model from model store
+    console.log('\n╔════════════════════════════════════════════════════════════════╗');
+    console.log('║  ❄️  INFERENCE MODE - Using Frozen Model Weights               ║');
+    console.log('╚════════════════════════════════════════════════════════════════╝');
     console.log(`\n💾 Loading saved model: ${options.useModel}...`);
     try {
       const savedModel = getModelById(options.useModel);
@@ -261,14 +266,17 @@ async function runZonalForecast(options: any): Promise<void> {
       console.log(`  ✅ Model loaded: ${savedModel.metadata.entityCode} v${savedModel.metadata.version}`);
       console.log(`  📅 Trained: ${savedModel.metadata.trainedAt}`);
       console.log(`  📊 Training MAPE: ${savedModel.metrics.mape?.toFixed(2) || 'N/A'}%`);
-      console.log(`  ⚡ Skipping training - using pre-trained model`);
+      console.log(`  ❄️  Frozen weights - no retraining will occur`);
     } catch (error: any) {
       console.error(`❌ Failed to load model: ${error.message}`);
       process.exit(1);
     }
   } else {
     // Train HybridModel on 14 zones
-    console.log(`\n🎯 Training hybrid model on ${zones.length} zones...`);
+    console.log('\n╔════════════════════════════════════════════════════════════════╗');
+    console.log('║  🎯 TRAINING MODE - Building New Zonal Model                   ║');
+    console.log('╚════════════════════════════════════════════════════════════════╝');
+    console.log(`\n📊 Training hybrid model on ${zones.length} zones: ${zones.slice(0, 5).join(', ')}${zones.length > 5 ? '...' : ''}`);
     const growthRate = parseFloat(options.growth) / 100;
     model = new HybridModel({ growthFactor: growthRate, recentDaysCount: 7 });
     const result = await model.train(samples);
@@ -290,6 +298,17 @@ async function runZonalForecast(options: any): Promise<void> {
     const calibrationMode = options.calibrate === false ? 'none' : (calibConfig?.mode || 'hybrid');
     const quantileAlpha = calibConfig?.quantileAlpha ?? 0.80;
     const enableZoneScaling = calibConfig?.enableZoneScaling ?? true;
+
+    // Log calibration settings for visibility
+    console.log('\n╔════════════════════════════════════════════════════════════════╗');
+    console.log('║  🔧 CALIBRATION SETTINGS                                       ║');
+    console.log('╚════════════════════════════════════════════════════════════════╝');
+    console.log(`   Mode: ${calibrationMode.toUpperCase()} (from ${calibConfig?.mode ? 'config' : 'default'})`);
+    console.log(`   Quantile Alpha: ${quantileAlpha}`);
+    console.log(`   Zone Scaling: ${enableZoneScaling ? 'enabled' : 'disabled'}`);
+    if (options.calibrate === false) {
+      console.log(`   ⚠️  Calibration disabled via --no-calibrate flag`);
+    }
 
     // Track calibration results for model saving
     let calibrationInfo: {
@@ -426,27 +445,46 @@ async function runZonalForecast(options: any): Promise<void> {
         // Generate model name if not provided
         const modelName = options.modelName || `Zonal ${DateTime.now().toFormat('yyyy-MM-dd HH:mm')}`;
 
-        // Calculate per-zone MAPE for detailed metrics
+        // Calculate per-zone metrics using demand-weighted MAPE
+        // Threshold: skip samples with demand < 50 MW (outages, export, data gaps)
+        const MAPE_THRESHOLD_MW = 50;
         const perZoneMape: Record<string, number> = {};
+        const perZoneMetrics: Record<string, { mape: number; mae: number; avgDemand: number }> = {};
+
         for (const zone of zones) {
           const zoneSamples = samples.filter(s => s.region === zone);
           if (zoneSamples.length > 0) {
-            let totalError = 0;
-            let count = 0;
+            let sumAbsError = 0;
+            let sumActual = 0;
+            let validCount = 0;
+
             for (const sample of zoneSamples) {
+              // Skip low-demand hours for MAPE calculation
+              if (sample.demand < MAPE_THRESHOLD_MW) continue;
+
               const predicted = model.predictForRegion(sample.features, zone);
-              if (predicted && sample.demand > 0) {
-                totalError += Math.abs((predicted - sample.demand) / sample.demand);
-                count++;
+              if (predicted !== undefined) {
+                sumAbsError += Math.abs(predicted - sample.demand);
+                sumActual += sample.demand;
+                validCount++;
               }
             }
-            perZoneMape[zone] = count > 0 ? (totalError / count) * 100 : 0;
+
+            // Demand-weighted MAPE: Σ|error| / Σ(actual) * 100
+            const mape = sumActual > 0 ? (sumAbsError / sumActual) * 100 : 0;
+            const mae = validCount > 0 ? sumAbsError / validCount : 0;
+            const avgDemand = validCount > 0 ? sumActual / validCount : 0;
+
+            perZoneMape[zone] = mape;
+            perZoneMetrics[zone] = { mape, mae, avgDemand };
           }
         }
 
-        console.log('  📊 Per-zone MAPE:');
-        for (const [zone, mape] of Object.entries(perZoneMape).sort((a, b) => a[0].localeCompare(b[0]))) {
-          console.log(`     ${zone}: ${mape.toFixed(2)}%`);
+        console.log('  📊 Per-zone metrics (demand-weighted MAPE, threshold ≥50 MW):');
+        console.log('     Zone     │  MAPE   │ MAE(MW) │ Avg(MW)');
+        console.log('     ─────────┼─────────┼─────────┼────────');
+        for (const [zone, metrics] of Object.entries(perZoneMetrics).sort((a, b) => a[0].localeCompare(b[0]))) {
+          console.log(`     ${zone.padEnd(8)} │ ${metrics.mape.toFixed(2).padStart(6)}% │ ${metrics.mae.toFixed(0).padStart(7)} │ ${metrics.avgDemand.toFixed(0).padStart(7)}`);
         }
 
         const savedModelResult: TrainingResult = {
@@ -635,8 +673,14 @@ async function runZonalForecast(options: any): Promise<void> {
   console.log('\n🔮 Generating zonal forecasts...');
   const forecasts: ForecastResult[] = [];
 
+  // Track per-zone progress
+  const totalZones = forecastZonalWeatherSets.length;
+  let zoneIndex = 0;
+
   for (const weatherSet of forecastZonalWeatherSets) {
+    zoneIndex++;
     const region = weatherSet.zoneCode;
+    console.log(`  📍 Forecasting ${region} (${weatherSet.city}) [${zoneIndex}/${totalZones}]...`);
 
     for (const weather of weatherSet.records) {
       const datetime = DateTime.fromISO(weather.datetime).plus({ hours: 1 }).toJSDate();
@@ -925,77 +969,20 @@ program
       const apiKey = getApiKey();
       const weatherService = createWeatherService(apiKey, options.cache);
 
-      // Parse demand data (from file or database)
-      console.log('\n🔄 Loading demand data...');
-      let demandData: ParsedDemandData;
-
-      if (options.useDb || !options.demand) {
-        // Load demand data from database
-        const db = getDatabase();
-        const trainDays = parseInt(options.trainDays) || 90;
-        const forecastStart = DateTime.fromISO(options.start);
-        const trainEnd = forecastStart.minus({ days: 1 }).toISODate()!;
-        const trainStart = forecastStart.minus({ days: trainDays }).toISODate()!;
-
-        console.log(`  📂 Loading from database: ${trainStart} to ${trainEnd}`);
-        demandData = db.getDemandData(trainStart, trainEnd);
-        closeDatabase();
-
-        if (demandData.records.length === 0) {
-          console.error('❌ No demand data found in database for the specified period');
-          console.error('   Try importing data first with: iload db import -t demand -f <file>');
-          process.exit(1);
-        }
-        console.log(`  📊 Demand: ${demandData.records.length} records from database`);
-      } else {
-        // Parse demand data from file (supports single file or folder)
-        demandData = parseDemandCsv(options.demand);
-        if (demandData.filesProcessed && demandData.filesProcessed > 1) {
-          console.log(`  📊 Demand: ${demandData.records.length} records from ${demandData.filesProcessed} files`);
-        } else {
-          console.log(`  📊 Demand: ${demandData.records.length} records`);
-        }
-      }
-      console.log(`  📅 Range: ${DateTime.fromJSDate(demandData.startDate).toISODate()} to ${DateTime.fromJSDate(demandData.endDate).toISODate()}`);
-
-      // Determine training date range (use all historical demand data)
-      const trainStart = DateTime.fromJSDate(demandData.startDate).toISODate()!;
-      const trainEnd = DateTime.fromJSDate(demandData.endDate).toISODate()!;
-
-      // Fetch weather data for training period
-      console.log('\n🌤️  Fetching weather data for training...');
-      const trainWeatherFiles = await weatherService.saveWeatherFiles(
-        trainStart,
-        trainEnd,
-        join(options.cache, 'combined'),
-        (msg) => console.log(`  ${msg}`)
-      );
-
-      if (trainWeatherFiles.length === 0) {
-        console.error('❌ Failed to fetch weather data for training');
-        process.exit(1);
-      }
-
-      // Parse weather data
-      const weatherDatasets = trainWeatherFiles.map(file => parseWeatherCsv(file));
-
-      // Merge and build training samples
-      console.log('\n🔧 Engineering features...');
-      const merged = mergeData(demandData, weatherDatasets);
-      const samples = buildTrainingSamples(merged.records, false);
-      console.log(`  📐 Training samples: ${samples.length}`);
-
-      if (samples.length === 0) {
-        console.error('❌ No training samples available');
-        process.exit(1);
-      }
-
-      // Train or load model
-      let model: RegressionModel | XGBoostModel | HybridModel = new RegressionModel(); // Initialize to avoid TS error
+      // Train or load model - CHECK INFERENCE MODE FIRST
+      let model: RegressionModel | XGBoostModel | HybridModel = new RegressionModel();
       let usedSavedModel = false;
+      let demandData: ParsedDemandData;
+      let samples: TrainingSample[] = [];
+      let merged: { records: any[] } = { records: [] };
+      let trainStart: string = '';
+      let trainEnd: string = '';
 
       if (options.useModel) {
-        // Load saved model from model store (hybrid models only)
+        // INFERENCE MODE: Load saved model, skip training data loading
+        console.log('\n╔════════════════════════════════════════════════════════════════╗');
+        console.log('║  ❄️  INFERENCE MODE - Using Frozen Model Weights               ║');
+        console.log('╚════════════════════════════════════════════════════════════════╝');
         console.log(`\n💾 Loading saved model: ${options.useModel}...`);
         try {
           const savedModel = getModelById(options.useModel);
@@ -1005,19 +992,97 @@ program
             process.exit(1);
           }
 
-          // Restore HybridModel from saved state
           model = HybridModel.fromJSON(savedModel.modelData.data);
           usedSavedModel = true;
 
           console.log(`  ✅ Model loaded: ${savedModel.metadata.entityCode} v${savedModel.metadata.version}`);
           console.log(`  📅 Trained: ${savedModel.metadata.trainedAt}`);
           console.log(`  📊 Training MAPE: ${savedModel.metrics.mape?.toFixed(2) || 'N/A'}%`);
-          console.log(`  ⚡ Skipping training - using pre-trained model`);
+          console.log(`  ❄️  Frozen weights - no retraining will occur`);
         } catch (error: any) {
           console.error(`❌ Failed to load model: ${error.message}`);
           process.exit(1);
         }
-      } else if (options.useSaved && options.model === 'regression') {
+
+        // Minimal demand data for lag features (load recent 7 days only)
+        console.log('\n🔄 Loading recent demand data for lag features...');
+        const forecastStart = DateTime.fromISO(options.start);
+        const lagEnd = forecastStart.minus({ days: 1 }).toISODate()!;
+        const lagStart = forecastStart.minus({ days: 8 }).toISODate()!;
+        if (options.useDb || !options.demand) {
+          const db = getDatabase();
+          demandData = db.getDemandData(lagStart, lagEnd);
+          closeDatabase();
+        } else {
+          demandData = parseDemandCsv(options.demand);
+        }
+        console.log(`  📊 Loaded ${demandData.records.length} records for lag features`);
+      } else {
+        // TRAINING MODE: Load full training data
+        console.log('\n🔄 Loading demand data...');
+
+        if (options.useDb || !options.demand) {
+          const db = getDatabase();
+          const trainDays = parseInt(options.trainDays) || 90;
+          const forecastStart = DateTime.fromISO(options.start);
+          const trainEnd = forecastStart.minus({ days: 1 }).toISODate()!;
+          const trainStart = forecastStart.minus({ days: trainDays }).toISODate()!;
+
+          console.log(`  📂 Loading from database: ${trainStart} to ${trainEnd}`);
+          demandData = db.getDemandData(trainStart, trainEnd);
+          closeDatabase();
+
+          if (demandData.records.length === 0) {
+            console.error('❌ No demand data found in database for the specified period');
+            console.error('   Try importing data first with: iload db import -t demand -f <file>');
+            process.exit(1);
+          }
+          console.log(`  📊 Demand: ${demandData.records.length} records from database`);
+        } else {
+          demandData = parseDemandCsv(options.demand);
+          if (demandData.filesProcessed && demandData.filesProcessed > 1) {
+            console.log(`  📊 Demand: ${demandData.records.length} records from ${demandData.filesProcessed} files`);
+          } else {
+            console.log(`  📊 Demand: ${demandData.records.length} records`);
+          }
+        }
+        console.log(`  📅 Range: ${DateTime.fromJSDate(demandData.startDate).toISODate()} to ${DateTime.fromJSDate(demandData.endDate).toISODate()}`);
+
+        // Determine training date range
+        trainStart = DateTime.fromJSDate(demandData.startDate).toISODate()!;
+        trainEnd = DateTime.fromJSDate(demandData.endDate).toISODate()!;
+
+        // Fetch weather data for training period
+        console.log('\n🌤️  Fetching weather data for training...');
+        const trainWeatherFiles = await weatherService.saveWeatherFiles(
+          trainStart,
+          trainEnd,
+          join(options.cache, 'combined'),
+          (msg) => console.log(`  ${msg}`)
+        );
+
+        if (trainWeatherFiles.length === 0) {
+          console.error('❌ Failed to fetch weather data for training');
+          process.exit(1);
+        }
+
+        // Parse weather data
+        const weatherDatasets = trainWeatherFiles.map(file => parseWeatherCsv(file));
+
+        // Merge and build training samples
+        console.log('\n🔧 Engineering features...');
+        merged = mergeData(demandData, weatherDatasets);
+        samples = buildTrainingSamples(merged.records, false);
+        console.log(`  📐 Training samples: ${samples.length}`);
+
+        if (samples.length === 0) {
+          console.error('❌ No training samples available');
+          process.exit(1);
+        }
+      }
+
+      // Train model if not using saved model
+      if (!usedSavedModel && options.useSaved && options.model === 'regression') {
         // Try to load saved model from database
         console.log('\n💾 Loading saved model from database...');
         try {
@@ -1047,7 +1112,11 @@ program
       let trainingResult: { r2Score: number; mape: number; rmse?: number; mae?: number } | null = null;
 
       if (!usedSavedModel) {
-        console.log(`\n🎯 Training ${options.model} model...`);
+        const regions = [...new Set(samples.map(s => s.region))];
+        console.log('\n╔════════════════════════════════════════════════════════════════╗');
+        console.log('║  🎯 TRAINING MODE - Building New Model                         ║');
+        console.log('╚════════════════════════════════════════════════════════════════╝');
+        console.log(`\n📊 Training ${options.model} model on ${regions.length} regions: ${regions.join(', ')}`);
         if (options.model === 'regression') {
           model = new RegressionModel();
           trainingResult = (model as RegressionModel).train(samples);
@@ -1055,8 +1124,8 @@ program
         } else if (options.model === 'hybrid') {
           const growthRate = parseFloat(options.growth) / 100; // Convert percent to decimal
           model = new HybridModel({ growthFactor: growthRate, recentDaysCount: 7 });
-          trainingResult = await (model as HybridModel).train(samples);
-          console.log(`  R² = ${trainingResult.r2Score.toFixed(4)}, MAPE = ${trainingResult.mape.toFixed(2)}%`);
+          trainingResult = await (model as HybridModel).train(samples, (msg) => console.log(`  ${msg}`));
+          console.log(`\n  ✅ Training complete: R² = ${trainingResult.r2Score.toFixed(4)}, MAPE = ${trainingResult.mape.toFixed(2)}%`);
           if (growthRate > 0) {
             console.log(`  📈 Growth factor: ${(growthRate * 100).toFixed(4)}% per day`);
           }
@@ -1106,6 +1175,7 @@ program
               sampleCount: samples.length,
               trainingStart: trainStart,
               trainingEnd: trainEnd,
+              calibration: { mode: 'hybrid' as const },
               perRegionMape, // Include per-region breakdown
             };
             const modelId = saveDemandModel(
@@ -1398,17 +1468,23 @@ program
       }
       const forecasts: ForecastResult[] = [];
 
+      // Track per-region progress
+      const totalRegions = forecastWeatherData.length;
+      let regionIndex = 0;
+
       for (const weatherData of forecastWeatherData) {
+        regionIndex++;
         // Match location by checking if city name contains our location name
         const location = DEFAULT_LOCATIONS.find(
           loc => weatherData.city.toLowerCase().includes(loc.name.toLowerCase())
         );
         if (!location) {
-          console.warn(`  Warning: No location match for "${weatherData.city}"`);
+          console.warn(`  ⚠️  No location match for "${weatherData.city}"`);
           continue;
         }
 
         const region = location.demandColumn;
+        console.log(`  📍 Forecasting ${region} (${location.name}) [${regionIndex}/${totalRegions}]...`);
 
         for (const weather of weatherData.records) {
           const datetime = DateTime.fromISO(weather.datetime).plus({ hours: 1 }).toJSDate();
@@ -1610,20 +1686,26 @@ program
     }
 
     // Compare forecast vs actual
+    // MAPE threshold: Skip hours with actual demand < 50 MW to avoid inflated percentage errors
+    // This handles maintenance outages, net export periods, and data gaps
+    const MAPE_MIN_THRESHOLD_MW = 50;
+
     interface RegionStats {
-      count: number;
+      count: number;           // Total matched records (including skipped)
+      validCount: number;      // Records with actual >= threshold (used for MAPE)
       sumError: number;
       sumAbsError: number;
-      sumAbsPercentError: number;
       sumSquaredError: number;
       sumActual: number;
       sumForecast: number;
+      skippedLowDemand: number;  // Hours skipped due to low/negative demand
       errors: { datetime: Date; forecast: number; actual: number; error: number; percentError: number }[];
     }
 
     const regionStats = new Map<string, RegionStats>();
     let totalMatched = 0;
     let totalUnmatched = 0;
+    let totalSkippedLowDemand = 0;
 
     for (const row of forecastRows) {
       // Parse forecast datetime - format: "M/D/YYYY HH:mm"
@@ -1650,28 +1732,40 @@ program
         }
 
         totalMatched++;
-        const error = forecastValue - actualValue;
-        const absError = Math.abs(error);
-        const percentError = (absError / actualValue) * 100;
 
+        // Initialize stats for this region if needed
         if (!regionStats.has(col)) {
           regionStats.set(col, {
             count: 0,
+            validCount: 0,
             sumError: 0,
             sumAbsError: 0,
-            sumAbsPercentError: 0,
             sumSquaredError: 0,
             sumActual: 0,
             sumForecast: 0,
+            skippedLowDemand: 0,
             errors: []
           });
         }
 
         const stats = regionStats.get(col)!;
         stats.count++;
+
+        // Skip low/negative demand hours for MAPE calculation
+        // These represent maintenance outages, net solar export, or data gaps
+        if (actualValue < MAPE_MIN_THRESHOLD_MW) {
+          stats.skippedLowDemand++;
+          totalSkippedLowDemand++;
+          continue;
+        }
+
+        const error = forecastValue - actualValue;
+        const absError = Math.abs(error);
+        const percentError = (absError / actualValue) * 100;
+
+        stats.validCount++;
         stats.sumError += error;
         stats.sumAbsError += absError;
-        stats.sumAbsPercentError += percentError;
         stats.sumSquaredError += error * error;
         stats.sumActual += actualValue;
         stats.sumForecast += forecastValue;
@@ -1687,12 +1781,16 @@ program
     }
 
     // Calculate and display metrics
-    console.log('═══════════════════════════════════════════════════════════════');
-    console.log('                    FORECAST EVALUATION REPORT                  ');
-    console.log('═══════════════════════════════════════════════════════════════\n');
+    console.log('═══════════════════════════════════════════════════════════════════════════════');
+    console.log('                         FORECAST EVALUATION REPORT                            ');
+    console.log('═══════════════════════════════════════════════════════════════════════════════\n');
 
     console.log(`Matched Records: ${totalMatched}`);
-    console.log(`Unmatched Forecast Records: ${totalUnmatched}\n`);
+    console.log(`Unmatched Forecast Records: ${totalUnmatched}`);
+    if (totalSkippedLowDemand > 0) {
+      console.log(`Skipped Low-Demand Hours (<${MAPE_MIN_THRESHOLD_MW} MW): ${totalSkippedLowDemand} (${(totalSkippedLowDemand / totalMatched * 100).toFixed(1)}%)`);
+    }
+    console.log('');
 
     let reportContent = '# Forecast Evaluation Report\n\n';
     reportContent += `Generated: ${DateTime.now().toISO()}\n\n`;
@@ -1700,66 +1798,97 @@ program
     reportContent += `- Forecast File: ${options.forecast}\n`;
     reportContent += `- Actual File: ${options.actual}\n`;
     reportContent += `- Matched Records: ${totalMatched}\n`;
-    reportContent += `- Unmatched Forecast Records: ${totalUnmatched}\n\n`;
+    reportContent += `- Unmatched Forecast Records: ${totalUnmatched}\n`;
+    if (totalSkippedLowDemand > 0) {
+      reportContent += `- Skipped Low-Demand Hours (<${MAPE_MIN_THRESHOLD_MW} MW): ${totalSkippedLowDemand}\n`;
+    }
+    reportContent += '\n';
 
-    console.log('┌─────────┬──────────┬──────────┬──────────┬──────────┬──────────┐');
-    console.log('│ Region  │   MAE    │   MAPE   │   RMSE   │   Bias   │  Count   │');
-    console.log('├─────────┼──────────┼──────────┼──────────┼──────────┼──────────┤');
+    // Expanded table with Avg Demand column for context
+    console.log('┌──────────┬──────────┬─────────┬──────────┬──────────┬──────────┬──────────┬─────────┐');
+    console.log('│ Region   │ Avg MW   │ MAE(MW) │  MAPE    │ RMSE(MW) │  Bias    │  Valid   │ Skipped │');
+    console.log('├──────────┼──────────┼─────────┼──────────┼──────────┼──────────┼──────────┼─────────┤');
 
     reportContent += '## Metrics by Region\n\n';
-    reportContent += '| Region | MAE (MW) | MAPE (%) | RMSE (MW) | Bias (MW) | Count |\n';
-    reportContent += '|--------|----------|----------|-----------|-----------|-------|\n';
+    reportContent += '| Region | Avg Demand (MW) | MAE (MW) | MAPE (%) | RMSE (MW) | Bias (MW) | Valid | Skipped |\n';
+    reportContent += '|--------|-----------------|----------|----------|-----------|-----------|-------|--------|\n';
 
-    let overallMae = 0, overallMape = 0, overallRmse = 0, overallBias = 0, overallCount = 0;
+    // Accumulators for overall demand-weighted MAPE
+    let overallSumAbsError = 0;
+    let overallSumActual = 0;
+    let overallSumSquaredError = 0;
+    let overallSumError = 0;
+    let overallValidCount = 0;
 
-    for (const [region, stats] of regionStats) {
-      const mae = stats.sumAbsError / stats.count;
-      const mape = stats.sumAbsPercentError / stats.count;
-      const rmse = Math.sqrt(stats.sumSquaredError / stats.count);
-      const bias = stats.sumError / stats.count;
+    // Sort regions for consistent output
+    const sortedRegions = [...regionStats.entries()].sort((a, b) => a[0].localeCompare(b[0]));
 
-      console.log(`│ ${region.padEnd(7)} │ ${mae.toFixed(1).padStart(8)} │ ${mape.toFixed(2).padStart(7)}% │ ${rmse.toFixed(1).padStart(8)} │ ${(bias >= 0 ? '+' : '') + bias.toFixed(1).padStart(7)} │ ${stats.count.toString().padStart(8)} │`);
+    for (const [region, stats] of sortedRegions) {
+      if (stats.validCount === 0) {
+        console.log(`│ ${region.padEnd(8)} │ ${'-'.padStart(8)} │ ${'-'.padStart(7)} │ ${'-'.padStart(8)} │ ${'-'.padStart(8)} │ ${'-'.padStart(8)} │ ${stats.validCount.toString().padStart(8)} │ ${stats.skippedLowDemand.toString().padStart(7)} │`);
+        reportContent += `| ${region} | - | - | - | - | - | ${stats.validCount} | ${stats.skippedLowDemand} |\n`;
+        continue;
+      }
 
-      reportContent += `| ${region} | ${mae.toFixed(1)} | ${mape.toFixed(2)} | ${rmse.toFixed(1)} | ${bias >= 0 ? '+' : ''}${bias.toFixed(1)} | ${stats.count} |\n`;
+      const avgDemand = stats.sumActual / stats.validCount;
+      const mae = stats.sumAbsError / stats.validCount;
+      // Demand-weighted MAPE: sum(|error|) / sum(actual) * 100
+      const mape = (stats.sumAbsError / stats.sumActual) * 100;
+      const rmse = Math.sqrt(stats.sumSquaredError / stats.validCount);
+      const bias = stats.sumError / stats.validCount;
 
-      overallMae += stats.sumAbsError;
-      overallMape += stats.sumAbsPercentError;
-      overallRmse += stats.sumSquaredError;
-      overallBias += stats.sumError;
-      overallCount += stats.count;
+      console.log(`│ ${region.padEnd(8)} │ ${avgDemand.toFixed(0).padStart(8)} │ ${mae.toFixed(1).padStart(7)} │ ${mape.toFixed(2).padStart(7)}% │ ${rmse.toFixed(1).padStart(8)} │ ${(bias >= 0 ? '+' : '') + bias.toFixed(1).padStart(7)} │ ${stats.validCount.toString().padStart(8)} │ ${stats.skippedLowDemand.toString().padStart(7)} │`);
+
+      reportContent += `| ${region} | ${avgDemand.toFixed(0)} | ${mae.toFixed(1)} | ${mape.toFixed(2)} | ${rmse.toFixed(1)} | ${bias >= 0 ? '+' : ''}${bias.toFixed(1)} | ${stats.validCount} | ${stats.skippedLowDemand} |\n`;
+
+      // Accumulate for overall metrics (demand-weighted)
+      overallSumAbsError += stats.sumAbsError;
+      overallSumActual += stats.sumActual;
+      overallSumSquaredError += stats.sumSquaredError;
+      overallSumError += stats.sumError;
+      overallValidCount += stats.validCount;
     }
 
-    console.log('├─────────┼──────────┼──────────┼──────────┼──────────┼──────────┤');
+    console.log('├──────────┼──────────┼─────────┼──────────┼──────────┼──────────┼──────────┼─────────┤');
 
-    const totalMae = overallMae / overallCount;
-    const totalMape = overallMape / overallCount;
-    const totalRmse = Math.sqrt(overallRmse / overallCount);
-    const totalBias = overallBias / overallCount;
+    // Calculate overall demand-weighted MAPE
+    const totalAvgDemand = overallValidCount > 0 ? overallSumActual / overallValidCount : 0;
+    const totalMae = overallValidCount > 0 ? overallSumAbsError / overallValidCount : 0;
+    const totalMape = overallSumActual > 0 ? (overallSumAbsError / overallSumActual) * 100 : 0;
+    const totalRmse = overallValidCount > 0 ? Math.sqrt(overallSumSquaredError / overallValidCount) : 0;
+    const totalBias = overallValidCount > 0 ? overallSumError / overallValidCount : 0;
 
-    console.log(`│ OVERALL │ ${totalMae.toFixed(1).padStart(8)} │ ${totalMape.toFixed(2).padStart(7)}% │ ${totalRmse.toFixed(1).padStart(8)} │ ${(totalBias >= 0 ? '+' : '') + totalBias.toFixed(1).padStart(7)} │ ${overallCount.toString().padStart(8)} │`);
-    console.log('└─────────┴──────────┴──────────┴──────────┴──────────┴──────────┘');
+    console.log(`│ OVERALL  │ ${totalAvgDemand.toFixed(0).padStart(8)} │ ${totalMae.toFixed(1).padStart(7)} │ ${totalMape.toFixed(2).padStart(7)}% │ ${totalRmse.toFixed(1).padStart(8)} │ ${(totalBias >= 0 ? '+' : '') + totalBias.toFixed(1).padStart(7)} │ ${overallValidCount.toString().padStart(8)} │ ${totalSkippedLowDemand.toString().padStart(7)} │`);
+    console.log('└──────────┴──────────┴─────────┴──────────┴──────────┴──────────┴──────────┴─────────┘');
 
-    reportContent += `| **OVERALL** | **${totalMae.toFixed(1)}** | **${totalMape.toFixed(2)}** | **${totalRmse.toFixed(1)}** | **${totalBias >= 0 ? '+' : ''}${totalBias.toFixed(1)}** | **${overallCount}** |\n\n`;
+    reportContent += `| **OVERALL** | **${totalAvgDemand.toFixed(0)}** | **${totalMae.toFixed(1)}** | **${totalMape.toFixed(2)}** | **${totalRmse.toFixed(1)}** | **${totalBias >= 0 ? '+' : ''}${totalBias.toFixed(1)}** | **${overallValidCount}** | **${totalSkippedLowDemand}** |\n\n`;
 
     // Interpretation
     console.log('\n📈 Interpretation:');
     console.log(`  • MAE (Mean Absolute Error): Average deviation of ${totalMae.toFixed(1)} MW`);
-    console.log(`  • MAPE (Mean Absolute Percentage Error): ${totalMape.toFixed(2)}% average error`);
+    console.log(`  • MAPE (Demand-Weighted): ${totalMape.toFixed(2)}% - computed as Σ|error| / Σ(actual)`);
     console.log(`  • RMSE (Root Mean Square Error): ${totalRmse.toFixed(1)} MW (penalizes large errors)`);
     console.log(`  • Bias: ${totalBias >= 0 ? 'Over-forecasting' : 'Under-forecasting'} by ${Math.abs(totalBias).toFixed(1)} MW on average`);
+    if (totalSkippedLowDemand > 0) {
+      console.log(`  • Skipped: ${totalSkippedLowDemand} hours with actual demand <${MAPE_MIN_THRESHOLD_MW} MW (outages/export/gaps)`);
+    }
 
     reportContent += '## Interpretation\n\n';
     reportContent += `- **MAE** (Mean Absolute Error): Average deviation of ${totalMae.toFixed(1)} MW\n`;
-    reportContent += `- **MAPE** (Mean Absolute Percentage Error): ${totalMape.toFixed(2)}% average error\n`;
+    reportContent += `- **MAPE** (Demand-Weighted): ${totalMape.toFixed(2)}% - computed as Σ|error| / Σ(actual)\n`;
     reportContent += `- **RMSE** (Root Mean Square Error): ${totalRmse.toFixed(1)} MW (penalizes large errors)\n`;
-    reportContent += `- **Bias**: ${totalBias >= 0 ? 'Over-forecasting' : 'Under-forecasting'} by ${Math.abs(totalBias).toFixed(1)} MW on average\n\n`;
+    reportContent += `- **Bias**: ${totalBias >= 0 ? 'Over-forecasting' : 'Under-forecasting'} by ${Math.abs(totalBias).toFixed(1)} MW on average\n`;
+    if (totalSkippedLowDemand > 0) {
+      reportContent += `- **Skipped**: ${totalSkippedLowDemand} hours with actual demand <${MAPE_MIN_THRESHOLD_MW} MW\n`;
+    }
+    reportContent += '\n';
 
     // Recommendations based on bias
     console.log('\n💡 Recommendations:');
     reportContent += '## Recommendations\n\n';
 
     if (Math.abs(totalBias) > totalMae * 0.3) {
-      const scaleAdjust = (-totalBias / (overallMae / overallCount + Math.abs(totalBias))) * 100;
+      const scaleAdjust = (-totalBias / (totalMae + Math.abs(totalBias))) * 100;
       console.log(`  • Significant ${totalBias >= 0 ? 'over' : 'under'}-forecasting detected`);
       console.log(`  • Consider using --scale ${scaleAdjust.toFixed(1)} to compensate`);
       reportContent += `- Significant ${totalBias >= 0 ? 'over' : 'under'}-forecasting detected\n`;
@@ -2210,6 +2339,10 @@ cfacCommand
   .option('--weather-refresh-mode <mode>', 'Weather refresh mode: cache (no downloads), refresh (smart), force-refresh (always download)', 'refresh')
   .option('--horizons <type>', 'Forecast horizons: daily, weekly, or both (generates multiple outputs from single training)', 'daily')
   .option('--use-calibration <id>', 'Use saved calibration instead of training fresh')
+  .option('--save-model', 'Save trained CFAC models to registry')
+  .option('--model-name <name>', 'Custom name for saved model instance')
+  .option('--use-wind-model <id>', 'Use saved wind model for inference (skips wind training)')
+  .option('--use-solar-model <id>', 'Use saved solar model for inference (skips solar training)')
   // NOTE: LSTM model option removed from production - experimental only via direct code modification
   .action(async (options) => {
     try {
@@ -2325,6 +2458,158 @@ cfacCommand
         }
       }
 
+      // ═══════════════════════════════════════════════════════════════════════════
+      // INFERENCE MODE: Load saved wind/solar models
+      // ═══════════════════════════════════════════════════════════════════════════
+      const useWindModel = options.useWindModel;
+      const useSolarModel = options.useSolarModel;
+      const inferenceMode = !!(useWindModel || useSolarModel);
+
+      // Pre-declare model maps that will be populated either by training or inference
+      let wind4TierModelsLoaded: Map<string, Wind4TierHybridModel> | null = null;
+      let windHybridModelsLoaded: Map<string, WindEnhancedHybridModel> | null = null;
+      let solarHybridModelsLoaded: Map<string, SolarHybridModel> | null = null;
+      let windStationsFromModel: string[] = [];
+      let solarStationsFromModel: string[] = [];
+      let windModelConfig: { wind4Tier: boolean } = { wind4Tier };
+
+      if (inferenceMode) {
+        console.log('\n╔════════════════════════════════════════════════════════════════╗');
+        console.log('║  ❄️  INFERENCE MODE - Using Frozen Model Weights               ║');
+        console.log('╚════════════════════════════════════════════════════════════════╝');
+
+        // Load wind model if specified
+        if (useWindModel) {
+          console.log(`\n💾 Loading saved wind model: ${useWindModel}...`);
+          try {
+            const savedWindModel = getModelById(useWindModel);
+            if (!savedWindModel) {
+              console.error(`❌ Wind model not found: ${useWindModel}`);
+              console.error('   Run "node dist/index.js models list --entity-type wind" to see available wind models');
+              process.exit(1);
+            }
+
+            if (savedWindModel.metadata.entityType !== 'wind') {
+              console.error(`❌ Model ${useWindModel} is not a wind model (type: ${savedWindModel.metadata.entityType})`);
+              process.exit(1);
+            }
+
+            const windData = savedWindModel.modelData.data as any;
+            const windModels = windData.windModels || {};
+            const windConfig = windData.config || {};
+            const windCalibration = windData.calibration || {};
+
+            // Determine if this is a 4-tier or enhanced hybrid model
+            windModelConfig.wind4Tier = windConfig.wind4Tier !== false;
+
+            // Reconstruct wind models from saved state
+            windStationsFromModel = Object.keys(windModels);
+
+            if (windModelConfig.wind4Tier) {
+              // Reconstruct 4-Tier Hybrid models
+              wind4TierModelsLoaded = new Map();
+              for (const [stationCode, factors] of Object.entries(windModels)) {
+                if (factors) {
+                  const model = new Wind4TierHybridModel(stationCode);
+                  model.load4TierFactors(factors as any);
+                  wind4TierModelsLoaded.set(stationCode, model);
+                }
+              }
+              console.log(`  ✅ Loaded ${wind4TierModelsLoaded.size} Wind 4-Tier Hybrid models`);
+            } else {
+              // Reconstruct Enhanced Hybrid models
+              windHybridModelsLoaded = new Map();
+              for (const [stationCode, state] of Object.entries(windModels)) {
+                if (state) {
+                  const model = WindEnhancedHybridModel.fromJSON(state as WindEnhancedHybridState);
+                  windHybridModelsLoaded.set(stationCode, model);
+                }
+              }
+              console.log(`  ✅ Loaded ${windHybridModelsLoaded.size} Wind Enhanced Hybrid models`);
+            }
+
+            // Apply wind calibration from saved model
+            if (windCalibration.global_bias !== undefined) {
+              calibratedWindBias = windCalibration.global_bias;
+            }
+            if (windCalibration.per_station) {
+              for (const [stationCode, data] of Object.entries(windCalibration.per_station)) {
+                const stationData = data as { scale?: number; bias?: number };
+                if (stationData.scale !== undefined) {
+                  windStationScale.set(stationCode, stationData.scale);
+                }
+              }
+            }
+
+            console.log(`  📅 Trained: ${savedWindModel.metadata.trainedAt}`);
+            console.log(`  📊 Training MAPE: ${savedWindModel.metrics.mape?.toFixed(1) || 'N/A'}%`);
+            console.log(`  ❄️  Frozen weights - no retraining will occur`);
+          } catch (error: any) {
+            console.error(`❌ Failed to load wind model: ${error.message}`);
+            process.exit(1);
+          }
+        }
+
+        // Load solar model if specified
+        if (useSolarModel) {
+          console.log(`\n💾 Loading saved solar model: ${useSolarModel}...`);
+          try {
+            const savedSolarModel = getModelById(useSolarModel);
+            if (!savedSolarModel) {
+              console.error(`❌ Solar model not found: ${useSolarModel}`);
+              console.error('   Run "node dist/index.js models list --entity-type solar" to see available solar models');
+              process.exit(1);
+            }
+
+            if (savedSolarModel.metadata.entityType !== 'solar') {
+              console.error(`❌ Model ${useSolarModel} is not a solar model (type: ${savedSolarModel.metadata.entityType})`);
+              process.exit(1);
+            }
+
+            const solarData = savedSolarModel.modelData.data as any;
+            const solarModels = solarData.solarModels || {};
+            const solarCalibration = solarData.calibration || {};
+
+            // Reconstruct solar models from saved state
+            solarStationsFromModel = Object.keys(solarModels);
+            solarHybridModelsLoaded = new Map();
+
+            for (const [stationCode, state] of Object.entries(solarModels)) {
+              if (state) {
+                const model = SolarHybridModel.fromJSON(state as SolarHybridModelState);
+                solarHybridModelsLoaded.set(stationCode, model);
+              }
+            }
+            console.log(`  ✅ Loaded ${solarHybridModelsLoaded.size} Solar Hybrid models`);
+
+            // Apply solar calibration from saved model
+            if (solarCalibration.global_bias !== undefined) {
+              calibratedSolarBias = solarCalibration.global_bias;
+            }
+            if (solarCalibration.per_hour) {
+              for (const [hourStr, scale] of Object.entries(solarCalibration.per_hour)) {
+                solarHourlyScale.set(parseInt(hourStr), scale as number);
+              }
+            }
+            if (solarCalibration.per_station) {
+              for (const [stationCode, data] of Object.entries(solarCalibration.per_station)) {
+                const stationData = data as { scale?: number };
+                if (stationData.scale !== undefined) {
+                  solarStationScale.set(stationCode, stationData.scale);
+                }
+              }
+            }
+
+            console.log(`  📅 Trained: ${savedSolarModel.metadata.trainedAt}`);
+            console.log(`  📊 Training MAPE: ${savedSolarModel.metrics.mape?.toFixed(1) || 'N/A'}%`);
+            console.log(`  ❄️  Frozen weights - no retraining will occur`);
+          } catch (error: any) {
+            console.error(`❌ Failed to load solar model: ${error.message}`);
+            process.exit(1);
+          }
+        }
+      }
+
       console.log('\n═══════════════════════════════════════════════════════════════════════════════');
       console.log('          OPTIMAL CAPACITY FACTOR FORECASTING (v2)                              ');
       const windModelName = wind4Tier ? '4-Tier MREC Hybrid (region-specific gustRatio)' : 'Weather-Only MREC Hybrid';
@@ -2370,11 +2655,17 @@ cfacCommand
       const clusters = capacityFactorService.getClusters();
       console.log(`   Loaded ${stations.size} stations in ${clusters.length} weather clusters`);
 
-      // Parse training data (capacity factors)
-      console.log('\n📚 Parsing capacity factor training data...');
-      let cfacData: RawCapacityFactorData[];
+      // Parse training data (capacity factors) - skip if fully in inference mode
+      let cfacData: RawCapacityFactorData[] = [];
+      let trainingStations: string[] = [];
+      const fullInferenceMode = inferenceMode && useWindModel && useSolarModel;
 
-      if (options.useDb) {
+      if (fullInferenceMode) {
+        // INFERENCE MODE: Use station lists from saved models
+        console.log('\n📚 Skipping training data (inference mode - using saved models)');
+        trainingStations = [...new Set([...windStationsFromModel, ...solarStationsFromModel])];
+        console.log(`   Using ${trainingStations.length} stations from saved models`);
+      } else if (options.useDb) {
         // Load from database
         console.log('   Loading from database...');
         const db = getDatabase(options.db);
@@ -2416,19 +2707,22 @@ cfacCommand
         );
       }
 
-      // Apply training-end date filter if specified
-      const trainingEndDate = options.trainingEnd ? DateTime.fromISO(options.trainingEnd).endOf('day').toJSDate() : null;
-      if (trainingEndDate) {
-        const originalCount = cfacData.length;
-        cfacData = cfacData.filter(record => record.datetime <= trainingEndDate);
-        console.log(`\n📅 Training data cutoff: ${options.trainingEnd}`);
-        console.log(`   Original records: ${originalCount.toLocaleString()}`);
-        console.log(`   After filtering:  ${cfacData.length.toLocaleString()} (removed ${(originalCount - cfacData.length).toLocaleString()} records after cutoff)`);
-      }
+      // Apply training-end date filter if specified (only when loading training data)
+      if (!fullInferenceMode) {
+        console.log('\n📚 Parsing capacity factor training data...');
+        const trainingEndDate = options.trainingEnd ? DateTime.fromISO(options.trainingEnd).endOf('day').toJSDate() : null;
+        if (trainingEndDate) {
+          const originalCount = cfacData.length;
+          cfacData = cfacData.filter(record => record.datetime <= trainingEndDate);
+          console.log(`\n📅 Training data cutoff: ${options.trainingEnd}`);
+          console.log(`   Original records: ${originalCount.toLocaleString()}`);
+          console.log(`   After filtering:  ${cfacData.length.toLocaleString()} (removed ${(originalCount - cfacData.length).toLocaleString()} records after cutoff)`);
+        }
 
-      // Get unique station codes from training data
-      const trainingStations = capacityFactorService.getStationCodes(cfacData);
-      console.log(`   Found ${trainingStations.length} stations in training data`);
+        // Get unique station codes from training data
+        trainingStations = capacityFactorService.getStationCodes(cfacData);
+        console.log(`   Found ${trainingStations.length} stations in training data`);
+      }
 
       // Categorize stations by type
       const stationsByType = new Map<StationType, string[]>();
@@ -2624,18 +2918,69 @@ cfacCommand
         return result;
       };
 
-      // Get training data date range
-      const sortedCfac = [...cfacData].sort((a, b) => a.datetime.getTime() - b.datetime.getTime());
-      const trainStart = DateTime.fromJSDate(sortedCfac[0].datetime).toISODate()!;
-      const trainEnd = DateTime.fromJSDate(sortedCfac[sortedCfac.length - 1].datetime).toISODate()!;
-      console.log(`\n📅 Training data: ${trainStart} to ${trainEnd}`);
+      // Get training data date range (skip in inference mode - no training data)
+      let trainStart = '';
+      let trainEnd = '';
+      if (!fullInferenceMode) {
+        const sortedCfac = [...cfacData].sort((a, b) => a.datetime.getTime() - b.datetime.getTime());
+        trainStart = DateTime.fromJSDate(sortedCfac[0].datetime).toISODate()!;
+        trainEnd = DateTime.fromJSDate(sortedCfac[sortedCfac.length - 1].datetime).toISODate()!;
+        console.log(`\n📅 Training data: ${trainStart} to ${trainEnd}`);
+      }
       console.log(`📅 Forecast period: ${options.start} to ${options.end}`);
-
-      // Fetch weather data for training period
-      console.log('\n🌤️  Fetching weather data for training period...');
 
       // Weather fetch options - respect CLI weather-refresh-mode
       const weatherOptions = { refreshMode: weatherRefreshMode as 'cache' | 'refresh' | 'force-refresh' };
+
+      // Training weather map (only populated in training mode)
+      const trainClusterWeather = new Map<string, Map<number, CFacWeatherFeatures>>();
+
+      // ═══════════════════════════════════════════════════════════════════════════
+      // MODEL DECLARATIONS (outside training block for inference mode access)
+      // ═══════════════════════════════════════════════════════════════════════════
+      // These must be declared here so they're accessible in both training and forecast sections
+      let windHybridModels = new Map<string, WindEnhancedHybridModel>();
+      let wind4TierModels: Map<string, Wind4TierHybridModel> | null = null;
+      let solarHybridModels = new Map<string, SolarHybridModel>();
+      const solarPhysicsModels = new Map<string, SolarIrradianceModel>();
+      const solarBiasCorrections = new Map<string, number>();
+      const solarMrecModels = new Map<string, SolarMRECModel>();
+      const solarMrecHybridModels = new Map<string, SolarMRECHybridModel>();
+      const solarSeasonalModels = new Map<string, SolarSeasonalMRECModel>();
+      let modelRouter = new ModelRouter();
+      const biasCorrector = new BiasCorrector(options.biasCorrection || false);
+
+      // Training-only data (empty in inference mode)
+      let windTrainingSamples: CFacTrainingSample[] = [];
+      let allSolarSamples: CFacTrainingSample[] = [];
+      let otherTrainingStations: string[] = [];
+
+      // INFERENCE MODE: Assign loaded models (skip training entirely)
+      if (fullInferenceMode) {
+        console.log('\n❄️  INFERENCE MODE: Using frozen models (no training)');
+
+        // Assign wind models from loaded state
+        if (wind4TierModelsLoaded) {
+          wind4TierModels = wind4TierModelsLoaded;
+          console.log(`   🌬️  Wind: ${wind4TierModels.size} loaded 4-Tier Hybrid models`);
+        } else if (windHybridModelsLoaded) {
+          windHybridModels = windHybridModelsLoaded;
+          console.log(`   🌬️  Wind: ${windHybridModels.size} loaded Enhanced Hybrid models`);
+        }
+
+        // Assign solar models from loaded state
+        if (solarHybridModelsLoaded) {
+          solarHybridModels = solarHybridModelsLoaded;
+          console.log(`   ☀️  Solar: ${solarHybridModels.size} loaded Hybrid models`);
+        }
+
+        console.log('   📅 Calibration factors loaded from saved model (frozen)');
+      }
+
+      // TRAINING MODE: Fetch weather, train models, calibrate
+      if (!fullInferenceMode) {
+        // Fetch weather data for training period
+        console.log('\n🌤️  Fetching weather data for training period...');
 
       // Fetch weather for WIND stations using station-specific coordinates (100m hub height)
       console.log('   Fetching wind station-specific weather (100m hub height)...');
@@ -2673,10 +3018,10 @@ cfacCommand
         weatherOptions
       );
 
-      // Parse training weather into cluster/station -> timestamp -> features
-      const trainClusterWeather = new Map<string, Map<number, CFacWeatherFeatures>>();
+        // Parse training weather into cluster/station -> timestamp -> features
+        // (trainClusterWeather already declared above)
 
-      // Helper to parse weather CSV
+        // Helper to parse weather CSV
       const parseWeatherCsv = (csvData: string): Map<number, CFacWeatherFeatures> => {
         const weatherMap = new Map<number, CFacWeatherFeatures>();
         const lines = csvData.split('\n').filter(l => l.trim());
@@ -2741,7 +3086,7 @@ cfacCommand
 
       // Prepare MREC calibration data
       const mrecCalibrationData: MRECCalibrationData[] = [];
-      const windTrainingSamples: CFacTrainingSample[] = [];
+      // windTrainingSamples already declared outside the training block
 
       for (const record of filteredCfacData) {
         if (!windStations.includes(record.stationCode)) continue;
@@ -2791,11 +3136,9 @@ cfacCommand
       }
 
       // Train wind models - use 4-tier if requested, otherwise Enhanced Hybrid
-      let windHybridModels: Map<string, WindEnhancedHybridModel>;
-      let wind4TierModels: Map<string, Wind4TierHybridModel> | null = null;
-
+      // (inference mode handled before this block - models already assigned)
       if (wind4Tier) {
-        // Train 4-Tier Hybrid (LOW/RAMP/RATED/HIGH with region-specific gustRatio)
+        // TRAINING MODE: Train 4-Tier Hybrid (LOW/RAMP/RATED/HIGH with region-specific gustRatio)
         wind4TierModels = await trainAll4TierHybrid(
           windTrainingSamples,
           asymmetricLoss,
@@ -2806,7 +3149,7 @@ cfacCommand
         // Create empty enhanced models map for compatibility
         windHybridModels = new Map();
       } else {
-        // Train Enhanced Hybrid (multiplicative correction - better for peaks)
+        // TRAINING MODE: Train Enhanced Hybrid (multiplicative correction - better for peaks)
         windHybridModels = await trainAllEnhancedHybrid(
           mrecFactorsList,
           windTrainingSamples,
@@ -2819,33 +3162,30 @@ cfacCommand
       // ─────────────────────────────────────────────────────────────────────────────
       // 2. SOLAR: Physics+ML Hybrid or Physics-Only with Bias Correction or MREC models
       // ─────────────────────────────────────────────────────────────────────────────
-      if (solarSeasonal) {
-        // DEPRECATED: --solar-seasonal now uses Physics+ML Hybrid (same as default)
-        console.log('\n   [2/2] ☀️  SOLAR: Training Physics+ML Hybrid (--solar-seasonal deprecated)...');
-      } else if (solarMrecHybrid) {
-        console.log('\n   [2/2] ☀️  SOLAR: iPool MREC + ML Residual (per-station calibration)...');
-      } else if (solarMrec) {
-        console.log('\n   [2/2] ☀️  SOLAR: iPool MREC Three-Tier (per-station calibration)...');
-      } else if (solarPhysicsOnly) {
-        console.log('\n   [2/2] ☀️  SOLAR: Physics-Only + Bias Correction...');
-      } else if (solarSeasonalAdaptive) {
-        console.log('\n   [2/2] ☀️  SOLAR: Seasonal Adaptive (dry/wet ML models, reduced dry weight)...');
-      } else {
-        console.log('\n   [2/2] ☀️  SOLAR: Training Physics+ML Hybrid...');
-      }
-
-      const solarHybridModels = new Map<string, SolarHybridModel>();
-      const solarPhysicsModels = new Map<string, SolarIrradianceModel>();
-      const solarBiasCorrections = new Map<string, number>();
-      const solarMrecModels = new Map<string, SolarMRECModel>();
-      const solarMrecHybridModels = new Map<string, SolarMRECHybridModel>();
-      const solarSeasonalModels = new Map<string, SolarSeasonalMRECModel>();
-
-      // Collect all station samples for batch MREC calibration
-      const allSolarSamples: CFacTrainingSample[] = [];
+      // (inference mode handled before this block - models already assigned)
+      // Training-only data structure (not declared outside):
       const solarMrecCalibrationData: SolarMRECCalibrationData[] = [];
 
+      if (solarSeasonal) {
+          // DEPRECATED: --solar-seasonal now uses Physics+ML Hybrid (same as default)
+          console.log('\n   [2/2] ☀️  SOLAR: Training Physics+ML Hybrid (--solar-seasonal deprecated)...');
+        } else if (solarMrecHybrid) {
+          console.log('\n   [2/2] ☀️  SOLAR: iPool MREC + ML Residual (per-station calibration)...');
+        } else if (solarMrec) {
+          console.log('\n   [2/2] ☀️  SOLAR: iPool MREC Three-Tier (per-station calibration)...');
+        } else if (solarPhysicsOnly) {
+          console.log('\n   [2/2] ☀️  SOLAR: Physics-Only + Bias Correction...');
+        } else if (solarSeasonalAdaptive) {
+          console.log('\n   [2/2] ☀️  SOLAR: Seasonal Adaptive (dry/wet ML models, reduced dry weight)...');
+        } else {
+          console.log('\n   [2/2] ☀️  SOLAR: Training Physics+ML Hybrid...');
+        }
+
+      const totalSolarStations = solarStations.length;
+      let solarStationIdx = 0;
+
       for (const stationCode of solarStations) {
+        solarStationIdx++;
         // Use station-specific weather for solar (SOLAR_${stationCode})
         const solarClusterId = `SOLAR_${stationCode}`;
         const weatherMap = trainClusterWeather.get(solarClusterId);
@@ -2889,13 +3229,16 @@ cfacCommand
         if (stationSamples.length >= 50) {
           if (solarMrecHybrid || solarMrec) {
             // MREC models will be calibrated after this loop (batch calibration)
+            // (batch logging handled in calibrateAllSolarMREC/calibrateAllSolarMRECHybrid)
           } else if (solarSeasonal) {
             // DEPRECATED: --solar-seasonal now trains hybrid models (same as default)
+            console.log(`      [${solarStationIdx}/${totalSolarStations}] Training ${stationCode} (Physics+ML)...`);
             const model = new SolarHybridModel(stationCode);
             await model.train(stationSamples, asymmetricLoss);
             solarHybridModels.set(stationCode, model);
           } else if (solarPhysicsOnly) {
             // Physics-only mode: create model and calculate bias correction
+            console.log(`      [${solarStationIdx}/${totalSolarStations}] Calibrating ${stationCode} (Physics)...`);
             const physicsModel = new SolarIrradianceModel();
             solarPhysicsModels.set(stationCode, physicsModel);
 
@@ -2918,12 +3261,14 @@ cfacCommand
             solarBiasCorrections.set(stationCode, avgBias);
           } else if (solarSeasonalAdaptive) {
             // Seasonal Adaptive mode: train separate dry/wet models, reduce ML weight in dry season
+            console.log(`      [${solarStationIdx}/${totalSolarStations}] Training ${stationCode} (Seasonal Adaptive)...`);
             const model = new SolarHybridModel(stationCode);
             await model.train(stationSamples, asymmetricLoss);
             model.setSeasonalAdaptiveMode(true);
             solarHybridModels.set(stationCode, model);
           } else {
             // ML Hybrid mode (with optional weather-confidence scaling)
+            console.log(`      [${solarStationIdx}/${totalSolarStations}] Training ${stationCode} (Physics+ML)...`);
             const model = new SolarHybridModel(stationCode);
             await model.train(stationSamples, asymmetricLoss);
             // Enable weather-confidence mode if requested (scales ML residual by weather confidence)
@@ -2983,7 +3328,7 @@ cfacCommand
       console.log('\n   [3/3] 📊 Other types: Training profile-based models...');
 
       // Build general training samples for non-wind/solar stations
-      const otherTrainingStations = [
+      otherTrainingStations = [
         ...hydroRoRStations,
         ...hydroStorageStations,
         ...geothermalStations,
@@ -3024,7 +3369,7 @@ cfacCommand
         () => {}
       );
 
-      const modelRouter = new ModelRouter();
+      modelRouter = new ModelRouter();
       if (otherSamples.length > 0) {
         await modelRouter.trainAllModels(otherSamples, (msg: string) => console.log(`      ${msg}`));
       }
@@ -3033,8 +3378,7 @@ cfacCommand
       // ═══════════════════════════════════════════════════════════════════════════
       // LEARN BIAS CORRECTIONS (if enabled)
       // ═══════════════════════════════════════════════════════════════════════════
-
-      const biasCorrector = new BiasCorrector(options.biasCorrection || false);
+      // (biasCorrector already initialized outside the training block)
 
       if (options.biasCorrection) {
         console.log('\n🔧 Learning station-specific bias corrections...');
@@ -3094,6 +3438,7 @@ cfacCommand
         // Print detailed bias summary
         biasCorrector.printSummary((msg) => console.log(msg));
       }
+      } // End of if (!fullInferenceMode) - training section complete
 
       // ═══════════════════════════════════════════════════════════════════════════
       // FETCH FORECAST WEATHER DATA
@@ -3647,6 +3992,270 @@ cfacCommand
         const savedId = await cfacCalibrationService.saveCalibration(calibrationState);
         console.log(`   ✅ Calibration saved: ${savedId}`);
         console.log(`   Use with: --use-calibration ${savedId}`);
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════════
+      // SAVE MODELS TO REGISTRY (if --save-model is set)
+      // ═══════════════════════════════════════════════════════════════════════════
+
+      if (options.saveModel) {
+        // Can't save models in inference mode (no training was done)
+        if (fullInferenceMode) {
+          console.log('\n⚠️  --save-model ignored in inference mode (no training was done)');
+        } else {
+        console.log('\n💾 Saving trained CFAC models to registry...');
+        const modelTimestamp = new Date().toISOString();
+        const modelName = options.modelName || `CFAC ${DateTime.now().toFormat('yyyy-MM-dd HH:mm')}`;
+
+        // Calculate actual per-station MAPE from training data predictions vs actuals
+        const perStationMape: Record<string, number> = {};
+        const CFAC_MAPE_THRESHOLD = 0.01;  // Skip actuals below 1% CF (outages/noise)
+
+        // Helper to calculate per-station MAPE
+        const calcStationMape = (
+          samples: CFacTrainingSample[],
+          predictFn: (sample: CFacTrainingSample) => number | null
+        ): { mape: number; count: number } => {
+          let sumAbsError = 0;
+          let sumActual = 0;
+          let validCount = 0;
+          for (const sample of samples) {
+            if (sample.actualCFac < CFAC_MAPE_THRESHOLD) continue;
+            const predicted = predictFn(sample);
+            if (predicted === null) continue;
+            sumAbsError += Math.abs(predicted - sample.actualCFac);
+            sumActual += sample.actualCFac;
+            validCount++;
+          }
+          // Capacity-weighted MAPE: Σ|error| / Σ(actual) * 100
+          const mape = sumActual > 0 ? (sumAbsError / sumActual) * 100 : 0;
+          return { mape, count: validCount };
+        };
+
+        // Serialize wind models and calculate actual MAPE
+        const windModelData: Record<string, any> = {};
+        let windTotalMape = 0;
+        let windStationCount = 0;
+
+        if (wind4Tier && wind4TierModels) {
+          for (const [stationCode, model] of wind4TierModels) {
+            // Wind4TierHybridModel: get MREC factors (the serializable part)
+            const factors = model.get4TierFactors();
+            windModelData[stationCode] = factors ? JSON.parse(JSON.stringify(factors)) : null;
+
+            // Calculate actual MAPE for this station
+            const stationSamples = windTrainingSamples.filter(s => s.stationCode === stationCode);
+            const { mape, count } = calcStationMape(stationSamples, (sample) => {
+              return model.predict(sample.weather, sample.datetime);
+            });
+            if (count > 0) {
+              perStationMape[stationCode] = mape;
+              windTotalMape += mape;
+              windStationCount++;
+            }
+          }
+        } else {
+          for (const [stationCode, model] of windHybridModels) {
+            // WindEnhancedHybridModel: toJSON() returns object directly
+            windModelData[stationCode] = model.toJSON();
+
+            // Calculate actual MAPE for this station
+            const stationSamples = windTrainingSamples.filter(s => s.stationCode === stationCode);
+            const { mape, count } = calcStationMape(stationSamples, (sample) => {
+              return model.predict(sample.weather, sample.datetime);
+            });
+            if (count > 0) {
+              perStationMape[stationCode] = mape;
+              windTotalMape += mape;
+              windStationCount++;
+            }
+          }
+        }
+
+        // Serialize solar models and calculate actual MAPE
+        const solarModelData: Record<string, any> = {};
+        let solarTotalMape = 0;
+        let solarStationCount = 0;
+
+        for (const [stationCode, model] of solarHybridModels) {
+          solarModelData[stationCode] = model.toJSON();
+
+          // Calculate actual MAPE for this station
+          const stationSamples = allSolarSamples.filter(s => s.stationCode === stationCode);
+          const { mape, count } = calcStationMape(stationSamples, (sample) => {
+            return model.predict(sample.weather, sample.datetime);
+          });
+          if (count > 0) {
+            perStationMape[stationCode] = mape;
+            solarTotalMape += mape;
+            solarStationCount++;
+          }
+        }
+
+        // Calculate overall MAPE as mean of per-station MAPEs
+        const overallWindMAPE = windStationCount > 0 ? windTotalMape / windStationCount : 0;
+        const overallSolarMAPE = solarStationCount > 0 ? solarTotalMape / solarStationCount : 0;
+
+        // Build structured calibration data for wind
+        // bias ≈ 1 - scale (since scale = actual/predicted, bias = (pred-actual)/actual)
+        const windCalibration: {
+          global_bias: number;
+          per_station: Record<string, { bias: number; scale: number }>;
+        } = {
+          global_bias: calibratedWindBias,
+          per_station: {}
+        };
+        for (const [stationCode, scale] of windStationScale) {
+          windCalibration.per_station[stationCode] = {
+            bias: 1 - scale,  // scale < 1 means over-predicting (positive bias)
+            scale: scale
+          };
+        }
+
+        // Build structured calibration data for solar
+        const solarCalibration: {
+          global_bias: number;
+          per_hour: Record<string, number>;
+          per_station: Record<string, { scale: number }>;
+        } = {
+          global_bias: calibratedSolarBias,
+          per_hour: {},
+          per_station: {}
+        };
+        // Capture hourly scales (daylight hours 5-19)
+        for (let h = 5; h <= 19; h++) {
+          const scale = solarHourlyScale.get(h);
+          if (scale !== undefined) {
+            solarCalibration.per_hour[h.toString()] = scale;
+          }
+        }
+        // Capture per-station scales
+        for (const [stationCode, scale] of solarStationScale) {
+          solarCalibration.per_station[stationCode] = { scale };
+        }
+
+        // Build combined CFAC model artifact (legacy format for backward compatibility)
+        const cfacModelData = {
+          windModels: windModelData,
+          solarModels: solarModelData,
+          calibration: {
+            globalFactors: {
+              windScale: effectiveWindScale,
+              solarScale: effectiveSolarScale,
+              otherScale: effectiveOtherScale
+            },
+            solarHourlyScale: Object.fromEntries(solarHourlyScale),
+            windStationScale: Object.fromEntries(windStationScale),
+            solarStationScale: Object.fromEntries(solarStationScale),
+            otherStationScale: Object.fromEntries(otherStationScale)
+          },
+          config: {
+            useXgboost: useXGBoost,
+            asymmetricLoss,
+            biasCorrection: options.biasCorrection || false,
+            wind4Tier,
+            solarPhysicsOnly,
+            solarMrec,
+            solarMrecHybrid
+          }
+        };
+
+        // Save wind model bundle
+        if (Object.keys(windModelData).length > 0) {
+          const windSavedModel: SavedModel = {
+            metadata: {
+              id: crypto.randomUUID(),
+              entityType: 'wind' as CFACEntityType,
+              entityCode: 'all_wind',
+              isGroupModel: true,
+              modelType: (wind4Tier ? '4tier' : 'hybrid') as CFACModelType,
+              version: 1,
+              trainedAt: modelTimestamp,
+              trainingPeriod: { start: trainStart, end: trainEnd },
+              holdoutDays: 0,
+              trainingRecords: windTrainingSamples.length
+            },
+            metrics: {
+              mape: overallWindMAPE,
+              rmse: 0,
+              mae: 0,
+              r2Score: 0,
+              bias: calibratedWindBias,
+              trainingRecords: windTrainingSamples.length,
+              testRecords: 0,
+              perZoneMape: perStationMape
+            },
+            featureConfig: {
+              features: ['windSpeed', 'windSpeed100', 'windGust', 'temperature', 'hour', 'month'],
+              normalization: {}
+            },
+            modelData: {
+              type: (wind4Tier ? '4tier' : 'hybrid') as CFACModelType,
+              data: {
+                windModels: windModelData,
+                calibration: windCalibration,  // Structured calibration for wind
+                legacyCalibration: cfacModelData.calibration,  // Backward compatibility
+                config: cfacModelData.config
+              }
+            }
+          };
+
+          try {
+            const windModelId = saveModelToStore(windSavedModel, 'cfac-forecast2', modelName);
+            console.log(`   ✅ Wind models saved: ${windModelId} (${Object.keys(windModelData).length} stations, MAPE: ${overallWindMAPE.toFixed(1)}%)`);
+          } catch (err: any) {
+            console.log(`   ⚠️  Failed to save wind models: ${err.message}`);
+          }
+        }
+
+        // Save solar model bundle
+        if (Object.keys(solarModelData).length > 0) {
+          const solarSavedModel: SavedModel = {
+            metadata: {
+              id: crypto.randomUUID(),
+              entityType: 'solar' as CFACEntityType,
+              entityCode: 'all_solar',
+              isGroupModel: true,
+              modelType: 'hybrid' as CFACModelType,
+              version: 1,
+              trainedAt: modelTimestamp,
+              trainingPeriod: { start: trainStart, end: trainEnd },
+              holdoutDays: 0,
+              trainingRecords: allSolarSamples.length
+            },
+            metrics: {
+              mape: overallSolarMAPE,
+              rmse: 0,
+              mae: 0,
+              r2Score: 0,
+              bias: calibratedSolarBias,
+              trainingRecords: allSolarSamples.length,
+              testRecords: 0,
+              perZoneMape: perStationMape
+            },
+            featureConfig: {
+              features: ['solarRadiation', 'cloudCover', 'temperature', 'hour', 'month'],
+              normalization: {}
+            },
+            modelData: {
+              type: 'hybrid' as CFACModelType,
+              data: {
+                solarModels: solarModelData,
+                calibration: solarCalibration,  // Structured calibration for solar
+                legacyCalibration: cfacModelData.calibration,  // Backward compatibility
+                config: cfacModelData.config
+              }
+            }
+          };
+
+          try {
+            const solarModelId = saveModelToStore(solarSavedModel, 'cfac-forecast2', modelName);
+            console.log(`   ✅ Solar models saved: ${solarModelId} (${Object.keys(solarModelData).length} stations, MAPE: ${overallSolarMAPE.toFixed(1)}%)`);
+          } catch (err: any) {
+            console.log(`   ⚠️  Failed to save solar models: ${err.message}`);
+          }
+        }
+        } // End of if (!fullInferenceMode) for saveModel
       }
 
       // ═══════════════════════════════════════════════════════════════════════════
@@ -8947,6 +9556,21 @@ scheduler
       const configService = getConfigService();
       const globalConfig = configService.get();
 
+      // ENFORCE: Scheduler requires a model - check --use-model or active model
+      let useModelId = options.useModel;
+      if (!useModelId) {
+        const activeModel = getActiveModel('regional', 'all_regions');
+        if (activeModel) {
+          useModelId = activeModel.metadata.id;
+          console.log(`\n📌 Using active model: ${activeModel.metadata.id}`);
+        } else {
+          console.error('\n❌ Error: No model selected.');
+          console.error('   Train a model in Manual tab and activate it in Models tab before running the scheduler.');
+          console.error('   Or specify --use-model <id> to use a specific model.');
+          process.exit(1);
+        }
+      }
+
       const service = new ForecastSchedulerService({
         demandDataPath: options.demandPath,
         cfacDataPath: options.cfacPath,
@@ -8988,7 +9612,7 @@ scheduler
         horizon,
         verbose: true,
         loadCalibratorPath: options.loadCalibrator,
-        useModelId: options.useModel,
+        useModelId,  // Use resolved model ID (from --use-model or active model)
         trainingDays: parseInt(options.trainingDays) || 30,
         useCalibrationId: options.useCalibration ? parseInt(options.useCalibration) : undefined,
         useMostRecentCalibration: options.useSavedCalibration || false

@@ -277,7 +277,8 @@ export class SolarHybridModel {
    */
   private predictRawWithModel(weather: CFacWeatherFeatures, datetime: Date, model: MultivariateLinearRegression | null): number {
     const hour = datetime.getHours();
-    if (hour < 6 || hour >= 18 || weather.solarRadiation <= 0) {
+    // Allow 5 AM to 7 PM for seasonal variation
+    if (hour < 5 || hour > 19 || weather.solarRadiation <= 0) {
       return 0;
     }
 
@@ -425,8 +426,8 @@ export class SolarHybridModel {
    * @returns Clear sky index [0, 1]
    */
   private calculateClearSkyIndex(actualRadiation: number, datetime: Date, hour: number): number {
-    // Night time - return 0 (using same conservative cutoff as predictRaw)
-    if (hour < 6 || hour >= 18) {
+    // Night time - return 0 (allow 5 AM to 7 PM for seasonal variation)
+    if (hour < 5 || hour > 19) {
       return 0;
     }
 
@@ -554,11 +555,10 @@ export class SolarHybridModel {
    */
   predictRaw(weather: CFacWeatherFeatures, datetime: Date): number {
     // Handle night time explicitly
-    // Use conservative daylight hours (6am-5pm) to avoid over-prediction at sunrise/sunset
-    // where the weather API reports low radiation but actual generation is near-zero
+    // Allow daylight hours 5 AM to 7 PM for seasonal variation in sunrise/sunset
     const hour = datetime.getHours();
-    if (hour < 6 || hour >= 18 || weather.solarRadiation <= 0) {
-      return 0;  // No solar generation at night or near-sunset
+    if (hour < 5 || hour > 19 || weather.solarRadiation <= 0) {
+      return 0;  // No solar generation at night
     }
 
     // Calculate physics-based prediction
@@ -789,4 +789,107 @@ export class SolarHybridModel {
     return this.drySeasonBiasCorrection;
   }
 
+  /**
+   * Serialize model state to JSON-compatible object
+   * Returns an object that can be saved to model store
+   */
+  toJSON(): SolarHybridModelState {
+    return {
+      version: 1,
+      stationCode: this.stationCode,
+      biasCorrection: this.biasCorrection,
+      drySeasonBiasCorrection: this.drySeasonBiasCorrection,
+      physicsOnlyMode: this.physicsOnlyMode,
+      weatherConfidenceMode: this.weatherConfidenceMode,
+      seasonalAdaptiveMode: this.seasonalAdaptiveMode,
+      hourlyCorrection: Array.from(this.hourlyCorrection.entries()),
+      drySeasonHourlyCorrection: Array.from(this.drySeasonHourlyCorrection.entries()),
+      residualModel: this.residualModel ? {
+        weights: (this.residualModel as any).weights,
+        inputs: (this.residualModel as any).inputs,
+        outputs: (this.residualModel as any).outputs,
+      } : null,
+      drySeasonResidualModel: this.drySeasonResidualModel ? {
+        weights: (this.drySeasonResidualModel as any).weights,
+        inputs: (this.drySeasonResidualModel as any).inputs,
+        outputs: (this.drySeasonResidualModel as any).outputs,
+      } : null,
+      irradianceModelParams: {
+        tempCoeff: (this.irradianceModel as any).tempCoeff,
+        systemLoss: (this.irradianceModel as any).systemLoss,
+      },
+    };
+  }
+
+  /**
+   * Restore model state from serialized data
+   * Static factory method for creating a new model from saved state
+   */
+  static fromJSON(state: SolarHybridModelState): SolarHybridModel {
+    const model = new SolarHybridModel(state.stationCode, state.irradianceModelParams);
+
+    // Restore bias corrections
+    model.biasCorrection = state.biasCorrection;
+    model.drySeasonBiasCorrection = state.drySeasonBiasCorrection;
+
+    // Restore mode flags
+    model.physicsOnlyMode = state.physicsOnlyMode;
+    model.weatherConfidenceMode = state.weatherConfidenceMode;
+    model.seasonalAdaptiveMode = state.seasonalAdaptiveMode;
+
+    // Restore hourly corrections
+    model.hourlyCorrection = new Map(state.hourlyCorrection);
+    model.drySeasonHourlyCorrection = new Map(state.drySeasonHourlyCorrection);
+
+    // Restore residual model
+    if (state.residualModel) {
+      const mockX = [[0]];
+      const mockY = [[0]];
+      model.residualModel = new MultivariateLinearRegression(mockX, mockY);
+      (model.residualModel as any).weights = state.residualModel.weights;
+      (model.residualModel as any).inputs = state.residualModel.inputs;
+      (model.residualModel as any).outputs = state.residualModel.outputs;
+    }
+
+    // Restore dry season residual model
+    if (state.drySeasonResidualModel) {
+      const mockX = [[0]];
+      const mockY = [[0]];
+      model.drySeasonResidualModel = new MultivariateLinearRegression(mockX, mockY);
+      (model.drySeasonResidualModel as any).weights = state.drySeasonResidualModel.weights;
+      (model.drySeasonResidualModel as any).inputs = state.drySeasonResidualModel.inputs;
+      (model.drySeasonResidualModel as any).outputs = state.drySeasonResidualModel.outputs;
+    }
+
+    return model;
+  }
+}
+
+/**
+ * Serialized state for SolarHybridModel
+ */
+export interface SolarHybridModelState {
+  version: number;
+  stationCode: string;
+  biasCorrection: number;
+  drySeasonBiasCorrection: number;
+  physicsOnlyMode: boolean;
+  weatherConfidenceMode: boolean;
+  seasonalAdaptiveMode: boolean;
+  hourlyCorrection: Array<[number, number]>;
+  drySeasonHourlyCorrection: Array<[number, number]>;
+  residualModel: {
+    weights: number[][];
+    inputs: number;
+    outputs: number;
+  } | null;
+  drySeasonResidualModel: {
+    weights: number[][];
+    inputs: number;
+    outputs: number;
+  } | null;
+  irradianceModelParams: {
+    tempCoeff: number;
+    systemLoss: number;
+  };
 }

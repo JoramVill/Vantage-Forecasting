@@ -23,6 +23,8 @@
   "dependencies": {
     "@fractal-solutions/xgboost-js": "^1.0.0",
     "@types/adm-zip": "^0.5.7",
+    "@types/msgpack-lite": "^0.1.12",
+    "@types/uuid": "^10.0.0",
     "adm-zip": "^0.5.16",
     "axios": "^1.6.2",
     "better-sqlite3": "^12.6.2",
@@ -33,8 +35,10 @@
     "date-holidays": "^3.26.5",
     "luxon": "^3.4.4",
     "ml-regression-multivariate-linear": "^2.0.3",
+    "msgpack-lite": "^0.1.26",
     "ssh2-sftp-client": "^12.0.1",
-    "synaptic": "^1.1.4"
+    "synaptic": "^1.1.4",
+    "uuid": "^13.0.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

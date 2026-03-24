@@ -11,6 +11,7 @@ export { SolarIrradianceModel } from './SolarIrradianceModel.js';
 // Hybrid models (weather + ML)
 export { WindHybridModel } from './WindHybridModel.js';
 export { SolarHybridModel } from './SolarHybridModel.js';
+export type { SolarHybridModelState } from './SolarHybridModel.js';
 
 // MREC model (iPool-style three-tier piecewise)
 export { WindMRECModel, calibrateAllMREC, calibrateAllMRECCFBased, calibrateAllMRECMLOptimized } from './WindMRECModel.js';
@@ -60,7 +61,7 @@ export type { CubicPowerCurveFactors } from './WindCubicModel.js';
 
 // Enhanced Hybrid (multiplicative correction + physics boost - no hard cutoffs)
 export { WindEnhancedHybridModel, trainAllEnhancedHybrid } from './WindEnhancedHybridModel.js';
-export type { EnhancedHybridFactors, EnhancedHybridMetrics } from './WindEnhancedHybridModel.js';
+export type { EnhancedHybridFactors, EnhancedHybridMetrics, WindEnhancedHybridState } from './WindEnhancedHybridModel.js';
 
 // Solar Premium Hybrid (uses UV, humidity, visibility, conditions)
 export { SolarPremiumHybridModel, trainAllSolarPremium } from './SolarPremiumHybridModel.js';

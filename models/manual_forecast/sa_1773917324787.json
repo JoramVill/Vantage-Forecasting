@@ -1,0 +1,23 @@
+{
+  "id": "sa_1773917324787",
+  "name": "sa",
+  "notes": "",
+  "entityType": "forecast",
+  "entityCode": "manual_forecast",
+  "createdAt": "2026-03-19T10:48:44.787Z",
+  "isActive": false,
+  "forecastConfig": {
+    "forecastStart": "2026-03-20",
+    "forecastEnd": "2026-03-26",
+    "demandEnabled": true,
+    "cfacEnabled": true,
+    "zonalMode": true,
+    "demandModel": "hybrid-calibrated",
+    "cfacModel": "hybrid"
+  },
+  "trainingMetadata": {
+    "trainingStart": "2026-02-01",
+    "trainingEnd": "2026-03-19",
+    "dataSource": "database"
+  }
+}

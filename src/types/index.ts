@@ -10,6 +10,9 @@ export * from './interconnector.js';
 // Export global config types
 export * from './config.js';
 
+// Export CFAC calibration types
+export * from './cfacCalibration.js';
+
 // Weather data from CSV (raw hourly)
 export interface RawWeatherData {
   name: string;
@@ -232,7 +235,14 @@ export interface ZoneConfig {
   cities: ZonalCity[];
 }
 
+export interface RegionConfig {
+  code: string;
+  name: string;
+  parentKey: string;  // Maps to zone.parentRegion (e.g., "luzon", "visayas", "mindanao")
+}
+
 export interface ZonalConfig {
+  regions?: RegionConfig[];  // Optional for backwards compatibility
   zones: ZoneConfig[];
 }
 

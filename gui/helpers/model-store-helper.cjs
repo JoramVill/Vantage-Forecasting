@@ -98,6 +98,7 @@ function getDatabase() {
     { name: 'holiday_mape', type: 'REAL' },
     { name: 'per_zone_mape', type: 'TEXT' },
     { name: 'per_region_mape', type: 'TEXT' },
+    { name: 'calibration_json', type: 'TEXT' },
     { name: 'is_scheduler_active', type: 'INTEGER DEFAULT 0' },
     { name: 'is_manual_active', type: 'INTEGER DEFAULT 0' },
     { name: 'last_used_at', type: 'TEXT' },
@@ -224,7 +225,7 @@ function getTrainingInstances() {
       SELECT * FROM models
       WHERE is_archived = 0
         AND mape IS NOT NULL
-        AND entity_type IN ('regional', 'zonal')
+        AND entity_type IN ('regional', 'zonal', 'wind', 'solar', 'hydro', 'biomass', 'geothermal', 'battery')
       ORDER BY entity_type, trained_at DESC
     `).all();
 
@@ -296,6 +297,7 @@ function getTrainingInstances() {
       let calibration = null;
 
       if (firstModel.calibration_mode) {
+        // Demand model calibration (pass1/pass2 structure)
         calibration = {
           mode: firstModel.calibration_mode,
           quantileAlpha: firstModel.calibration_quantile_alpha || undefined,
@@ -322,6 +324,13 @@ function getTrainingInstances() {
             validationMAPE: firstModel.calibration_pass2_val_mape || 0,
             alpha: firstModel.calibration_pass2_alpha || 0.5,
           };
+        }
+      } else if (firstModel.calibration_json) {
+        // CFAC model calibration (wind/solar - JSON structure)
+        try {
+          calibration = JSON.parse(firstModel.calibration_json);
+        } catch (e) {
+          // Ignore parse errors
         }
       }
 

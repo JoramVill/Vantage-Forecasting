@@ -306,9 +306,14 @@ export async function autoPushIfEnabled(
     return;
   }
 
+  const filename = path.basename(localPath);
+  console.log(`\n📤 [Gateway] Auto-pushing ${filename}...`);
+
   const result = await pushFileToGateway(localPath, undefined, geography);
-  if (!result.success) {
-    console.warn(`[Gateway] Auto-push failed: ${result.error}`);
+  if (result.success) {
+    console.log(`   ✅ [Gateway] Push complete: ${result.remotePath}`);
+  } else {
+    console.warn(`   ❌ [Gateway] Auto-push failed: ${result.error}`);
   }
 }
 

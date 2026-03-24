@@ -1,3 +1,10 @@
+---
+Status: Active
+Last-Verified: 2026-03-22
+Verified-Against: v2.2.0
+Updated-By: codebase-documenter
+---
+
 # Vantage Gatekeeper - License Integration Guide
 
 **Version:** 2.2.0

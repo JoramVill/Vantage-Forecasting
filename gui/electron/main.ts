@@ -129,6 +129,13 @@ interface GlobalForecastConfig {
     forecastTypes: ('demand' | 'cfac')[];
     horizons: ('daily' | 'weekly')[];
   };
+  modelSelection?: {
+    useTrainedModels: boolean;
+    defaultDemandModel: string | null;
+    defaultCfacModel: string | null;
+    activeCfacCalibrationId: string | null;
+    modelOverrides: Record<string, string>;
+  };
 }
 
 interface ConfigValidationResult {
@@ -1148,6 +1155,88 @@ ipcMain.handle('save-scheduler-config', async (_event, config) => {
   }
 });
 
+// Load zones configuration from zones.json
+// Returns zones, regions, and zone-to-region mapping for GUI
+ipcMain.handle('get-zones-config', async () => {
+  const appRoot = getAppRoot();
+
+  // Try multiple paths to find zones.json
+  const possiblePaths = [
+    path.join(appRoot, 'src', 'data', 'zones.json'),
+    path.join(appRoot, 'dist', 'data', 'zones.json'),
+    path.join(appRoot, 'cli', 'dist', 'data', 'zones.json'),
+  ];
+
+  for (const zonesPath of possiblePaths) {
+    try {
+      if (fs.existsSync(zonesPath)) {
+        const raw = fs.readFileSync(zonesPath, 'utf-8');
+        const config = JSON.parse(raw);
+
+        // Extract zones array
+        const zones = (config.zones || []).map((z: any) => ({
+          code: z.code,
+          name: z.name,
+          parentRegion: z.parentRegion
+        }));
+
+        // Extract regions array (with fallback for backwards compatibility)
+        const regions = config.regions || [
+          { code: 'CLUZ', name: 'Luzon', parentKey: 'luzon' },
+          { code: 'CVIS', name: 'Visayas', parentKey: 'visayas' },
+          { code: 'CMIN', name: 'Mindanao', parentKey: 'mindanao' }
+        ];
+
+        // Build zone-to-region mapping
+        const parentKeyToRegion: Record<string, string> = {};
+        for (const region of regions) {
+          parentKeyToRegion[region.parentKey] = region.code;
+        }
+
+        const zoneToRegion: Record<string, string> = {};
+        for (const zone of zones) {
+          zoneToRegion[zone.code] = parentKeyToRegion[zone.parentRegion] || zone.parentRegion.toUpperCase();
+        }
+
+        return { zones, regions, zoneToRegion };
+      }
+    } catch (error) {
+      console.error(`Failed to read zones.json from ${zonesPath}:`, error);
+    }
+  }
+
+  // Fallback to hardcoded defaults if file not found
+  console.warn('zones.json not found, using hardcoded defaults');
+  return {
+    zones: [
+      { code: '01NLUZ', name: 'Northern Luzon', parentRegion: 'luzon' },
+      { code: '02METRO', name: 'Metro Manila', parentRegion: 'luzon' },
+      { code: '03SLUZ', name: 'Southern Luzon', parentRegion: 'luzon' },
+      { code: '04LEYTE', name: 'Leyte/Eastern Visayas', parentRegion: 'visayas' },
+      { code: '05CEBU', name: 'Cebu', parentRegion: 'visayas' },
+      { code: '06NEGROS', name: 'Negros', parentRegion: 'visayas' },
+      { code: '07BOHOL', name: 'Bohol', parentRegion: 'visayas' },
+      { code: '08PANAY', name: 'Panay/Western Visayas', parentRegion: 'visayas' },
+      { code: '09NWMIN', name: 'Northwest Mindanao', parentRegion: 'mindanao' },
+      { code: '10LANAO', name: 'Lanao', parentRegion: 'mindanao' },
+      { code: '11NCMIN', name: 'North Central Mindanao', parentRegion: 'mindanao' },
+      { code: '12NEMIN', name: 'Northeast Mindanao', parentRegion: 'mindanao' },
+      { code: '13SEMIN', name: 'Southeast Mindanao', parentRegion: 'mindanao' },
+      { code: '14SWMIN', name: 'Southwest Mindanao', parentRegion: 'mindanao' }
+    ],
+    regions: [
+      { code: 'CLUZ', name: 'Luzon', parentKey: 'luzon' },
+      { code: 'CVIS', name: 'Visayas', parentKey: 'visayas' },
+      { code: 'CMIN', name: 'Mindanao', parentKey: 'mindanao' }
+    ],
+    zoneToRegion: {
+      '01NLUZ': 'CLUZ', '02METRO': 'CLUZ', '03SLUZ': 'CLUZ',
+      '04LEYTE': 'CVIS', '05CEBU': 'CVIS', '06NEGROS': 'CVIS', '07BOHOL': 'CVIS', '08PANAY': 'CVIS',
+      '09NWMIN': 'CMIN', '10LANAO': 'CMIN', '11NCMIN': 'CMIN', '12NEMIN': 'CMIN', '13SEMIN': 'CMIN', '14SWMIN': 'CMIN'
+    }
+  };
+});
+
 // Get recent forecast runs from database
 ipcMain.handle('get-recent-runs', async (_event, limit = 20) => {
   try {
@@ -1181,6 +1270,7 @@ ipcMain.handle('run-scheduler-manual', async (_event, options: {
   verbose?: boolean;
   pushGateway?: boolean;
   useCalibrationId?: number | null;
+  useModelId?: string | null;  // Use saved trained model (skips training)
   useDb?: boolean;
   dataDbPath?: string | null;
   maxIterations?: number;
@@ -1194,7 +1284,7 @@ ipcMain.handle('run-scheduler-manual', async (_event, options: {
   const projectRoot = getProjectRoot();
 
   const { date, type, horizon, calibratorPath, trainingDays, endDate, verbose, pushGateway,
-          useCalibrationId, useDb, dataDbPath, maxIterations, refreshWeather, overwrite,
+          useCalibrationId, useModelId, useDb, dataDbPath, maxIterations, refreshWeather, overwrite,
           suffix, outputDir, weatherCacheDir } = options;
 
   // Determine if this is a date range (backfill) or single date run
@@ -1239,6 +1329,11 @@ ipcMain.handle('run-scheduler-manual', async (_event, options: {
   // Use saved calibration to skip calibration phase
   if (useCalibrationId && useCalibrationId > 0) {
     args.push('--use-calibration', String(useCalibrationId));
+  }
+
+  // Use saved trained model from model store (skips training entirely)
+  if (useModelId) {
+    args.push('--use-model', useModelId);
   }
 
   // Database source options
@@ -1514,6 +1609,790 @@ ipcMain.handle('reset-global-config', async () => {
   return localConfigService.load();
 });
 
+// Update model selection in forecast_config.json
+ipcMain.handle('update-model-selection', async (_event, modelSelection) => {
+  try {
+    const config = localConfigService.load();
+    config.modelSelection = {
+      useTrainedModels: modelSelection.useTrainedModels || false,
+      defaultDemandModel: modelSelection.defaultDemandModel || null,
+      defaultCfacModel: modelSelection.defaultCfacModel || null,
+      activeCfacCalibrationId: modelSelection.activeCfacCalibrationId || null,
+      modelOverrides: modelSelection.modelOverrides || {}
+    };
+    localConfigService.save(config);
+    return { success: true };
+  } catch (error: any) {
+    console.error('Failed to update model selection:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  MODEL MANAGEMENT IPC HANDLERS
+//  Note: Uses CLI commands via spawn to avoid ESM/CJS compatibility issues
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Helper to run model CLI commands and parse JSON output
+async function runModelCommand(args: string[]): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const nodePath = getNodePath();
+    const cliPath = getCliScriptPath();
+    const fullArgs = [cliPath, 'models', ...args, '--json'];
+
+    const proc = spawn(nodePath, fullArgs, {
+      cwd: getProjectRoot(),
+      env: { ...process.env, FORCE_COLOR: '0' }
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    proc.stdout.on('data', (data) => { stdout += data.toString(); });
+    proc.stderr.on('data', (data) => { stderr += data.toString(); });
+
+    proc.on('close', (code) => {
+      if (code === 0) {
+        try {
+          // Try to parse JSON from stdout
+          const jsonMatch = stdout.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
+          if (jsonMatch) {
+            resolve(JSON.parse(jsonMatch[0]));
+          } else {
+            resolve({ success: true, output: stdout.trim() });
+          }
+        } catch (e) {
+          resolve({ success: true, output: stdout.trim() });
+        }
+      } else {
+        reject(new Error(stderr || `Command failed with code ${code}`));
+      }
+    });
+  });
+}
+
+// Initialize model store
+ipcMain.handle('init-model-store', async () => {
+  try {
+    await runModelCommand(['init']);
+    return { success: true };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+});
+
+// List models with optional filters
+ipcMain.handle('list-models', async (_event, filters) => {
+  try {
+    const args = ['list'];
+    if (filters?.entityType) args.push('--entity-type', filters.entityType);
+    if (filters?.entityCode) args.push('--entity-code', filters.entityCode);
+    if (filters?.isActive === true) args.push('--active-only');
+    if (filters?.isActive === false) args.push('--archived-only');
+    const result = await runModelCommand(args);
+    // Return the models array from the CLI response
+    return result?.models || [];
+  } catch (error: any) {
+    console.error('Failed to list models:', error);
+    return [];
+  }
+});
+
+// Helper to run model store operations via subprocess (avoids NODE_MODULE_VERSION mismatch)
+async function runModelStoreCommand(method: string, ...args: any[]): Promise<any> {
+  const projectRoot = getProjectRoot();
+  const nodePath = getNodePath();
+  const helperScript = path.join(projectRoot, 'gui', 'helpers', 'model-store-helper.cjs');
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(nodePath, [helperScript, method, ...args.map(a => JSON.stringify(a))], {
+      cwd: projectRoot,
+      env: { ...process.env }
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', (data) => {
+      stdout += data.toString();
+    });
+
+    child.stderr.on('data', (data) => {
+      stderr += data.toString();
+    });
+
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(stderr || `Process exited with code ${code}`));
+      } else {
+        try {
+          const result = JSON.parse(stdout);
+          resolve(result);
+        } catch (e) {
+          reject(new Error(`Failed to parse output: ${stdout}`));
+        }
+      }
+    });
+  });
+}
+
+// Get training instances (models grouped by training session)
+ipcMain.handle('get-training-instances', async (_event) => {
+  try {
+    const result = await runModelStoreCommand('getInstances');
+    return result;
+  } catch (error: any) {
+    console.error('Failed to get training instances:', error);
+    return [];
+  }
+});
+
+// Get model by ID
+ipcMain.handle('get-model-by-id', async (_event, id) => {
+  try {
+    const result = await runModelCommand(['info', id]);
+    return result?.model || null;
+  } catch (error: any) {
+    console.error('Failed to get model:', error);
+    return null;
+  }
+});
+
+// Get active model for an entity
+ipcMain.handle('get-active-model', async (_event, entityType, entityCode) => {
+  try {
+    const result = await runModelCommand(['list', '--entity-type', entityType, '--entity-code', entityCode, '--active-only']);
+    const models = result?.models || [];
+    return models.length > 0 ? models[0] : null;
+  } catch (error: any) {
+    console.error('Failed to get active model:', error);
+    return null;
+  }
+});
+
+// Activate a model
+ipcMain.handle('activate-model', async (_event, id) => {
+  try {
+    await runModelCommand(['activate', id]);
+    return { success: true };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Archive a model
+ipcMain.handle('archive-model', async (_event, id) => {
+  try {
+    await runModelCommand(['archive', id]);
+    return { success: true };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Delete a model
+ipcMain.handle('delete-model', async (_event, id) => {
+  try {
+    await runModelCommand(['delete', id, '--force']);
+    return { success: true };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Set model as scheduler active
+ipcMain.handle('set-scheduler-active', async (_event, modelId) => {
+  try {
+    const result = await runModelStoreCommand('setSchedulerActive', modelId);
+    return result;
+  } catch (error: any) {
+    console.error('Failed to set scheduler active model:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Set model as manual forecast active
+ipcMain.handle('set-manual-active', async (_event, modelId) => {
+  try {
+    const result = await runModelStoreCommand('setManualActive', modelId);
+    return result;
+  } catch (error: any) {
+    console.error('Failed to set manual active model:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Train models (uses CLI train command)
+ipcMain.handle('train-model', async (_event, options) => {
+  try {
+    const args = ['train'];
+    if (options.type) args.push('--type', options.type);  // regional or zonal
+    if (options.demandPath) args.push('--demand', options.demandPath);
+    if (options.startDate) args.push('--start', options.startDate);
+    if (options.endDate) args.push('--end', options.endDate);
+    if (options.modelType) args.push('--model', options.modelType);  // xgboost, hybrid, regression
+    if (options.holdoutDays) args.push('--holdout-days', String(options.holdoutDays));
+    if (options.autoActivate === false) args.push('--no-auto-activate');
+    return await runModelCommand(args);
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+});
+
+// List model groups
+ipcMain.handle('list-model-groups', async () => {
+  try {
+    const result = await runModelCommand(['groups']);
+    return result?.groups || [];
+  } catch (error: any) {
+    console.error('Failed to list model groups:', error);
+    return [];
+  }
+});
+
+// List training runs
+ipcMain.handle('list-training-runs', async (_event, limit) => {
+  try {
+    const args = ['runs'];
+    if (limit) args.push('--limit', String(limit));
+    const result = await runModelCommand(args);
+    return result?.runs || [];
+  } catch (error: any) {
+    console.error('Failed to list training runs:', error);
+    return [];
+  }
+});
+
+// Save trained model (Phase 1: Manual Tab workflow)
+// Uses helper script to avoid NODE_MODULE_VERSION mismatch with better-sqlite3
+ipcMain.handle('save-trained-model', async (_event, options: {
+  name: string;
+  notes: string;
+  modelData: any;
+  entityType: string;
+  entityCode: string;
+}) => {
+  try {
+    const result = await runModelStoreCommand('save', options);
+    if (result.success) {
+      console.log(`Saved model to database: ${result.id} (${options.entityType}/${options.entityCode})`);
+    }
+    return result;
+  } catch (error: any) {
+    console.error('Failed to save trained model:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Re-evaluate model (Backtest functionality)
+// Note: Full backtest requires loading saved model weights and running inference against recent actuals.
+// For now, return mock data indicating the feature needs saved model weights to work properly.
+ipcMain.handle('re-evaluate-model', async (_event, id, options) => {
+  try {
+    // Get model info to show in backtest results
+    const modelInfo = await runModelStoreCommand('get', { id });
+
+    if (!modelInfo?.success) {
+      return {
+        success: false,
+        error: 'Model not found. Cannot run backtest without a saved model.',
+        mape: null
+      };
+    }
+
+    // For now, return the original model's MAPE as a baseline
+    // Full backtest implementation would require:
+    // 1. Loading saved model weights
+    // 2. Fetching recent actual data
+    // 3. Running inference
+    // 4. Comparing forecasts vs actuals
+    const model = modelInfo.model || modelInfo;
+    const days = options?.days || 14;
+
+    return {
+      success: true,
+      mape: model.mape || null,
+      days: days,
+      note: 'Backtest currently shows original training metrics. Full re-evaluation against recent data requires saved model weights.',
+      model: {
+        id: model.id,
+        entityType: model.entity_type || model.entityType,
+        entityCode: model.entity_code || model.entityCode,
+        trainedAt: model.trained_at || model.trainedAt
+      }
+    };
+  } catch (error: any) {
+    console.error('Failed to re-evaluate model:', error);
+    return { success: false, error: error.message, mape: null };
+  }
+});
+
+// Export model
+ipcMain.handle('export-model', async (_event, id) => {
+  if (!mainWindow) return { success: false, error: 'No window available' };
+
+  try {
+    // Get model info first
+    const model = await runModelCommand(['info', id]);
+    if (!model?.model) {
+      return { success: false, error: 'Model not found' };
+    }
+
+    // Open save dialog
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: 'Export Model',
+      defaultPath: `${model.model.entityType}_${model.model.entityCode}_v${model.model.version}.vfm`,
+      filters: [
+        { name: 'Vantage Forecaster Model', extensions: ['vfm'] },
+        { name: 'All Files', extensions: ['*'] }
+      ]
+    });
+
+    if (result.canceled || !result.filePath) {
+      return { success: false, error: 'Export cancelled' };
+    }
+
+    // Run export command
+    await runModelCommand(['export', id, '-o', result.filePath]);
+    return { success: true, path: result.filePath };
+  } catch (error: any) {
+    console.error('Failed to export model:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Import model
+ipcMain.handle('import-model', async (_event) => {
+  if (!mainWindow) return { success: false, error: 'No window available' };
+
+  try {
+    // Open file dialog
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: 'Import Model',
+      properties: ['openFile'],
+      filters: [
+        { name: 'Vantage Forecaster Model', extensions: ['vfm'] },
+        { name: 'All Files', extensions: ['*'] }
+      ]
+    });
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return { success: false, error: 'Import cancelled' };
+    }
+
+    // Run import command
+    const importResult = await runModelCommand(['import', result.filePaths[0]]);
+    return { success: true, id: importResult.id };
+  } catch (error: any) {
+    console.error('Failed to import model:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TRAINING PLAN TEMPLATE IPC HANDLERS (Phase A)
+// Uses helper script to avoid ESM/CJS compatibility issues
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Helper to run training plan operations via subprocess
+async function runTrainingPlanCommand(operation: string, ...args: any[]): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const projectRoot = getProjectRoot();
+    const scriptPath = path.join(projectRoot, 'scripts', 'training-plan-helper.cjs');
+    const nodePath = getNodePath();
+
+    const proc = spawn(nodePath, [scriptPath, operation, ...args.map(a => JSON.stringify(a))], {
+      cwd: projectRoot,
+      env: { ...process.env }
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    proc.stdout.on('data', (data) => { stdout += data.toString(); });
+    proc.stderr.on('data', (data) => { stderr += data.toString(); });
+
+    proc.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(stderr || `Process exited with code ${code}`));
+      } else {
+        try {
+          resolve(JSON.parse(stdout));
+        } catch (e) {
+          reject(new Error(`Invalid JSON response: ${stdout}`));
+        }
+      }
+    });
+
+    proc.on('error', reject);
+  });
+}
+
+// Create training plan template
+ipcMain.handle('training-plan:create', async (_event, template, createdBy = 'gui') => {
+  try {
+    const result = await runTrainingPlanCommand('create', template, createdBy);
+    return { success: true, id: result.id };
+  } catch (error: any) {
+    console.error('Failed to create training plan:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Update training plan template
+ipcMain.handle('training-plan:update', async (_event, id, updates) => {
+  try {
+    await runTrainingPlanCommand('update', id, updates);
+    return { success: true };
+  } catch (error: any) {
+    console.error('Failed to update training plan:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Delete training plan template
+ipcMain.handle('training-plan:delete', async (_event, id) => {
+  try {
+    await runTrainingPlanCommand('delete', id);
+    return { success: true };
+  } catch (error: any) {
+    console.error('Failed to delete training plan:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get training plan template by ID
+ipcMain.handle('training-plan:get', async (_event, id) => {
+  try {
+    const result = await runTrainingPlanCommand('get', id);
+    return { success: true, template: result };
+  } catch (error: any) {
+    console.error('Failed to get training plan:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// List all training plan templates
+ipcMain.handle('training-plan:list', async () => {
+  try {
+    const result = await runTrainingPlanCommand('list');
+    return { success: true, templates: result };
+  } catch (error: any) {
+    console.error('Failed to list training plans:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CFAC CALIBRATION MANAGEMENT IPC HANDLERS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Helper to run calibration service methods via subprocess
+async function runCfacCalibrationCommand(method: string, ...args: any[]): Promise<any> {
+  const projectRoot = getProjectRoot();
+  const nodePath = getNodePath();
+
+  // Create a helper script path
+  const helperScript = path.join(projectRoot, 'gui', 'helpers', 'cfac-calibration-helper.cjs');
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(nodePath, [helperScript, method, ...args.map(a => JSON.stringify(a))], {
+      cwd: projectRoot,
+      env: { ...process.env }
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', (data) => {
+      stdout += data.toString();
+    });
+
+    child.stderr.on('data', (data) => {
+      stderr += data.toString();
+    });
+
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(stderr || `Process exited with code ${code}`));
+      } else {
+        try {
+          const result = JSON.parse(stdout);
+          resolve(result);
+        } catch (e) {
+          reject(new Error(`Failed to parse output: ${stdout}`));
+        }
+      }
+    });
+  });
+}
+
+// List CFAC calibrations
+ipcMain.handle('cfac-calibration:list', async () => {
+  try {
+    const result = await runCfacCalibrationCommand('list');
+    return result;
+  } catch (error: any) {
+    console.error('Failed to list CFAC calibrations:', error);
+    return [];
+  }
+});
+
+// Get CFAC calibration details
+ipcMain.handle('cfac-calibration:get', async (_event, id: string) => {
+  try {
+    const result = await runCfacCalibrationCommand('get', id);
+    return result;
+  } catch (error: any) {
+    console.error('Failed to get CFAC calibration details:', error);
+    return null;
+  }
+});
+
+// Set active CFAC calibration
+ipcMain.handle('cfac-calibration:set-active', async (_event, id: string) => {
+  try {
+    await runCfacCalibrationCommand('setActive', id);
+  } catch (error: any) {
+    console.error('Failed to set active CFAC calibration:', error);
+    throw error;
+  }
+});
+
+// Delete CFAC calibration
+ipcMain.handle('cfac-calibration:delete', async (_event, id: string) => {
+  try {
+    const result = await runCfacCalibrationCommand('delete', id);
+    return result;
+  } catch (error: any) {
+    console.error('Failed to delete CFAC calibration:', error);
+    return false;
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DEMAND CALIBRATION MANAGEMENT IPC HANDLERS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Helper to run demand calibration methods via subprocess
+async function runDemandCalibrationCommand(method: string, ...args: any[]): Promise<any> {
+  const projectRoot = getProjectRoot();
+  const nodePath = getNodePath();
+  const helperScript = path.join(projectRoot, 'gui', 'helpers', 'demand-calibration-helper.cjs');
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(nodePath, [helperScript, method, ...args.map(a => JSON.stringify(a))], {
+      cwd: projectRoot,
+      env: { ...process.env }
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', (data) => {
+      stdout += data.toString();
+    });
+
+    child.stderr.on('data', (data) => {
+      stderr += data.toString();
+    });
+
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(stderr || `Process exited with code ${code}`));
+      } else {
+        try {
+          resolve(JSON.parse(stdout));
+        } catch (e) {
+          reject(new Error(`Failed to parse output: ${stdout}`));
+        }
+      }
+    });
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// UNIFIED DEMAND FORECAST WITH CALIBRATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Generate demand forecast with automatic calibration based on global config
+ * This is the preferred method for both Manual Forecast and Scheduler
+ */
+ipcMain.handle('run-demand-forecast-calibrated', async (_event, options: {
+  startDate: string;
+  endDate: string;
+  outputPath: string;
+  geography: 'regional' | 'zonal' | 'both';
+  trainingPath?: string;
+  actualPath?: string;  // For calibration - path to actual demand data
+  // Override config settings if needed:
+  calibrationMode?: 'hybrid' | 'iterative' | 'xgboost' | 'none';
+  quantileAlpha?: number;
+}) => {
+  try {
+    const projectRoot = getProjectRoot();
+
+    // Load global config for calibration settings
+    const configPath = path.join(projectRoot, 'forecast_config.json');
+    let globalConfig: any = {};
+    if (fs.existsSync(configPath)) {
+      globalConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    }
+
+    const calibConfig = globalConfig.calibration || {};
+    const mode = options.calibrationMode || calibConfig.mode || 'hybrid';
+    const alpha = options.quantileAlpha ?? calibConfig.quantileAlpha ?? 0.80;
+    const enableZoneScaling = calibConfig.enableZoneScaling ?? (options.geography === 'zonal');
+
+    console.log(`[Calibrated Forecast] Mode: ${mode}, Alpha: ${alpha}, ZoneScaling: ${enableZoneScaling}`);
+
+    // Step 1: Generate raw forecast
+    const forecastArgs = [
+      'forecast',
+      '-d', options.trainingPath || globalConfig.paths?.demandTraining || 'Data Samples/Demand',
+      '-s', options.startDate,
+      '-e', options.endDate,
+      '-o', options.outputPath,
+      '--model', 'hybrid'
+    ];
+
+    if (options.geography === 'zonal') {
+      forecastArgs.push('--zonal');
+    }
+
+    console.log(`[Calibrated Forecast] Generating raw forecast...`);
+    const forecastResult = await new Promise<{ stdout: string; stderr: string; code: number }>((resolve, reject) => {
+      const nodePath = getNodePath();
+      const cliPath = path.join(projectRoot, 'dist', 'index.js');
+      const child = spawn(nodePath, [cliPath, ...forecastArgs], {
+        cwd: projectRoot,
+        env: { ...process.env }
+      });
+
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (d) => { stdout += d.toString(); });
+      child.stderr.on('data', (d) => { stderr += d.toString(); });
+      child.on('close', (code) => resolve({ stdout, stderr, code: code || 0 }));
+      child.on('error', reject);
+    });
+
+    if (forecastResult.code !== 0) {
+      return { success: false, error: 'Forecast generation failed', output: forecastResult.stderr };
+    }
+
+    // Step 2: Apply calibration if mode !== 'none'
+    if (mode === 'none' || !calibConfig.enabled) {
+      console.log(`[Calibrated Forecast] Calibration disabled, returning raw forecast`);
+      return {
+        success: true,
+        outputPath: options.outputPath,
+        calibration: { mode: 'none', applied: false }
+      };
+    }
+
+    // Determine actual data path for calibration
+    const actualPath = options.actualPath || options.trainingPath || globalConfig.paths?.demandTraining;
+
+    if (!actualPath) {
+      console.log(`[Calibrated Forecast] No actual data path, returning raw forecast`);
+      return {
+        success: true,
+        outputPath: options.outputPath,
+        calibration: { mode, applied: false, reason: 'No actual data path' }
+      };
+    }
+
+    console.log(`[Calibrated Forecast] Running ${mode} calibration...`);
+    const calibResult = await runDemandCalibrationCommand('runCalibration', {
+      forecastPath: options.outputPath,
+      actualPath: actualPath,
+      mode,
+      alpha,
+      enableZoneScaling
+    });
+
+    return {
+      success: true,
+      outputPath: options.outputPath,
+      calibration: {
+        mode,
+        applied: true,
+        result: calibResult
+      }
+    };
+
+  } catch (error: any) {
+    console.error('[Calibrated Forecast] Error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Run iterative scaling calibration (Pass 1 only)
+ipcMain.handle('demand-calibration:run-iterative', async (_event, options: {
+  forecastPath: string;
+  actualPath: string;
+  dateTimeColumn?: string;
+}) => {
+  try {
+    const result = await runDemandCalibrationCommand('runIterative', options);
+    return { success: true, ...result };
+  } catch (error: any) {
+    console.error('Failed to run iterative calibration:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Run hybrid calibration (Pass 1 + Pass 2 XGBoost)
+ipcMain.handle('demand-calibration:run-hybrid', async (_event, options: {
+  forecastPath: string;
+  actualPath: string;
+  alpha?: number;  // Quantile loss parameter (default 0.80)
+  dateTimeColumn?: string;
+}) => {
+  try {
+    const result = await runDemandCalibrationCommand('runHybrid', options);
+    return { success: true, ...result };
+  } catch (error: any) {
+    console.error('Failed to run hybrid calibration:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// List saved demand calibrations
+ipcMain.handle('demand-calibration:list', async () => {
+  try {
+    const result = await runDemandCalibrationCommand('list');
+    return result;
+  } catch (error: any) {
+    console.error('Failed to list demand calibrations:', error);
+    return [];
+  }
+});
+
+// Load demand calibration by filename
+ipcMain.handle('demand-calibration:load', async (_event, filename: string) => {
+  try {
+    const result = await runDemandCalibrationCommand('load', filename);
+    return result;
+  } catch (error: any) {
+    console.error('Failed to load demand calibration:', error);
+    return null;
+  }
+});
+
+// Save demand calibration
+ipcMain.handle('demand-calibration:save', async (_event, data: any, filename: string) => {
+  try {
+    const result = await runDemandCalibrationCommand('save', data, filename);
+    return { success: true, ...result };
+  } catch (error: any) {
+    console.error('Failed to save demand calibration:', error);
+    return { success: false, error: error.message };
+  }
+});
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // GATEWAY STORAGE MANAGEMENT IPC HANDLERS
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1676,6 +2555,52 @@ ipcMain.handle('clear-gateway-files', async (_event, options: { olderThanDays: n
     return { success: true, ...data };
   } catch (error: any) {
     console.error('Failed to clear gateway files:', error);
+    if (error.code === 'ECONNREFUSED' || error.cause?.code === 'ECONNREFUSED') {
+      return { success: false, error: 'Cannot connect to Gatekeeper API. Is the server running?' };
+    }
+    return { success: false, error: error.message };
+  }
+});
+
+// Get gateway file listing with optional filters
+ipcMain.handle('get-gateway-files', async (_event, filters?: { type?: string; category?: string; geography?: string; limit?: number }) => {
+  try {
+    const { baseUrl, adminKey } = getGatekeeperApiConfig();
+
+    if (!adminKey) {
+      return { success: false, error: 'Gatekeeper admin key not configured. Add "gatekeeperAdminKey" to config.json or set VANTAGE_ADMIN_KEY environment variable.' };
+    }
+
+    // Build query string from filters
+    const params = new URLSearchParams();
+    if (filters?.type) params.append('type', filters.type);
+    if (filters?.category) params.append('category', filters.category);
+    if (filters?.geography) params.append('geography', filters.geography);
+    if (filters?.limit) params.append('limit', filters.limit.toString());
+
+    const queryString = params.toString();
+    const url = `${baseUrl}/admin/files${queryString ? '?' + queryString : ''}`;
+
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${adminKey}`
+      }
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      if (response.status === 401) {
+        return { success: false, error: 'Authentication failed. Check your admin key.' };
+      }
+      return { success: false, error: `HTTP ${response.status}: ${errorText}` };
+    }
+
+    const data = await response.json();
+    return { success: true, files: data.files || [], count: data.count || 0 };
+  } catch (error: any) {
+    console.error('Failed to get gateway files:', error);
     if (error.code === 'ECONNREFUSED' || error.cause?.code === 'ECONNREFUSED') {
       return { success: false, error: 'Cannot connect to Gatekeeper API. Is the server running?' };
     }

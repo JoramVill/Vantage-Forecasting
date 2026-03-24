@@ -16,19 +16,26 @@
     "enabled": true,
     "days": 7,
     "threshold": 5,
-    "maxIterations": 10
+    "maxIterations": 10,
+    "mode": "hybrid",
+    "quantileAlpha": 0.8,
+    "enableZoneScaling": true
   },
   "cfac": {
     "useXgboost": false,
     "asymmetricLoss": false,
-    "biasCorrection": false
+    "biasCorrection": false,
+    "scaleWind": 100,
+    "scaleSolar": 100
   },
   "demand": {
     "model": "hybrid",
     "geography": "zonal",
     "growthRate": 0,
     "scaling": {
-      "zones": {},
+      "zones": {
+        "01NLUZ": 5
+      },
       "regions": {}
     }
   },

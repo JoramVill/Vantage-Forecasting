@@ -36,7 +36,13 @@ export interface DatabasesConfig {
 }
 
 /**
- * Calibration settings for System B (iterative calibration)
+ * Calibration settings for demand forecasting
+ *
+ * Supports three modes:
+ * - 'hybrid': Iterative Scaling (Pass 1) + XGBoost Quantile Loss (Pass 2) - RECOMMENDED
+ * - 'iterative': Iterative Scaling only (fast, deterministic)
+ * - 'xgboost': XGBoost only (legacy, prone to peak crushing)
+ * - 'none': No calibration applied
  */
 export interface CalibrationConfig {
   /** Enable automatic calibration */
@@ -47,6 +53,15 @@ export interface CalibrationConfig {
   threshold: number;
   /** Maximum calibration iterations (default: 10) */
   maxIterations: number;
+
+  // Hybrid Calibration Settings (added 2026-03-20)
+  /** Calibration mode: hybrid (recommended), iterative, xgboost, or none */
+  mode: 'hybrid' | 'iterative' | 'xgboost' | 'none';
+  /** Quantile loss alpha parameter (0.5-0.95). Higher = penalize under-predictions more.
+   *  Default 0.80 gives 4:1 penalty ratio for under-prediction */
+  quantileAlpha: number;
+  /** Enable zone-specific scaling adjustments (recommended for zonal forecasts) */
+  enableZoneScaling: boolean;
 }
 
 /**
@@ -71,6 +86,13 @@ export interface DemandConfig {
   geography: 'regional' | 'zonal';
   /** Daily growth rate adjustment (e.g., 0.001 for 0.1%) */
   growthRate: number;
+  /** Zone and region-specific scaling adjustments */
+  scaling?: {
+    /** Per-zone scaling percentages (e.g., { "01NLUZ": -5 }) */
+    zones: Record<string, number>;
+    /** Per-region scaling percentages (e.g., { "CLUZ": 2 }) */
+    regions: Record<string, number>;
+  };
 }
 
 /**
@@ -145,6 +167,23 @@ export interface SchedulerConfig {
 }
 
 /**
+ * Model selection configuration for using pre-trained models
+ * Instead of training fresh models for each forecast run
+ */
+export interface ModelSelectionConfig {
+  /** Enable use of pre-trained models instead of training fresh */
+  useTrainedModels: boolean;
+  /** Default demand model ID from model store (null = train fresh) */
+  defaultDemandModel: string | null;
+  /** Default CFAC model ID from model store (null = train fresh) */
+  defaultCfacModel: string | null;
+  /** Active CFAC calibration ID (null = train fresh, uses CFACCalibrationService) */
+  activeCfacCalibrationId: string | null;
+  /** Per-entity model overrides: entity_code -> model_id */
+  modelOverrides: Record<string, string>;
+}
+
+/**
  * Global Forecast Configuration
  *
  * This is the main configuration interface that represents the entire
@@ -180,6 +219,9 @@ export interface GlobalForecastConfig {
 
   /** Scheduler service settings */
   scheduler: SchedulerConfig;
+
+  /** Model selection settings (use pre-trained models) */
+  modelSelection?: ModelSelectionConfig;
 }
 
 /**
