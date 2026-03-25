@@ -30,7 +30,7 @@ import {
 } from '../../types/capacityFactor.js';
 import { Wind4TierMRECModel, MREC4TierFactors } from './Wind4TierMRECModel.js';
 import { CFacXGBoostRegressor } from './CFacXGBoostRegressor.js';
-import { getOptimalWindSpeed } from './WindWeatherHybridModel.js';
+import { getOptimalWindSpeed } from './legacy/WindWeatherHybridModel.js';
 
 export interface Wind4TierHybridMetrics {
   stationCode: string;
@@ -94,6 +94,40 @@ export class Wind4TierHybridModel {
    */
   calibrate4TierMREC(data: MRECCalibrationData[]): MREC4TierFactors {
     return this.mrecModel.calibrate(data);
+  }
+
+  /**
+   * Train the full hybrid model (MREC calibration + residual learning)
+   * Matches the interface expected by ModelRouter
+   *
+   * @param samples Training samples for this station
+   * @returns Training metrics compatible with ModelRouter
+   */
+  async train(samples: CFacTrainingSample[]): Promise<{ mape: number; r2Score: number }> {
+    // Filter samples for this station
+    const stationSamples = samples.filter(s => s.stationCode === this.stationCode);
+
+    if (stationSamples.length < 10) {
+      console.warn(`Insufficient samples for ${this.stationCode}: ${stationSamples.length}`);
+      return { mape: 100, r2Score: 0 };
+    }
+
+    // Step 1: Calibrate 4-tier MREC from samples
+    const mrecData: MRECCalibrationData[] = stationSamples.map(s => ({
+      datetime: s.datetime,
+      stationCode: this.stationCode,
+      capacityFactor: s.actualCFac,
+      windSpeed: getOptimalWindSpeed(this.stationCode, s.weather)
+    }));
+    this.calibrate4TierMREC(mrecData);
+
+    // Step 2: Train residual model
+    const metrics = this.trainResidual(stationSamples, false);
+
+    return {
+      mape: metrics.hybridMAPE,
+      r2Score: metrics.residualR2
+    };
   }
 
   /**

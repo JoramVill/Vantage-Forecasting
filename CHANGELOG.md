@@ -5,7 +5,190 @@ All notable changes to the Vantage Forecaster project will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 2026-03-22
+## [Unreleased] - 2026-03-25
+
+### Changed
+- **V2 Architecture Now Default for Demand Forecasting**
+  - The `forecast` command now uses V2 Level × Shape architecture by default
+  - V1 HybridModel moved to `v1:forecast` command (deprecated)
+  - V2 ForecastPipeline fully implemented with weather fetching, level prediction, shape prediction, and calibration
+  - Auto-detection of model (.vfm) and calibration (.json) files from `models/demand/`
+  - V1 HybridModel code archived to `archive/v1_models/` for reference
+
+### Added
+- **Phase C Polish - Verbose Logging for V2 Pipelines**
+  - Added comprehensive verbose logging to all V2 pipeline commands
+  - TrainPipeline: Logs per-area metrics, record counts, date ranges, feature importance details
+  - CalibratePipeline: Logs calibration factors, per-area scale factors, shape corrections
+  - ForecastPipeline: Logs weather data quality, amplitude checks, forecast statistics
+  - CfacTrainPipeline: Logs station type breakdown, training metrics per station, model configurations
+  - CfacCalibratePipeline: Logs global bias, hourly scale factors, per-station MAPE metrics
+  - CfacForecastPipeline: Logs forecast statistics (avg/min/max CF), weather data quality
+  - All pipelines include timestamps in verbose mode for step tracking
+  - Verbose flag already existed in pipeline configs, now properly utilized
+
+### Fixed
+- **Phase C Polish - Minor Architecture Fixes**
+  - Added type alias `ProfileModel` to `ProfileBasedModel.ts` for consistency with other capacity factor models
+  - Added default export to `ProfileBasedModel.ts`
+  - Created `src/pipeline/index.ts` to centralize all V2 pipeline exports (TrainPipeline, CalibratePipeline, ForecastPipeline, ModelSerializer, CfacTrainPipeline, CfacCalibratePipeline, CfacForecastPipeline, CfacModelSerializer)
+  - Added V2 service exports to `src/services/index.ts` (forecastGenerator, overrideService, intradayRefresh, trainingPlanService)
+  - Added `--growth <rate>` flag to `v2:train` command for daily growth rate adjustment
+  - Added `--growth <rate>` flag to `v2:forecast` command for daily growth rate adjustment
+  - Ensured all V2 types (CfacV2ModelData, CfacV2Calibration, DemandV2ModelArtifact, CalibrationSnapshot) are properly exported from their respective serializer files
+
+### Added
+- **Models Tab - Per-Area MAPE Display in Files View (Phase B Fix)**
+  - Added `readVfmFile` IPC handler to read and deserialize .vfm model files
+  - Exposes model metrics (overallMape, perZoneMape, perRegionMape, perStationMape) to GUI
+  - Files View now displays per-area MAPE breakdown when viewing .vfm files
+  - Overall MAPE shown in large gradient card with color-coded severity (green <3%, yellow <5%, red >=5%)
+  - Per-zone MAPE for zonal demand models (14 zones: 01NLUZ, 02METRO, etc.)
+  - Per-region MAPE for regional demand models (3 regions: CLUZ, CVIS, CMIN)
+  - Per-station MAPE for CFAC models (all wind/solar stations with station codes)
+  - Color-coded borders: Green <5%/<20%, Yellow <10%/<40%, Red >=10%/>=40% (demand/CFAC respectively)
+  - Automatic loading via watcher when .vfm file is selected
+  - Loading state indicator while model file is being read
+  - "Calibrate Now" button already existed (no changes needed)
+
+### Fixed
+- **Scheduler CLI Geography Flag (Phase B Fix)**
+  - Added missing `--geography <type>` flag to `scheduler run` command (was only in `backfill`)
+  - GUI now passes `geography` parameter from `schedulerConfig.demandGeography` to IPC handler
+  - IPC handler in `main.ts` accepts `geography` parameter and passes to CLI via `--geography` flag
+  - CLI reads geography from: CLI flag > config file (`forecast_config.json`) > default 'both'
+  - Updated TypeScript type definitions in `vite-env.d.ts` to include `geography` field
+  - Scheduler now correctly respects demand geography setting from Settings tab (regional/zonal/both)
+
+### Added
+- **V2 Config Schema Integration**
+  - Added `V2Config` interface to `src/types/config.ts` with two sections:
+    - `v2.demand`: Training days (90), lag warmup (7), calibration days (7), shape clusters (4), level features list, smoothing threshold (50), default model/calibration paths
+    - `v2.cfac`: Training days (120), calibration days (14), solar alpha (0.65), wind/solar scale clamps, temperature coefficient (0.004), confidence threshold (50), default model/calibration paths, retrain monitor settings
+  - Added `v2?: V2Config` field to `GlobalForecastConfig` interface
+  - ConfigService updated with V2 defaults and deep merge support
+  - Added getter methods: `getV2DemandConfig()`, `getV2CfacConfig()`, `getV2RetrainMonitorConfig()`
+  - Updated `forecast_config.json` with V2 section showing default values
+
+- **CFAC V2 Architecture - Phase B Implementation**
+  - Implemented `CfacRetrainMonitor` service for detecting when CFAC models need retraining
+  - Tracks post-calibration MAPE per station type (wind, solar, profile)
+  - Alerts when MAPE exceeds configurable thresholds (Wind: 80%, Solar: 25%)
+  - Detects stale weather cache files (default: 24-hour staleness threshold)
+  - Provides severity levels (warning, critical) for prioritizing retraining
+  - Factory function `createCfacRetrainMonitor()` for easy instantiation
+  - Exported types: `RetrainAlert`, `CacheStatus`
+  - Configuration loaded from `forecast_config.json` via `v2.cfac.retrainMonitor` section
+
+- **CFAC Train/Calibrate Pipeline - Data Loading Implementation**
+  - Implemented `loadTrainingSamples()` in `CfacTrainPipeline.ts` (Phase A fix)
+  - Implemented `loadCalibrationSamples()` in `CfacCalibratePipeline.ts` (Phase A fix)
+  - Both functions parse CFac CSV files using `CapacityFactorService.parseCapacityFactorDirectory()`
+  - Filter data to specified training/calibration window (default 120 days / 14 days)
+  - Load station metadata from `src/data/stations.json`
+  - Fetch weather data for all stations using `weatherService.fetchAllClusters()`
+    - Wind stations: 100m hub-height data with station-specific coordinates
+    - Solar stations: UV index and premium features with station-specific coordinates
+    - Other stations: Standard weather using cluster-based coordinates
+  - Merge CFac + weather into `CFacTrainingSample[]` with temporal features (hour, day of week, month, weekend)
+  - All stub data loading functions now fully functional
+
+- **CFAC Forecast Pipeline - Weather Fetching Implementation**
+  - Implemented `fetchWeatherForecast()` in `CfacForecastPipeline.ts` (Phase A fix)
+  - Fetches weather data for all station types (wind, solar, hydro, geothermal, biomass, battery)
+  - Wind stations: Fetches 100m hub-height data using station-specific coordinates
+  - Solar stations: Fetches UV index and premium weather features using station-specific coordinates
+  - Other stations: Fetches standard weather using station coordinates
+  - Uses `weatherService.fetchAllClusters()` with automatic caching
+  - Parses CSV weather data into `CFacWeatherFeatures[]` arrays
+  - Added `getApiKey()` helper function for Visual Crossing API key resolution
+  - Added `parseWeatherCsv()` helper for CSV parsing with proper type handling
+
+- **V2 CLI Commands - Phase A Fixes**
+  - Added `--zonal` flag to `v2:train` for 14-zone sub-region mode
+  - Added `--regional` flag to `v2:train` for 3-region mode (default)
+  - Added `-c, --config <file>` flag to all V2 commands for custom config file path
+  - Added `--verbose` flag to all V2 commands for detailed logging
+  - Updated `TrainPipelineConfig` interface to accept `isZonal`, `configPath`, `verbose` options
+  - Updated `CalibratePipelineConfig` interface to accept `configPath`, `verbose` options
+  - Updated `ForecastPipelineConfig` interface to accept `configPath`, `verbose` options
+  - Changed `v2:forecast -c` flag to `-cal, --calibration` to avoid conflict with `--config`
+
+- **GUI V2 Settings Tab - V2 Configuration Fields**
+  - Added V2 nested configuration structure support in Settings tab
+  - Demand V2 settings: Level model (XGBoost/Linear, max depth, n estimators)
+  - Demand V2 settings: Shape model (archetype count, blending, weather influence, peak bias, confidence threshold, adjustment model)
+  - Demand V2 settings: Calibration (days, level/shape clamps, peak bias)
+  - Demand V2 settings: Training (days, lag warmup days)
+  - CFAC V2 settings: Solar (alpha, temperature coefficient, scale clamps)
+  - CFAC V2 settings: Wind (per-station calibration, scale clamps)
+  - CFAC V2 settings: Training and calibration days
+  - Lifecycle settings: Retrain schedules for demand and CFAC (7d/14d/30d/60d options)
+  - Lifecycle settings: Auto-retrain toggle
+  - Drift thresholds: Level, shape, solar scale, wind bias drift with consecutive cycles threshold
+  - Defensive initialization: V2 config fields default to spec values if missing in forecast_config.json
+  - All V2 settings saved to forecast_config.json with nested structure per `Documents/planning/GUI_V2_ARCHITECTURE.md` Section 6
+
+- **GUI V2 Operations Tab**
+  - New "Operations" tab replacing "Manual" tab for V2 workflow
+  - Three-panel layout: TRAIN, CALIBRATE, FORECAST (per architecture spec)
+  - Forecast type selector: Demand (Regional), Demand (Zonal), CFAC
+  - Direct mapping to V2 CLI commands: `v2:train`, `v2:calibrate`, `v2:forecast`, `v2:cfac-train`, `v2:cfac-calibrate`, `v2:cfac-forecast`
+  - Model file browser: Lists .vfm files from models/ directory
+  - Calibration file browser: Lists calibration.json files from models/ directory
+  - New IPC handlers: `list-vfm-files`, `list-calibration-files`
+  - Shared terminal output panel with existing Manual tab
+  - "Manual (V1)" tab retained for backward compatibility with old workflow
+
+- **GUI V2 Models Tab Enhancements**
+  - View mode toggle: Switch between "Instances" (database view) and "Files" (filesystem view)
+  - Files view: Browse .vfm and calibration.json files separately
+  - File detail panel: Display file metadata (path, size, modified date)
+  - "Calibrate Now" action: Run calibration for selected .vfm file
+  - File deletion: Delete .vfm or calibration.json files with confirmation
+  - New IPC handler: `delete-file` for secure file deletion (restricted to .vfm and calibration.json)
+  - Dual view supports both structured Training Instances and raw file management
+
+- **GUI V2 Scheduler Tab Updates**
+  - Active Model & Calibration Card: Select .vfm model file and calibration.json for Demand and CFAC forecasts
+  - Calibration age display: Shows time since calibration file was last modified (e.g., "4h ago", "2d ago")
+  - "Refresh Calibration Now" buttons: Immediately run `v2:calibrate` or `v2:cfac-calibrate` for active model
+  - Auto-calibrate feature: Checkbox to enable automatic re-calibration when calibration is older than configured threshold (default: 24 hours)
+  - Auto-calibrate logic integrated into scheduler run workflow: Checks calibration staleness before forecast and refreshes if needed
+  - New IPC handler: `get-file-stats` to retrieve file modification time for age calculation
+  - New computed properties: `schedulerV2DemandCalibrationAge`, `schedulerV2CfacCalibrationAge` for real-time age calculation
+  - Implements V2 Scheduler architecture per `Documents/planning/GUI_V2_ARCHITECTURE.md` Section 4
+
+### Added
+- **Demand V2 Architecture - Phase 1 + Phase 2 Implementation (COMPLETE)**
+  - **Phase 1 (Complete):** New data layer: `DataMerger.ts` for demand+weather alignment, `DailyAggregator.ts` for daily shape extraction
+  - **Phase 1 (Complete):** Level Model: `LevelModel.ts` - XGBoost predicting daily total MW with 22 features (weather, calendar, lags)
+  - **Phase 1 (Complete):** Shape Model Stage A: `ProfileLibrary.ts` - k-means clustering into archetypes with hierarchical smoothing
+  - **Phase 1 (Complete):** Shape Model Stage B: `ShapeAdjuster.ts` - per-hour linear regression for weather-based corrections
+  - **Phase 1 (Complete):** Shape Model Orchestrator: `ShapeModel.ts` - combines Stage A+B with archetype blending
+  - **Phase 1 (Complete):** All shapes validated to sum to 1.0 by construction
+  - **Phase 2 (Complete):** Combiner + Calibrator + Monitor: `ForecastCombiner.ts`, `Calibrator.ts`, `AmplitudeMonitor.ts`
+  - **Phase 2 (Complete):** Pipelines: `TrainPipeline.ts`, `CalibratePipeline.ts`, `ForecastPipeline.ts` (lifecycle separation)
+  - **Phase 2 (Complete):** Model Serialization: `ModelSerializer.ts` (MessagePack .vfm + calibration.json)
+  - **Phase 2 (Complete):** Metrics: `LevelMetrics.ts`, `ShapeMetrics.ts`, `HourlyMetrics.ts`, `RetrainMonitor.ts`
+  - **Phase 2 (Complete):** CLI Commands: `v2:train`, `v2:calibrate`, `v2:forecast` registered in `src/index.ts`
+  - Implements full architecture spec from `Documents/planning/DEMAND_FORECAST_V2_ARCHITECTURE.md`
+  - Stateless inference: model.vfm + calibration.json + weather = reproducible output
+  - NOTE: API alignment with Phase 1 models needs refinement (weather fetch, lag features)
+
+- **CFAC V2 Architecture - Phase 1 + Phase 2 Implementation**
+  - **Phase 1 (Complete):** Pipeline architecture: `CfacTrainPipeline.ts`, `CfacCalibratePipeline.ts`, `CfacForecastPipeline.ts`
+  - **Phase 1 (Complete):** Model serialization: `CfacModelSerializer.ts` for .vfm binary and .json calibration files
+  - **Phase 1 (Complete):** Lifecycle separation: Train → Calibrate → Forecast (mirrors Demand V2)
+  - **Phase 1 (Complete):** Hourly solar calibration: Per-station, per-hour scale factors (key V2 improvement)
+  - **Phase 1 (Complete):** Calibration structure: Global bias + 24 hourly scale factors for wind/solar
+  - **Phase 2 (Complete):** Asymmetric loss DEFAULT for solar (quantile α=0.65, configurable)
+  - **Phase 2 (Complete):** Wind per-station hourly calibration re-enabled (was disabled in V1)
+  - **Phase 2 (Complete):** Model consolidation: `WindHybridModel.ts` alias for `Wind4TierHybridModel`
+  - **Phase 2 (Complete):** Legacy models moved to `src/models/capacityFactor/legacy/` with backward compatibility exports
+  - **Phase 2 (Complete):** CLI Commands: `v2:cfac-train`, `v2:cfac-calibrate`, `v2:cfac-forecast` registered in `src/index.ts`
+  - **Phase 2 (Deferred):** Stale weather cache detection (low priority, complex implementation)
+  - Stateless inference: model.vfm + calibration.json + weather = reproducible output
 
 ### Added
 - **GUI Architecture and CLI Integration Guide**

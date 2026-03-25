@@ -1,8 +1,8 @@
 ---
 Status: Active
-Last-Verified: 2026-03-22
+Last-Verified: 2026-03-25
 Verified-Against: current
-Updated-By: codebase-documenter
+Updated-By: claude-opus-4-5
 ---
 
 # CLI Guide
@@ -113,36 +113,51 @@ node dist/index.js train \
 
 ---
 
-### 3. forecast - Generate Demand Forecast
+### 3. forecast - Generate Demand Forecast (V2 Architecture)
 
-Generate demand forecasts with automatic weather fetching. Supports both regional (3 regions) and zonal (14 sub-regions) modes.
+**DEFAULT COMMAND** - Uses V2 Level × Shape architecture for demand forecasting.
+
+The V2 architecture separates forecasting into two components:
+- **Level Model**: XGBoost predicts daily total demand from weather + calendar + lags
+- **Shape Model**: ProfileLibrary + ShapeAdjuster predicts 24-hour normalized profile
+- **Final Forecast**: `dailyTotal × shape24h`
+
+**Prerequisites:**
+- A trained model file (`.vfm`) - train using `v2:train`
+- A calibration file (`.json`) - calibrate using `v2:calibrate`
+- Auto-detection looks in `models/demand/` for most recent files
 
 **Usage:**
 ```bash
 # Basic regional forecast (3 regions: CLUZ, CVIS, CMIN)
+# Auto-detects model and calibration from models/demand/
 node dist/index.js forecast \
-  -s 2025-12-01 \
-  -e 2025-12-31 \
+  -s 2026-03-26 \
+  -e 2026-04-02 \
+  -o output/demand_forecast.csv
+
+# With explicit model and calibration paths
+node dist/index.js forecast \
+  -s 2026-03-26 \
+  -e 2026-04-02 \
   -o output/demand_forecast.csv \
-  --model hybrid
+  -m models/demand/regional_model.vfm \
+  -c models/demand/regional_calibration.json
 
 # Zonal forecast (14 sub-regions with 42 weather cities)
 node dist/index.js forecast \
-  -d "Data Samples/Demand" \
-  -s 2025-12-01 \
-  -e 2025-12-31 \
-  -o output/zonal_demand_forecast.csv \
+  -s 2026-03-26 \
+  -e 2026-04-02 \
+  -o output/zonal_forecast.csv \
   --zonal
 
-# With scaling adjustments
+# With verbose logging and amplitude correction
 node dist/index.js forecast \
-  -s 2025-12-01 \
-  -e 2025-12-31 \
+  -s 2026-03-26 \
+  -e 2026-04-02 \
   -o output/demand_forecast.csv \
-  --model hybrid \
-  --scale-workday 2 \
-  --scale-weekend -3 \
-  --growth 0.01
+  --verbose \
+  --amplitude-correct
 ```
 
 **Flags:**
@@ -151,34 +166,52 @@ node dist/index.js forecast \
 | `-s, --start <date>` | Forecast start date (YYYY-MM-DD) | Yes |
 | `-e, --end <date>` | Forecast end date (YYYY-MM-DD) | Yes |
 | `-o, --output <file>` | Output CSV file path | Yes |
-| `-d, --demand <file>` | Historical demand CSV file | No |
-| `--model <type>` | Model: `regression`, `xgboost`, `hybrid` | No (default: `regression`) |
+| `-m, --model <file>` | Model file (.vfm) - auto-detects if not specified | No |
+| `-c, --calibration <file>` | Calibration file (.json) - auto-detects | No |
 | `--zonal` | Use 14-zone mode (01NLUZ, 02METRO, etc.) | No |
-| `--use-saved` | Use saved model from database | No |
-| `--scale <percent>` | Scale all forecasts (e.g., `5` for +5%) | No |
-| `--scale-workday <percent>` | Scale workdays only | No |
-| `--scale-weekend <percent>` | Scale weekends only | No |
-| `--scale-holiday <percent>` | Scale holidays (highest priority) | No |
-| `--scale-peak <percent>` | Scale peak hours (09:00-21:00) | No |
-| `--scale-offpeak <percent>` | Scale off-peak (21:00-09:00) | No |
-| `--growth <percent>` | Daily growth rate (e.g., `0.01` = 0.01%/day) | No |
+| `--no-calibrate` | Skip calibration (use model only) | No |
+| `--amplitude-correct` | Auto-correct flat shapes (default: monitor only) | No |
 | `--cache <dir>` | Weather cache directory | No (default: `./weather_cache`) |
-| `--use-db` | Use demand data from database | No |
-| `--train-days <days>` | Historical training window in days | No (default: `90`) |
+| `--verbose` | Enable verbose logging | No |
+| `--push` | Push forecast to Vantage-Gateway server | No |
 
-**Scaling Priority:**
-1. Holiday scaling (highest)
-2. Workday/Weekend scaling
-3. Peak/Off-peak scaling
-4. Global scaling
-5. Growth adjustment (applied daily)
+**V2 Workflow:**
+1. **Train** (one-time): `node dist/index.js v2:train -d "Data Samples/Demand" -o models/demand/model.vfm`
+2. **Calibrate** (weekly): `node dist/index.js v2:calibrate -m models/demand/model.vfm -d "Data Samples/Demand" -o models/demand/calibration.json`
+3. **Forecast** (daily): `node dist/index.js forecast -s 2026-03-26 -e 2026-04-02 -o output/forecast.csv`
 
 **Regional vs Zonal Mode:**
 | Aspect | Regional (default) | Zonal (--zonal flag) |
 |--------|-------------------|----------------------|
 | **Output regions** | 3 (CLUZ, CVIS, CMIN) | 14 (01NLUZ, 02METRO, 03SLUZ, ...) |
 | **Weather cities** | 3 (Manila, Cebu, Davao) | 42 (3 per zone) |
-| **Database** | `forecast.db` | `forecast.db` |
+| **Model files** | `models/demand/*.vfm` | `models/demand/*zonal*.vfm` |
+
+---
+
+### 3a. v1:forecast - Legacy Demand Forecast (DEPRECATED)
+
+**DEPRECATED** - Use `forecast` or `v2:forecast` instead.
+
+The V1 HybridModel uses statistical profiles with temperature-based interpolation. This command is preserved for backward compatibility but is not recommended for new forecasts.
+
+**Usage:**
+```bash
+node dist/index.js v1:forecast \
+  -d "Data Samples/Demand" \
+  -s 2025-12-01 \
+  -e 2025-12-31 \
+  -o output/demand_forecast.csv \
+  --model hybrid
+```
+
+**Key Differences from V2:**
+| Aspect | V1 (HybridModel) | V2 (Level × Shape) |
+|--------|------------------|-------------------|
+| Architecture | Single model (profiles + temp) | Level + Shape separation |
+| Weather response | Temperature-damped interpolation | Full weather features |
+| Training | Fit profiles from historical data | XGBoost + ProfileLibrary |
+| Calibration | Iterative scaling | Per-area scale + shape correction |
 
 ---
 

@@ -19,7 +19,7 @@ import {
   MRECFactors,
   CFacWeatherFeatures,
   CFacTrainingSample,
-} from '../../types/capacityFactor.js';
+} from '../../../types/capacityFactor.js';
 import { WindMRECModel } from './WindMRECModel.js';
 
 export interface EnhancedHybridFactors {

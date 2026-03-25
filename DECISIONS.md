@@ -286,3 +286,263 @@ if (this.weekendCorrectionFactors.has(region)) continue;
 **Status:** Fixed
 
 ---
+
+## DEC-008: Demand V2 Shape/Level Architecture Adoption (2026-03-24)
+
+**Decision:** Implement Demand V2 architecture with explicit shape/level separation for all demand forecasting (regional and zonal).
+
+**Context:** V1 demand forecasting directly predicted hourly MW values using XGBoost with quantile loss calibration. This approach had several limitations:
+- Shapes were implicit side-effects rather than explicit targets
+- No guarantee that hourly predictions formed physically plausible daily profiles
+- Weekend corrections required hardcoded factors that became stale
+- Zone-specific shape patterns were difficult to preserve
+- Peak-crushing occurred (peaks regressed toward mean, troughs lifted)
+
+**Rationale:**
+- Separating "how much" (daily total) from "when" (hourly shape) makes each prediction easier and more accurate
+- Shapes normalized to sum to 1.0 by construction guarantee physical plausibility
+- Archetype clustering preserves zone-specific peak patterns instead of averaging them away
+- Hierarchical smoothing allows zones to inherit parent region patterns when data is sparse
+- Weather-based shape adjustments capture hour-specific weather effects (morning ramp, evening cool)
+- Lifecycle separation (Train → Calibrate → Forecast) enables reproducible inference without retraining
+
+**New Architecture (V2):**
+
+**Data Layer:**
+- `DataMerger.ts`: Join demand+weather, align timestamps (weather +1hr for hour-ending), average weather per area
+- `DailyAggregator.ts`: Transform hourly records into daily totals + normalized shapes + weather summaries
+
+**Level Model** (daily total prediction):
+- `LevelModel.ts`: XGBoost with 22 features (daily weather, calendar, lags, area index)
+- Target: single daily total MW
+- Features: avgTemp, maxTemp, CDH, totalPrecip, avgCloudCover, totalSolar, tempRange, dayType one-hot, month cyclical, lag features (yesterday, last week, rolling 7d/30d, trend)
+- Statistical fallback for <30 days training data
+
+**Shape Model** (24-hour profile prediction):
+- **Stage A** (`ProfileLibrary.ts`): k-means clustering into archetypes per {area, dayType}
+  - 3 archetypes by default (captures distinct peak patterns: sharp, plateau, shifted)
+  - Stores centroid weather, sample count, peak-to-trough ratio
+  - Hierarchical smoothing: zones blend with parent region when sample count < 50
+  - At inference: select nearest archetype by weather distance, blend with overall median
+- **Stage B** (`ShapeAdjuster.ts`): Per-hour linear regression on weather trajectory features
+  - Features: peakTempHour, morningRampRate, eveningCoolRate, tempRange, avgTemp, avgCloudCover, isDaytimeRain
+  - Learns residuals (actual shape - base shape) per hour
+  - Applies `weatherInfluence` multiplier (default 1.0) for tunable adjustment strength
+- **Orchestrator** (`ShapeModel.ts`): Combines Stage A+B with archetype blending (default 0.8)
+  - Final shape = (total × levelScale) × (calibratedShape)
+  - All shapes validated to sum to 1.0
+
+**Phase 1 Implementation (Completed):**
+- Data layer: DataMerger, DailyAggregator
+- Level Model: XGBoost with lag features
+- Shape Model: ProfileLibrary (k-means archetypes + hierarchical smoothing), ShapeAdjuster (per-hour linear regression)
+- TypeScript compilation verified (npm run build successful)
+
+**Phase 2 Implementation (Pending):**
+- Calibration pipeline: level scale + shape correction factors
+- ForecastCombiner: multiply level × shape + sanity checks
+- AmplitudeMonitor: peak-to-trough validation
+- TrainPipeline, CalibratePipeline, ForecastPipeline orchestrators
+- ModelSerializer: .vfm binary format + calibration.json
+- CLI integration: `train`, `calibrate`, `forecast` commands
+- RetrainMonitor: drift detection triggers
+
+**Implementation Files:**
+- `src/data/DataMerger.ts`
+- `src/data/DailyAggregator.ts`
+- `src/models/LevelModel.ts`
+- `src/models/ProfileLibrary.ts`
+- `src/models/ShapeAdjuster.ts`
+- `src/models/ShapeModel.ts`
+
+**Architecture Reference:**
+- `Documents/planning/DEMAND_FORECAST_V2_ARCHITECTURE.md` - Complete V2 specification
+
+**V1 Components Retained (for backward compatibility during migration):**
+- `src/models/hybridModel.ts` - V1 hybrid model (will be replaced by V2 in Phase 5)
+- `src/models/xgboostModel.ts` - V1 XGBoost model (will be replaced by V2 in Phase 5)
+- Existing CLI commands continue to use V1 until V2 cutover
+
+**Status:** Phase 1 Implemented (Data Layer + Models), Phase 2 Pending
+
+---
+
+## DEC-009: CFAC V2 Phase 2 - Asymmetric Solar Loss and Model Consolidation (2026-03-24)
+
+**Decision:** Implemented Phase 2 improvements for CFAC V2: asymmetric loss default for solar, model consolidation, and legacy file organization.
+
+**Context:** CFAC V2 Phase 1 established the Train → Calibrate → Forecast lifecycle. Phase 2 focused on model improvements and code organization to align with the V2 architecture spec.
+
+**Rationale:**
+- **Asymmetric Loss:** Solar under-prediction is more costly for grid planning than over-prediction (committed generation that doesn't materialize forces thermal backup). Quantile loss with α=0.65 penalizes under-predictions ~1.9x more than over-predictions.
+- **Model Consolidation:** V1 had 5+ wind models and 4+ solar models. V2 consolidates to ONE recommended model per type for clarity and maintainability.
+- **Legacy Organization:** Moving old models to `legacy/` preserves backward compatibility while clearly marking them as deprecated.
+
+**Implementation Details:**
+
+1. **Asymmetric Loss (SolarHybridModel.ts):**
+   - Changed `train()` method default: `asymmetricLoss = true` (was `false` in V1)
+   - Added `solarAlpha` parameter (default 0.65)
+   - Implemented quantile loss via weighted duplication: under-predictions get `α/(1-α)` copies
+   - α=0.65 → 1.86x weight for under-predictions
+   - Configurable range: 0.50 (symmetric) to 0.80 (strongly anti-under-prediction)
+
+2. **Wind Per-Station Calibration:**
+   - Already enabled in Phase 1 `CfacCalibratePipeline.ts`
+   - Computes global bias + 24 hourly scale factors per wind station
+   - Clamped to `windScaleClamp` [0.50, 2.00]
+
+3. **Model Consolidation:**
+   - **Wind:** `WindHybridModel.ts` now aliases `Wind4TierHybridModel` (MREC + ML hybrid)
+   - **Solar:** `SolarHybridModel.ts` remains recommended (Physics + ML + hourly calibration)
+   - **Profile:** `ProfileBasedModel.ts` for hydro/geothermal/biomass/battery
+   - Legacy models moved to `src/models/capacityFactor/legacy/`:
+     - `WindMRECModel.ts`, `WindEnhancedHybridModel.ts`, `WindWeatherHybridModel.ts`
+     - `SolarIrradianceModel.ts`, `SolarMRECHybridModel.ts`, `SolarPremiumHybridModel.ts`
+     - Original `WindHybridModel.ts` (power curve version → `WindHybridModelLegacy`)
+   - Created `legacy/index.ts` for backward compatibility exports
+   - Updated `src/models/capacityFactor/index.ts` with clear V2/Legacy sections
+
+4. **Deferred Tasks:**
+   - **Stale cache detection:** Complex weather cache metadata system with low ROI for Phase 2
+   - **V2 CLI commands:** Phase 1 pipelines are fully functional; CLI registration can follow in Phase 3
+
+**Impact:**
+- Solar forecasts will now bias toward slightly higher predictions to avoid under-forecasting
+- Wind calibration captures diurnal patterns (was disabled in V1 due to seasonal variability concerns)
+- Codebase is cleaner with single recommended model per type
+- Legacy models remain accessible for backward compatibility and reference
+
+**Files Changed:**
+- `src/models/capacityFactor/SolarHybridModel.ts` (asymmetric loss default + quantile implementation)
+- `src/models/capacityFactor/WindHybridModel.ts` (created as alias to Wind4TierHybridModel)
+- `src/models/capacityFactor/index.ts` (reorganized exports, added legacy section)
+- `src/models/capacityFactor/legacy/*` (7 models moved)
+- Import path updates in files referencing moved models
+
+**Status:** Implemented (with 2 tasks deferred to Phase 3)
+
+---
+
+## DEC-009: GUI V2 Settings Tab — Nested Configuration Structure (2026-03-24)
+
+**Decision:** Implement V2 nested configuration structure in Settings tab per `GUI_V2_ARCHITECTURE.md` Section 6.
+
+**Context:** V2 architecture introduced detailed tuning knobs for demand forecasting (level/shape separation, archetype blending, weather influence) and CFAC forecasting (solar alpha, temperature coefficients, per-station calibration). The V1 Settings tab only exposed top-level settings (model type, geography, basic calibration).
+
+**Rationale:**
+- V2 demand pipeline has 20+ tunable parameters across level model, shape model, calibration, and training stages
+- CFAC V2 has separate solar and wind tuning parameters
+- Lifecycle management requires retrain schedules and drift thresholds
+- Users need GUI access to these settings without editing forecast_config.json manually
+- Nested structure matches V2 CLI command configuration and V2 config schema
+
+**Implementation:**
+- Added 10 new config sections to Settings tab:
+  1. Demand V2: Level Model (model type, max depth, n estimators)
+  2. Demand V2: Shape Model (archetype count, blending, weather influence, peak bias, confidence threshold, adjustment model)
+  3. Demand V2: Calibration (days, level/shape clamps, peak bias)
+  4. Demand V2: Training (training days, lag warmup days)
+  5. CFAC V2: Solar (solar alpha, temperature coefficient, scale clamps)
+  6. CFAC V2: Wind (per-station calibration, scale clamps)
+  7. CFAC V2: Training/Calibration (training days, calibration days)
+  8. Lifecycle Settings (demand/CFAC retrain schedules, auto-retrain toggle)
+  9. Drift Thresholds (level, shape, solar scale, wind bias drift with consecutive cycles threshold)
+  10. All sliders show real-time values with proper formatting
+- Defensive initialization: `loadGlobalConfig()` adds V2 nested defaults if missing
+- All settings saved to `forecast_config.json` with nested structure matching V2 config schema
+
+**Impact:**
+- Settings tab now has 40+ configuration fields (up from ~15 in V1)
+- V2 config backward compatible: V1 configs get V2 defaults added automatically
+- All V2 tuning knobs accessible without manual JSON editing
+- Settings persist across GUI restarts via `forecast_config.json`
+- GUI compilation: 0 TypeScript errors, builds successfully
+
+**Files Changed:**
+- `gui/src/App.vue`: Added V2 config sections (lines 5766-6289), updated `loadGlobalConfig()` with defensive initialization
+- `CHANGELOG.md`: Added Settings Tab V2 entry
+- `context.md`: Marked Settings Tab as complete
+
+**Status:** Implemented
+
+---
+
+## DEC-011: V2 CLI Flag Conflict Resolution (2026-03-24)
+
+**Decision:** Rename calibration file flag from `-c, --calibration` to `-cal, --calibration` in `v2:forecast` command.
+
+**Context:** Phase A fixes required adding `--config <file>` flag to all V2 commands for custom config file path. This created a flag conflict in `v2:forecast` which already used `-c` for calibration file.
+
+**Rationale:**
+- Standard practice: `-c, --config` is widely used for config files across CLI tools
+- Commander.js prevents duplicate short flags in the same command
+- Using `-cal` for calibration file maintains clarity while avoiding conflict
+- Long form `--calibration` remains unchanged for backward compatibility scripts
+
+**Implementation:**
+- Changed `v2:forecast` flag from `-c, --calibration <file>` to `-cal, --calibration <file>`
+- Added `-c, --config <file>` flag to `v2:train`, `v2:calibrate`, `v2:forecast`
+- Added `--verbose` flag to all V2 commands
+- Added `--zonal` and `--regional` flags to `v2:train` for geography mode selection
+- Updated `TrainPipelineConfig`, `CalibratePipelineConfig`, `ForecastPipelineConfig` interfaces
+
+**Impact:**
+- Breaking change: Users using `-c` shorthand for calibration file must switch to `-cal` or use `--calibration`
+- New capability: All V2 commands can now load custom config files via `--config`
+- Consistency: All V2 commands follow same flag pattern (--config, --verbose)
+
+**Files Changed:**
+- `src/index.ts`: Updated v2:train, v2:calibrate, v2:forecast command definitions
+- `src/pipeline/TrainPipeline.ts`: Added isZonal, configPath, verbose to interface
+- `src/pipeline/CalibratePipeline.ts`: Added configPath, verbose to interface
+- `src/pipeline/ForecastPipeline.ts`: Added configPath, verbose to interface
+- `CHANGELOG.md`: Added Phase A fixes entry
+- `context.md`: Marked Phase A as complete
+
+**Status:** Implemented
+
+---
+
+## DEC-012: V2 Config Schema Integration (2026-03-24)
+
+**Decision:** Add V2-specific configuration schema to `forecast_config.json` for advanced V2 architecture tuning parameters.
+
+**Context:** V2 architecture introduced numerous tuning parameters for demand forecasting (level/shape separation, archetype clustering, calibration clamps) and CFAC forecasting (asymmetric loss, temperature coefficients, retrain monitoring). These settings were hardcoded in pipeline files, making them difficult to adjust without code changes.
+
+**Rationale:**
+- Centralized configuration allows users to tune V2 behavior without editing code
+- Default values reflect empirically tested settings from V2 architecture spec
+- Settings are optional — defaults are provided if section is missing (backward compatibility)
+- ConfigService getter methods provide type-safe access with guaranteed defaults
+- Deep merge strategy ensures partial V2 configs work correctly
+
+**Implementation:**
+- Added `V2Config` interface with two sections:
+  - `v2.demand`: Training period (90d), lag warmup (7d), calibration (7d), k-means clusters (4), level model feature list (21 features), smoothing threshold (50 samples), default model/calibration paths
+  - `v2.cfac`: Training period (120d), calibration (14d), solar asymmetric loss alpha (0.65), wind/solar hourly scale clamps, temperature coefficient (0.004), confidence threshold (50 samples), default model/calibration paths, retrain monitor settings (enabled, MAPE thresholds, cache staleness)
+- Added `v2?: V2Config` optional field to `GlobalForecastConfig` interface
+- ConfigService.getDefaults() includes complete V2 section with all defaults
+- ConfigService.mergeWithDefaults() performs deep merge including nested `retrainMonitor` object
+- Added three getter methods:
+  - `getV2DemandConfig()`: Returns demand V2 config with defaults
+  - `getV2CfacConfig()`: Returns CFAC V2 config with defaults
+  - `getV2RetrainMonitorConfig()`: Returns retrain monitor config with defaults
+- Updated `forecast_config.json` with V2 section showing default values
+
+**Impact:**
+- V2 pipelines can now read configuration from centralized source instead of hardcoded values
+- Users can tune V2 behavior through Settings tab or by editing `forecast_config.json`
+- V1 configs remain compatible — V2 section is optional
+- All V2 defaults match values specified in V2 architecture documents
+
+**Files Changed:**
+- `src/types/config.ts`: Added `V2Config` interface, updated `GlobalForecastConfig`
+- `src/services/configService.ts`: Added V2 defaults, deep merge logic, getter methods
+- `forecast_config.json`: Added v2 section with defaults
+- `CHANGELOG.md`: Added V2 Config Schema Integration entry
+- `context.md`: Updated Phase B progress
+
+**Status:** Implemented
+
+---

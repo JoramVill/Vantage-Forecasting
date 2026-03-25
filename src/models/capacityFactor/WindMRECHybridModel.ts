@@ -21,7 +21,7 @@ import {
   CFacWeatherFeatures,
   CFacTrainingSample,
 } from '../../types/capacityFactor.js';
-import { WindMRECModel } from './WindMRECModel.js';
+import { WindMRECModel } from './legacy/WindMRECModel.js';
 
 export interface MRECHybridMetrics {
   stationCode: string;

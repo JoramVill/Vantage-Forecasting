@@ -116,6 +116,7 @@ interface Window {
       overwrite?: boolean;
       suffix?: string | null;
       outputDir?: string;
+      geography?: 'regional' | 'zonal' | 'both';
       useXgboost?: boolean;
       asymmetricLoss?: boolean;
       biasCorrection?: boolean;
@@ -417,6 +418,25 @@ interface Window {
     } | null>;
     setActiveCfacCalibration: (id: string) => Promise<void>;
     deleteCfacCalibration: (id: string) => Promise<boolean>;
+    // V2 Operations (for GUI V2 Operations Tab)
+    listVfmFiles: (directory?: string) => Promise<Array<{ name: string; path: string; size: number; modified: string }>>;
+    listCalibrationFiles: (directory?: string) => Promise<Array<{ name: string; path: string; size: number; modified: string }>>;
+    deleteFile: (filePath: string) => Promise<{ success: boolean; error?: string }>;
+    readVfmFile: (filePath: string) => Promise<{
+      success: boolean;
+      error?: string;
+      entityType?: string;
+      geography?: string;
+      trainedAt?: string;
+      trainingPeriod?: { start: string; end: string };
+      metrics?: {
+        overallMape?: number;
+        perZoneMape?: Record<string, number>;
+        perRegionMape?: Record<string, number>;
+        perStationMape?: Record<string, number>;
+      };
+    }>;
+    getFileStats: (filePath: string) => Promise<{ exists: boolean; size?: number; modified?: number; error?: string }>;
     // Unified forecast with calibration
     runDemandForecastCalibrated: (options: {
       startDate: string;

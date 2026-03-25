@@ -21,7 +21,7 @@ import {
   CFacTrainingSample,
   StationType,
 } from '../../types/capacityFactor.js';
-import { WindMRECModel } from './WindMRECModel.js';
+import { WindMRECModel } from './legacy/WindMRECModel.js';
 
 /**
  * Bias correction factors for a single station

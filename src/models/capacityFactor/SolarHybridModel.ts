@@ -1,4 +1,4 @@
-import { SolarIrradianceModel } from './SolarIrradianceModel.js';
+import { SolarIrradianceModel } from './legacy/SolarIrradianceModel.js';
 import { CFacTrainingSample, CFacWeatherFeatures } from '../../types/capacityFactor.js';
 import MultivariateLinearRegression from 'ml-regression-multivariate-linear';
 
@@ -58,13 +58,16 @@ export class SolarHybridModel {
    * residual = actual_CFac - physics_CFac
    *
    * @param samples - Training samples with actual capacity factors and weather data
-   * @param asymmetricLoss - If true, penalize under-predictions more heavily (2:1 ratio)
+   * @param asymmetricLoss - If true (default), penalize under-predictions more heavily using quantile loss
+   * @param solarAlpha - Asymmetry parameter (0.5-0.8). Default 0.65 = penalize under-prediction ~1.9x more
    * @returns Training metrics (MAPE and R² score)
    *
    * Uses recency weighting: recent samples are duplicated more times
    * to give them higher influence on the model.
+   *
+   * V2 Change: Asymmetric loss is now DEFAULT for solar (was opt-in in V1)
    */
-  async train(samples: CFacTrainingSample[], asymmetricLoss: boolean = false): Promise<{ mape: number; r2Score: number }> {
+  async train(samples: CFacTrainingSample[], asymmetricLoss: boolean = true, solarAlpha: number = 0.65): Promise<{ mape: number; r2Score: number }> {
     if (samples.length === 0) {
       throw new Error('No training samples provided');
     }
@@ -98,12 +101,29 @@ export class SolarHybridModel {
       const copies = Math.max(1, Math.round(weight * 5));
 
       for (let c = 0; c < copies; c++) {
-        X.push([...features]);
-        Y.push([residual]);
+        // V2 Quantile Loss Implementation
+        // Instead of simple duplication, calculate duplication count based on quantile α
+        // α = 0.65 (default): under-predictions get 1.86x weight vs over-predictions
+        // Formula: weight_under = α / (1 - α), weight_over = 1.0
 
-        // Asymmetric loss: additional copies where physics under-predicts (residual > 0)
-        // This makes the model learn to correct under-predictions more aggressively
-        if (asymmetricLoss && residual > 0 && sample.actualCFac > 0.1) {
+        if (asymmetricLoss && sample.actualCFac > 0.1) {
+          const isUnderPrediction = residual > 0;
+
+          if (isUnderPrediction) {
+            // Under-prediction: duplicate more times
+            const underWeight = solarAlpha / (1 - solarAlpha); // α=0.65 → 1.86x
+            const underCopies = Math.max(1, Math.round(underWeight));
+            for (let u = 0; u < underCopies; u++) {
+              X.push([...features]);
+              Y.push([residual]);
+            }
+          } else {
+            // Over-prediction: standard weight
+            X.push([...features]);
+            Y.push([residual]);
+          }
+        } else {
+          // No asymmetric loss: standard copy
           X.push([...features]);
           Y.push([residual]);
         }

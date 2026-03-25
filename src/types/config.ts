@@ -184,6 +184,67 @@ export interface ModelSelectionConfig {
 }
 
 /**
+ * V2 Architecture Configuration
+ *
+ * Advanced settings for V2 two-stage architecture (Level + Shape decomposition).
+ * Most users should use defaults. Only adjust if you have measured evidence
+ * that changes improve forecast accuracy on held-out test data.
+ */
+export interface V2Config {
+  /** Demand forecasting V2 settings */
+  demand: {
+    /** Training period in days (default: 90) */
+    trainingDays: number;
+    /** Lag feature warmup period in days (default: 7) */
+    lagWarmupDays: number;
+    /** Calibration period in days (default: 7) */
+    calibrationDays: number;
+    /** Number of k-means clusters for shape model (default: 4) */
+    shapeClusters: number;
+    /** Feature list for XGBoost level model */
+    levelFeatures: string[];
+    /** Samples needed before enabling zone-specific shapes (default: 50) */
+    smoothingThreshold: number;
+    /** Default .vfm model path (empty = train fresh) */
+    defaultModelPath: string;
+    /** Default calibration JSON path (empty = train fresh) */
+    defaultCalibrationPath: string;
+  };
+  /** Capacity Factor (CFAC) forecasting V2 settings */
+  cfac: {
+    /** Training period in days (default: 120) */
+    trainingDays: number;
+    /** Calibration period in days (default: 14) */
+    calibrationDays: number;
+    /** Asymmetric loss alpha for solar (0.5-1.0, default: 0.65) */
+    solarAlpha: number;
+    /** Wind hourly scale factor clamp [min, max] (default: [0.5, 2.0]) */
+    windScaleClamp: [number, number];
+    /** Solar hourly scale factor clamp [min, max] (default: [0.5, 1.5]) */
+    solarScaleClamp: [number, number];
+    /** Solar temperature coefficient (default: 0.004) */
+    tempCoefficient: number;
+    /** Samples needed for per-station calibration (default: 50) */
+    confidenceThreshold: number;
+    /** Default .vfm model path (empty = train fresh) */
+    defaultModelPath: string;
+    /** Default calibration JSON path (empty = train fresh) */
+    defaultCalibrationPath: string;
+    /** Retrain monitoring settings */
+    retrainMonitor: {
+      /** Enable retrain monitoring (default: true) */
+      enabled: boolean;
+      /** Wind MAPE threshold for retrain alert (default: 80) */
+      mapeThresholdWind: number;
+      /** Solar MAPE threshold for retrain alert (default: 25) */
+      mapeThresholdSolar: number;
+      /** Weather cache staleness threshold in hours (default: 24) */
+      staleCacheHours: number;
+    };
+  };
+}
+
+/**
  * Global Forecast Configuration
  *
  * This is the main configuration interface that represents the entire
@@ -222,6 +283,9 @@ export interface GlobalForecastConfig {
 
   /** Model selection settings (use pre-trained models) */
   modelSelection?: ModelSelectionConfig;
+
+  /** V2 architecture advanced settings (optional) */
+  v2?: V2Config;
 }
 
 /**

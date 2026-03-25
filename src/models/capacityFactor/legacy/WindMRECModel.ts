@@ -16,7 +16,7 @@ import {
   MREC_POE_CONSTANTS,
   StationType,
   CFacWeatherFeatures,
-} from '../../types/capacityFactor.js';
+} from '../../../types/capacityFactor.js';
 
 export class WindMRECModel {
   private stationCode: string;

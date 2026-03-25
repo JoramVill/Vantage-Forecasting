@@ -166,3 +166,7 @@ export class ProfileBasedModel {
     return this.profiles.size > 0;
   }
 }
+
+// Type alias for consistency with other capacity factor models
+export type ProfileModel = ProfileBasedModel;
+export default ProfileBasedModel;

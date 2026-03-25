@@ -74,5 +74,63 @@
       "daily",
       "weekly"
     ]
+  },
+  "_comment_v2": "V2 architecture settings - OPTIONAL, defaults shown below. Only modify if you have measured evidence that changes improve forecast accuracy.",
+  "v2": {
+    "demand": {
+      "trainingDays": 90,
+      "lagWarmupDays": 7,
+      "calibrationDays": 7,
+      "shapeClusters": 4,
+      "levelFeatures": [
+        "hour",
+        "dayOfWeek",
+        "isWeekend",
+        "isHoliday",
+        "month",
+        "hourSin",
+        "hourCos",
+        "dayOfWeekSin",
+        "dayOfWeekCos",
+        "temp",
+        "dew",
+        "precip",
+        "windgust",
+        "windspeed",
+        "cloudcover",
+        "relativeHumidity",
+        "heatIndex",
+        "cdh",
+        "tempLag1h",
+        "tempLag24h",
+        "tempRolling24h"
+      ],
+      "smoothingThreshold": 50,
+      "defaultModelPath": "",
+      "defaultCalibrationPath": ""
+    },
+    "cfac": {
+      "trainingDays": 120,
+      "calibrationDays": 14,
+      "solarAlpha": 0.65,
+      "windScaleClamp": [
+        0.5,
+        2.0
+      ],
+      "solarScaleClamp": [
+        0.5,
+        1.5
+      ],
+      "tempCoefficient": 0.004,
+      "confidenceThreshold": 50,
+      "defaultModelPath": "",
+      "defaultCalibrationPath": "",
+      "retrainMonitor": {
+        "enabled": true,
+        "mapeThresholdWind": 80,
+        "mapeThresholdSolar": 25,
+        "staleCacheHours": 24
+      }
+    }
   }
 }

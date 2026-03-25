@@ -55,6 +55,12 @@ import { getModelById, getActiveModel, saveModel as saveModelToStore } from './s
 import { saveDemandModel, TrainingResult } from './services/forecastGenerator.js';
 import crypto from 'crypto';
 import type { SavedModel, ModelMetrics, CFACEntityType, CFACModelType } from './types/models.js';
+import { TrainPipeline } from './pipeline/TrainPipeline.js';
+import { CalibratePipeline } from './pipeline/CalibratePipeline.js';
+import { ForecastPipeline } from './pipeline/ForecastPipeline.js';
+import { trainCfacModels } from './pipeline/CfacTrainPipeline.js';
+import { calibrateCfacModels } from './pipeline/CfacCalibratePipeline.js';
+import { generateCfacForecast } from './pipeline/CfacForecastPipeline.js';
 
 // Default API key (can be overridden by env or config)
 const DEFAULT_API_KEY = 'BJYBHG8K3YS8EFK46233M8L75';
@@ -927,10 +933,113 @@ program
     console.log('\n✅ Training complete!');
   });
 
-// FORECAST command - Generate forecasts (auto-fetches weather from Visual Crossing)
+// ═══════════════════════════════════════════════════════════════
+// FORECAST command - V2 Demand Forecasting (Level × Shape Architecture)
+// ═══════════════════════════════════════════════════════════════
 program
   .command('forecast')
-  .description('Generate demand forecast (auto-fetches weather data from Visual Crossing API)')
+  .description('Generate demand forecast using V2 architecture (Level × Shape)')
+  .requiredOption('-s, --start <date>', 'Forecast start date (YYYY-MM-DD)')
+  .requiredOption('-e, --end <date>', 'Forecast end date (YYYY-MM-DD)')
+  .requiredOption('-o, --output <file>', 'Output forecast CSV file')
+  .option('-m, --model <file>', 'Model file (.vfm) - auto-detects if not specified')
+  .option('-c, --calibration <file>', 'Calibration file (.json) - auto-detects if not specified')
+  .option('--zonal', 'Use 14-zone sub-region mode (looks for zonal models)')
+  .option('--no-calibrate', 'Skip calibration (use model only)')
+  .option('--amplitude-correct', 'Auto-correct flat shapes (default: monitor only)')
+  .option('--cache <dir>', 'Weather cache directory', './weather_cache')
+  .option('--verbose', 'Enable verbose logging')
+  .option('--push', 'Push generated forecast to Vantage-Gateway server')
+  .action(async (options) => {
+    try {
+      const { ForecastPipeline } = await import('./pipeline/ForecastPipeline.js');
+      const fs = await import('fs');
+      const path = await import('path');
+
+      // Auto-detect model and calibration files if not specified
+      let modelPath = options.model;
+      let calibrationPath = options.calibration;
+
+      const modelDir = options.zonal
+        ? 'models/demand/zonal/all_zones'
+        : 'models/demand/regional/all_regions';
+      const calibDir = 'models/calibration';
+
+      // Find most recent model
+      if (!modelPath) {
+        const modelDirPath = path.join(process.cwd(), modelDir);
+        if (fs.existsSync(modelDirPath)) {
+          const vfmFiles = fs.readdirSync(modelDirPath)
+            .filter((f: string) => f.endsWith('.vfm'))
+            .sort()
+            .reverse();
+          if (vfmFiles.length > 0) {
+            modelPath = path.join(modelDirPath, vfmFiles[0]);
+            console.log(`📦 Auto-detected model: ${modelPath}`);
+          }
+        }
+      }
+
+      // Find most recent calibration
+      if (!calibrationPath && options.calibrate !== false) {
+        const calibDirPath = path.join(process.cwd(), calibDir);
+        if (fs.existsSync(calibDirPath)) {
+          const jsonFiles = fs.readdirSync(calibDirPath)
+            .filter((f: string) => f.endsWith('.json') && f.includes('demand'))
+            .sort()
+            .reverse();
+          if (jsonFiles.length > 0) {
+            calibrationPath = path.join(calibDirPath, jsonFiles[0]);
+            console.log(`📐 Auto-detected calibration: ${calibrationPath}`);
+          }
+        }
+      }
+
+      if (!modelPath) {
+        console.error('❌ No model file found. Train a model first with: v2:train');
+        console.error('   Or specify a model file with: --model <path.vfm>');
+        process.exit(1);
+      }
+
+      // If no calibration, run without it
+      if (!calibrationPath && options.calibrate !== false) {
+        console.log('⚠️  No calibration file found. Running without calibration.');
+        console.log('   Train calibration with: v2:calibrate');
+        options.calibrate = false;
+      }
+
+      const pipeline = new ForecastPipeline({
+        modelPath,
+        calibrationPath: calibrationPath || '',
+        startDate: options.start,
+        endDate: options.end,
+        outputPath: options.output,
+        weatherCacheDir: options.cache,
+        skipCalibration: options.calibrate === false || !calibrationPath,
+        amplitudeCheckMode: options.amplitudeCorrect ? 'correct' : 'monitor',
+        verbose: options.verbose || false
+      });
+
+      await pipeline.run();
+
+      // Push to gateway if requested
+      if (options.push) {
+        await autoPushIfEnabled(options.output, true);
+      }
+
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      if (options.verbose && error.stack) {
+        console.error(error.stack);
+      }
+      process.exit(1);
+    }
+  });
+
+// V1 FORECAST command - Legacy forecast using HybridModel (DEPRECATED - use v2:forecast)
+program
+  .command('v1:forecast')
+  .description('[DEPRECATED] V1 demand forecast using HybridModel - use "forecast" or "v2:forecast" instead')
   .option('-d, --demand <file>', 'Historical demand CSV file (optional if using database)')
   .requiredOption('-s, --start <date>', 'Forecast start date (YYYY-MM-DD)')
   .requiredOption('-e, --end <date>', 'Forecast end date (YYYY-MM-DD)')
@@ -9550,6 +9659,8 @@ scheduler
   .option('--use-model <id>', 'Use saved trained demand model from model store (skips training)')
   // Auto-calibration period options
   .option('--training-days <days>', 'Number of days for auto-calibration training period', '30')
+  // Geography option
+  .option('--geography <type>', 'Geography mode for demand: regional, zonal, or both', 'both')
   .action(async (options) => {
     try {
       // Load global config for database paths
@@ -9571,6 +9682,9 @@ scheduler
         }
       }
 
+      // Determine geography mode: CLI option > config file > default 'both'
+      const geographyOption = options.geography || globalConfig.demand?.geography || 'both';
+
       const service = new ForecastSchedulerService({
         demandDataPath: options.demandPath,
         cfacDataPath: options.cfacPath,
@@ -9582,6 +9696,7 @@ scheduler
         maxCalibrationIterations: parseInt(options.maxIterations) || 3,
         // Demand options
         demandModel: options.demandModel,
+        demandGeography: geographyOption as 'regional' | 'zonal' | 'both',
         regionalDbPath: globalConfig.databases.regionalDemand,
         zonalDbPath: globalConfig.databases.zonalDemand,
         // Zone/region scaling from config
@@ -10949,5 +11064,239 @@ cacheCommand
 
 // MODELS command - Model management
 program.addCommand(createModelsCommand());
+
+// ═══════════════════════════════════════════════════════════════
+// DEMAND V2 COMMANDS - Shape/Level Architecture
+// ═══════════════════════════════════════════════════════════════
+
+// V2: TRAIN command - Train demand forecast model
+program
+  .command('v2:train')
+  .description('Train Demand V2 model (shape/level architecture)')
+  .requiredOption('-d, --demand <path>', 'Demand data path (CSV folder or file)')
+  .option('-w, --weather <path>', 'Weather data path (optional, will fetch if not provided)')
+  .option('--days <number>', 'Training window in days', '90')
+  .requiredOption('-o, --output <file>', 'Output model file (.vfm)')
+  .option('--zonal', 'Use 14-zone sub-region mode')
+  .option('--regional', 'Use 3-region mode (default)')
+  .option('--growth <rate>', 'Daily growth rate adjustment (e.g., 0.001 for 0.1%)', '0')
+  .option('-c, --config <file>', 'Config file path')
+  .option('--verbose', 'Enable verbose logging')
+  .action(async (options: any) => {
+    try {
+      const pipeline = new TrainPipeline({
+        demandDataPath: options.demand,
+        weatherDataPath: options.weather || '',
+        trainingDays: parseInt(options.days),
+        lagWarmupDays: 7,
+        outputPath: options.output,
+        isZonal: options.zonal || false,
+        configPath: options.config,
+        verbose: options.verbose || false
+      });
+
+      await pipeline.run();
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      if (error.stack) {
+        console.error(error.stack);
+      }
+      process.exit(1);
+    }
+  });
+
+// V2: CALIBRATE command - Calibrate saved model with recent actuals
+program
+  .command('v2:calibrate')
+  .description('Calibrate Demand V2 model with recent actuals')
+  .requiredOption('-m, --model <file>', 'Model file (.vfm)')
+  .requiredOption('-d, --demand <path>', 'Recent demand data path')
+  .option('--days <number>', 'Calibration window in days', '7')
+  .requiredOption('-o, --output <file>', 'Output calibration file (.json)')
+  .option('--scale-zone <scales>', 'Manual per-zone scale adjustments (e.g., "01NLUZ:-10,02METRO:-22")')
+  .option('-c, --config <file>', 'Config file path')
+  .option('--verbose', 'Enable verbose logging')
+  .action(async (options: any) => {
+    try {
+      // Parse manual scale overrides from --scale-zone flag
+      let manualScaleOverrides: Record<string, number> | undefined;
+      if (options.scaleZone) {
+        manualScaleOverrides = {};
+        const pairs = options.scaleZone.split(',');
+        for (const pair of pairs) {
+          const [zone, scaleStr] = pair.split(':');
+          if (zone && scaleStr) {
+            manualScaleOverrides[zone.trim()] = parseFloat(scaleStr.trim());
+          }
+        }
+        console.log('Manual scale overrides specified:');
+        for (const [zone, scale] of Object.entries(manualScaleOverrides)) {
+          const sign = scale >= 0 ? '+' : '';
+          console.log(`  ${zone}: ${sign}${scale}%`);
+        }
+        console.log('');
+      }
+
+      const pipeline = new CalibratePipeline({
+        modelPath: options.model,
+        demandDataPath: options.demand,
+        calibrationDays: parseInt(options.days),
+        outputPath: options.output,
+        configPath: options.config,
+        verbose: options.verbose || false,
+        manualScaleOverrides
+      });
+
+      await pipeline.run();
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      if (error.stack) {
+        console.error(error.stack);
+      }
+      process.exit(1);
+    }
+  });
+
+// V2: FORECAST command - Generate forecast using saved model + calibration
+program
+  .command('v2:forecast')
+  .description('Generate Demand V2 forecast (stateless inference)')
+  .requiredOption('-m, --model <file>', 'Model file (.vfm)')
+  .requiredOption('-cal, --calibration <file>', 'Calibration file (.json)')
+  .requiredOption('-s, --start <date>', 'Forecast start date (YYYY-MM-DD)')
+  .requiredOption('-e, --end <date>', 'Forecast end date (YYYY-MM-DD)')
+  .requiredOption('-o, --output <file>', 'Output forecast CSV')
+  .option('--no-calibrate', 'Skip calibration (use model only)')
+  .option('--amplitude-correct', 'Auto-correct flat shapes (default: monitor only)')
+  .option('--growth <rate>', 'Daily growth rate adjustment (e.g., 0.001 for 0.1%)', '0')
+  .option('-c, --config <file>', 'Config file path')
+  .option('--verbose', 'Enable verbose logging')
+  .action(async (options: any) => {
+    try {
+      const pipeline = new ForecastPipeline({
+        modelPath: options.model,
+        calibrationPath: options.calibration,
+        startDate: options.start,
+        endDate: options.end,
+        outputPath: options.output,
+        skipCalibration: !options.calibrate,
+        amplitudeCheckMode: options.amplitudeCorrect ? 'correct' : 'monitor',
+        configPath: options.config,
+        verbose: options.verbose || false
+      });
+
+      await pipeline.run();
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      if (error.stack) {
+        console.error(error.stack);
+      }
+      process.exit(1);
+    }
+  });
+
+// ═══════════════════════════════════════════════════════════════
+// CFAC V2 COMMANDS - Train → Calibrate → Forecast Lifecycle
+// ═══════════════════════════════════════════════════════════════
+
+// V2: CFAC TRAIN command - Train capacity factor models
+program
+  .command('v2:cfac-train')
+  .description('Train CFAC V2 models (wind/solar/profile)')
+  .requiredOption('-t, --training <path>', 'Path to CFac training data directory')
+  .option('--weather <path>', 'Weather cache directory', './weather_cache')
+  .option('--days <number>', 'Training window in days', '120')
+  .option('--use-xgboost', 'Use XGBoost for ML layer')
+  .option('--no-asymmetric', 'Disable asymmetric loss for solar')
+  .option('--stations <path>', 'Path to stations.json', 'src/data/stations.json')
+  .option('-v, --verbose', 'Verbose logging')
+  .requiredOption('-o, --output <file>', 'Output model file (.vfm)')
+  .action(async (options: any) => {
+    try {
+      await trainCfacModels({
+        cfacTrainingPath: options.training,
+        weatherCachePath: options.weather,
+        trainingDays: parseInt(options.days),
+        useXGBoost: options.useXgboost || false,
+        asymmetricLoss: options.asymmetric !== false,
+        stationsPath: options.stations,
+        verbose: options.verbose || false,
+        outputPath: options.output
+      });
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      if (error.stack) {
+        console.error(error.stack);
+      }
+      process.exit(1);
+    }
+  });
+
+// V2: CFAC CALIBRATE command - Calibrate saved CFAC models
+program
+  .command('v2:cfac-calibrate')
+  .description('Calibrate CFAC V2 models with recent actuals')
+  .requiredOption('-m, --model <file>', 'Model file (.vfm)')
+  .requiredOption('-a, --actuals <path>', 'Path to recent CFac actuals')
+  .option('--days <number>', 'Calibration window in days', '14')
+  .option('--solar-clamp <min,max>', 'Solar hourly scale clamp', '0.50,1.50')
+  .option('--wind-clamp <min,max>', 'Wind hourly scale clamp', '0.50,2.00')
+  .option('-v, --verbose', 'Verbose logging')
+  .requiredOption('-o, --output <file>', 'Output calibration file (.json)')
+  .action(async (options: any) => {
+    try {
+      const solarClamp = options.solarClamp.split(',').map(Number) as [number, number];
+      const windClamp = options.windClamp.split(',').map(Number) as [number, number];
+
+      await calibrateCfacModels({
+        modelPath: options.model,
+        cfacActualsPath: options.actuals,
+        calibrationDays: parseInt(options.days),
+        solarScaleClamp: solarClamp,
+        windScaleClamp: windClamp,
+        verbose: options.verbose || false,
+        outputPath: options.output
+      });
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      if (error.stack) {
+        console.error(error.stack);
+      }
+      process.exit(1);
+    }
+  });
+
+// V2: CFAC FORECAST command - Generate forecast using saved model + calibration
+program
+  .command('v2:cfac-forecast')
+  .description('Generate CFAC V2 forecast (stateless inference)')
+  .requiredOption('-m, --model <file>', 'Model file (.vfm)')
+  .requiredOption('-c, --calibration <file>', 'Calibration file (.json)')
+  .requiredOption('-s, --start <date>', 'Forecast start date (YYYY-MM-DD)')
+  .requiredOption('-e, --end <date>', 'Forecast end date (YYYY-MM-DD)')
+  .option('--weather <path>', 'Weather cache directory', './weather_cache')
+  .option('--stations <codes>', 'Forecast specific stations only (comma-separated)')
+  .option('-v, --verbose', 'Verbose logging')
+  .requiredOption('-o, --output <file>', 'Output forecast CSV')
+  .action(async (options: any) => {
+    try {
+      await generateCfacForecast({
+        modelPath: options.model,
+        calibrationPath: options.calibration,
+        startDate: options.start,
+        endDate: options.end,
+        outputPath: options.output,
+        weatherCachePath: options.weather,
+        stations: options.stations ? options.stations.split(',') : undefined,
+        verbose: options.verbose || false
+      });
+    } catch (error: any) {
+      console.error(`\n❌ Error: ${error.message}`);
+      if (error.stack) {
+        console.error(error.stack);
+      }
+      process.exit(1);
+    }
+  });
 
 program.parse();

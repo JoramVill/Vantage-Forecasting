@@ -26,9 +26,9 @@ import {
   StationType,
   CFacWeatherFeatures,
   CFacTrainingSample,
-} from '../../types/capacityFactor.js';
-import { SolarMRECModel, SolarMRECFactors, SolarMRECCalibrationData } from './SolarMRECModel.js';
-import { CFacXGBoostRegressor } from './CFacXGBoostRegressor.js';
+} from '../../../types/capacityFactor.js';
+import { SolarMRECModel, SolarMRECFactors, SolarMRECCalibrationData } from '../SolarMRECModel.js';
+import { CFacXGBoostRegressor } from '../CFacXGBoostRegressor.js';
 
 /**
  * Extended weather features for solar premium model

@@ -251,6 +251,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
     calibrationMode?: 'hybrid' | 'iterative' | 'xgboost' | 'none';
     quantileAlpha?: number;
   }) => ipcRenderer.invoke('run-demand-forecast-calibrated', options),
+
+  // V2 Operations (for GUI V2 Operations Tab)
+  listVfmFiles: (directory?: string) =>
+    ipcRenderer.invoke('list-vfm-files', directory),
+
+  listCalibrationFiles: (directory?: string) =>
+    ipcRenderer.invoke('list-calibration-files', directory),
+
+  // Delete a file (.vfm or calibration.json)
+  deleteFile: (filePath: string) =>
+    ipcRenderer.invoke('delete-file', filePath),
+
+  // Read .vfm file contents (for Models Tab file view)
+  readVfmFile: (filePath: string) =>
+    ipcRenderer.invoke('read-vfm-file', filePath),
+
+  // Get file stats (for calibration age calculation)
+  getFileStats: (filePath: string) =>
+    ipcRenderer.invoke('get-file-stats', filePath),
 });
 
 // Type declaration for window.electronAPI
@@ -512,6 +531,12 @@ declare global {
           result?: any;
         };
       }>;
+
+      // V2 Operations (for GUI V2 Operations Tab)
+      listVfmFiles: (directory?: string) => Promise<Array<{ name: string; path: string; size: number; modified: string }>>;
+      listCalibrationFiles: (directory?: string) => Promise<Array<{ name: string; path: string; size: number; modified: string }>>;
+      deleteFile: (filePath: string) => Promise<{ success: boolean; error?: string }>;
+      getFileStats: (filePath: string) => Promise<{ exists: boolean; size?: number; modified?: number; error?: string }>;
     };
   }
 }

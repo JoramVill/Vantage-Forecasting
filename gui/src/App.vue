@@ -30,7 +30,34 @@ const forecastStart = ref('');
 const forecastEnd = ref('');
 
 // Tab navigation
-const activeTab = ref<'manual' | 'scheduler' | 'gateway' | 'models' | 'settings'>('manual');
+const activeTab = ref<'manual' | 'operations' | 'scheduler' | 'gateway' | 'models' | 'settings'>('manual');
+
+// ============ V2 OPERATIONS TAB STATE ============
+const operationsForecastType = ref<'demand-regional' | 'demand-zonal' | 'cfac'>('demand-regional');
+
+// TRAIN panel
+const trainDataDir = ref('');
+const trainTrainingDays = ref(90);
+const trainOutputPath = ref('');
+
+// CALIBRATE panel
+const calibrateModelFile = ref('');
+const calibrateActualsDir = ref('');
+const calibrateDays = ref(7);
+const calibrateOutputPath = ref('');
+
+// FORECAST panel
+const forecastModelFile = ref('');
+const forecastCalibrationFile = ref('');
+const forecastStartDate = ref('');
+const forecastEndDate = ref('');
+const forecastOutputPath = ref('');
+
+// Available files
+const availableVfmFiles = ref<Array<{ name: string; path: string; size: number; modified: string }>>([]);
+const availableCalibrationFiles = ref<Array<{ name: string; path: string; size: number; modified: string }>>([]);
+const selectedVfmFileData = ref<any | null>(null);
+const loadingVfmFile = ref(false);
 
 // Forecast options - three independent forecast type toggles
 const enableDemandRegional = ref(true);
@@ -132,6 +159,21 @@ const schedulerDemandPrefix = ref('FC_DEM_');
 const schedulerDemandZonalPrefix = ref('FC_ZDEM_');
 const schedulerCfacPrefix = ref('FC_CF_');
 const schedulerOutputSuffix = ref('');
+
+// ============ V2 SCHEDULER STATE ============
+// Active model and calibration files for scheduler
+const schedulerV2DemandModel = ref<string>('');           // .vfm file path
+const schedulerV2DemandCalibration = ref<string>('');     // .json file path
+const schedulerV2CfacModel = ref<string>('');             // .vfm file path
+const schedulerV2CfacCalibration = ref<string>('');       // .json file path
+
+// Auto-calibrate feature
+const schedulerV2AutoCalibrate = ref<boolean>(true);
+const schedulerV2AutoCalibrateStalenessHours = ref<number>(24);
+
+// File modification timestamps (for age calculation)
+const schedulerV2DemandCalibrationModified = ref<number | null>(null);
+const schedulerV2CfacCalibrationModified = ref<number | null>(null);
 
 // Scheduler configuration (for service automation)
 interface SchedulerConfig {
@@ -236,6 +278,11 @@ const modelSearchQuery = ref('');
 const modelTypeFilter = ref<string>('all');
 // Phase 1B: Tabbed interface
 const instanceDetailTab = ref<'config' | 'calibration' | 'evaluation'>('config');
+// V2: View mode toggle (Instances vs Files)
+const modelsViewMode = ref<'instances' | 'files'>('instances');
+// V2: Selected file for file view
+const selectedVfmFile = ref<string | null>(null);
+const selectedCalibrationFile = ref<string | null>(null);
 // Phase 3: Active model management
 const showSetActiveMenu = ref(false);
 // Phase 4: Confirmation modals for Send to Scheduler workflow
@@ -397,6 +444,40 @@ const penaltyRatio = computed(() => {
   const alpha = quantileAlpha.value;
   if (alpha === 0.5) return '1';
   return (alpha / (1 - alpha)).toFixed(1);
+});
+
+// V2 Scheduler: Calibration age in hours
+const schedulerV2DemandCalibrationAge = computed(() => {
+  if (!schedulerV2DemandCalibrationModified.value) return null;
+  const now = Date.now();
+  const ageMs = now - schedulerV2DemandCalibrationModified.value;
+  return Math.floor(ageMs / (1000 * 60 * 60)); // hours
+});
+
+const schedulerV2CfacCalibrationAge = computed(() => {
+  if (!schedulerV2CfacCalibrationModified.value) return null;
+  const now = Date.now();
+  const ageMs = now - schedulerV2CfacCalibrationModified.value;
+  return Math.floor(ageMs / (1000 * 60 * 60)); // hours
+});
+
+// V2 Scheduler: Format calibration age for display
+const schedulerV2DemandCalibrationAgeFormatted = computed(() => {
+  const age = schedulerV2DemandCalibrationAge.value;
+  if (age === null) return 'Unknown';
+  if (age < 1) return '< 1h ago';
+  if (age < 24) return `${age}h ago`;
+  const days = Math.floor(age / 24);
+  return `${days}d ago`;
+});
+
+const schedulerV2CfacCalibrationAgeFormatted = computed(() => {
+  const age = schedulerV2CfacCalibrationAge.value;
+  if (age === null) return 'Unknown';
+  if (age < 1) return '< 1h ago';
+  if (age < 24) return `${age}h ago`;
+  const days = Math.floor(age / 24);
+  return `${days}d ago`;
 });
 
 // Load zones configuration from zones.json
@@ -714,7 +795,7 @@ onMounted(async () => {
     if (settings.customDemandName) customDemandName.value = settings.customDemandName;
     if (settings.customCfacName) customCfacName.value = settings.customCfacName;
     // Tab state
-    if (settings.activeTab === 'manual' || settings.activeTab === 'scheduler' || settings.activeTab === 'gateway' || settings.activeTab === 'settings') activeTab.value = settings.activeTab;
+    if (settings.activeTab === 'manual' || settings.activeTab === 'operations' || settings.activeTab === 'scheduler' || settings.activeTab === 'gateway' || settings.activeTab === 'models' || settings.activeTab === 'settings') activeTab.value = settings.activeTab;
     // Scheduler settings (schedulerMode removed - legacy)
     // if (settings.schedulerMode === 'run' || settings.schedulerMode === 'backfill') schedulerMode.value = settings.schedulerMode;
     // Load demandGeography with backward compatibility from schedulerZonalEnabled
@@ -797,6 +878,11 @@ onMounted(async () => {
 
   // Load training instances for Manual/Scheduler tabs
   await loadTrainingInstances();
+
+  // Load V2 model and calibration files for scheduler
+  await loadVfmFiles();
+  await loadCalibrationFiles();
+  await loadCalibrationStats();
 
   // Load active instance ID from config
   if (globalConfig.value?.modelSelection?.defaultDemandModel) {
@@ -1167,6 +1253,92 @@ async function loadGlobalConfig() {
   configLoading.value = true;
   try {
     globalConfig.value = await window.electronAPI.loadGlobalConfig();
+
+    // Initialize V2 config structure with defaults if missing
+    if (globalConfig.value) {
+      // Demand V2 defaults
+      if (!globalConfig.value.demand.level) {
+        globalConfig.value.demand.level = {
+          model: 'xgboost',
+          maxDepth: 5,
+          nEstimators: 100
+        };
+      }
+      if (!globalConfig.value.demand.shape) {
+        globalConfig.value.demand.shape = {
+          archetypeCount: 3,
+          archetypeBlending: 0.8,
+          confidenceThreshold: 50,
+          weatherInfluence: 1.0,
+          adjustmentModel: 'linear'
+        };
+      }
+      if (!globalConfig.value.demand.calibration) {
+        globalConfig.value.demand.calibration = {
+          days: 7,
+          levelClamp: [0.90, 1.10],
+          shapeClamp: [0.88, 1.12],
+          peakBias: 0.3
+        };
+      }
+      if (!globalConfig.value.demand.training) {
+        globalConfig.value.demand.training = {
+          days: 90,
+          lagWarmupDays: 7
+        };
+      }
+
+      // CFAC V2 defaults
+      if (!globalConfig.value.cfac.wind) {
+        globalConfig.value.cfac.wind = {
+          perStationCalibration: true,
+          windScaleClamp: [0.50, 2.00]
+        };
+      }
+      if (!globalConfig.value.cfac.solar) {
+        globalConfig.value.cfac.solar = {
+          solarAlpha: 0.65,
+          solarScaleClamp: [0.50, 1.50],
+          tempCoefficient: 0.004
+        };
+      }
+      if (!globalConfig.value.cfac.calibration) {
+        globalConfig.value.cfac.calibration = {
+          days: 14
+        };
+      }
+      if (!globalConfig.value.cfac.training) {
+        globalConfig.value.cfac.training = {
+          days: 120
+        };
+      }
+
+      // Lifecycle defaults
+      if (!globalConfig.value.lifecycle) {
+        globalConfig.value.lifecycle = {
+          demandRetrainSchedule: '14d',
+          cfacRetrainSchedule: '30d',
+          retrainTrigger: {
+            levelDriftThreshold: 0.08,
+            shapeDriftThreshold: 0.10,
+            solarScaleDriftThreshold: 0.25,
+            windBiasDriftThreshold: 0.10,
+            consecutiveCyclesOverThreshold: 3
+          },
+          autoRetrain: false
+        };
+      }
+      if (!globalConfig.value.lifecycle.retrainTrigger) {
+        globalConfig.value.lifecycle.retrainTrigger = {
+          levelDriftThreshold: 0.08,
+          shapeDriftThreshold: 0.10,
+          solarScaleDriftThreshold: 0.25,
+          windBiasDriftThreshold: 0.10,
+          consecutiveCyclesOverThreshold: 3
+        };
+      }
+    }
+
     // Sync scheduler tab geography dropdown AND ref from global config (single source of truth)
     if (globalConfig.value?.demand?.geography) {
       const geo = globalConfig.value.demand.geography as 'regional' | 'zonal' | 'both';
@@ -1439,6 +1611,30 @@ watch([demandCalibrationMode, quantileAlpha], async (_newVals, oldVals) => {
     await saveGlobalConfig();
   } catch (err) {
     console.error('Failed to save calibration config:', err);
+  }
+});
+
+// Watch for selected VFM file changes and load file data
+watch(selectedVfmFile, async (newPath) => {
+  if (!newPath) {
+    selectedVfmFileData.value = null;
+    return;
+  }
+
+  loadingVfmFile.value = true;
+  try {
+    const result = await window.electronAPI.readVfmFile(newPath);
+    if (result.success) {
+      selectedVfmFileData.value = result;
+    } else {
+      console.error('Failed to read .vfm file:', result.error);
+      selectedVfmFileData.value = null;
+    }
+  } catch (error: any) {
+    console.error('Error reading .vfm file:', error);
+    selectedVfmFileData.value = null;
+  } finally {
+    loadingVfmFile.value = false;
   }
 });
 
@@ -2554,6 +2750,310 @@ async function loadRecentRuns(limit = 20) {
 //   }
 // }
 
+// ============ V2 OPERATIONS TAB FUNCTIONS ============
+
+async function selectDirectory(targetRef: string) {
+  const dir = await window.electronAPI.selectDirectory();
+  if (dir) {
+    if (targetRef === 'trainDataDir') trainDataDir.value = dir;
+    else if (targetRef === 'calibrateActualsDir') calibrateActualsDir.value = dir;
+  }
+}
+
+async function selectSaveFile(targetRef: string) {
+  const defaultName = targetRef.includes('vfm') ? 'model.vfm' :
+                      targetRef.includes('calibration') ? 'calibration.json' :
+                      'forecast.csv';
+  const file = await window.electronAPI.saveFile(defaultName);
+  if (file) {
+    if (targetRef === 'trainOutputPath') trainOutputPath.value = file;
+    else if (targetRef === 'calibrateOutputPath') calibrateOutputPath.value = file;
+    else if (targetRef === 'forecastOutputPath') forecastOutputPath.value = file;
+  }
+}
+
+async function loadVfmFiles() {
+  try {
+    availableVfmFiles.value = await window.electronAPI.listVfmFiles();
+  } catch (error: any) {
+    console.error('Failed to load .vfm files:', error);
+  }
+}
+
+async function loadCalibrationFiles() {
+  try {
+    availableCalibrationFiles.value = await window.electronAPI.listCalibrationFiles();
+  } catch (error: any) {
+    console.error('Failed to load calibration files:', error);
+  }
+}
+
+async function runV2Train() {
+  if (!trainDataDir.value || !trainOutputPath.value) {
+    addStatus('Please provide data directory and output path', 'error');
+    return;
+  }
+
+  resetProgress();
+  isRunning.value = true;
+  terminalExpanded.value = true;
+
+  const args = [];
+
+  if (operationsForecastType.value === 'demand-regional') {
+    args.push('v2:train', '-d', trainDataDir.value, '--days', trainTrainingDays.value.toString(), '-o', trainOutputPath.value, '--regional');
+  } else if (operationsForecastType.value === 'demand-zonal') {
+    args.push('v2:train', '-d', trainDataDir.value, '--days', trainTrainingDays.value.toString(), '-o', trainOutputPath.value, '--zonal');
+  } else if (operationsForecastType.value === 'cfac') {
+    args.push('v2:cfac-train', '-t', trainDataDir.value, '--days', trainTrainingDays.value.toString(), '-o', trainOutputPath.value);
+  }
+
+  try {
+    const result = await window.electronAPI.runCommand(args);
+    if (result.code === 0) {
+      addStatus('Training completed successfully', 'success');
+      await loadVfmFiles(); // Refresh available models
+    } else {
+      addStatus(`Training failed: ${result.stderr || result.error}`, 'error');
+    }
+  } catch (error: any) {
+    addStatus(`Error: ${error.message}`, 'error');
+  } finally {
+    isRunning.value = false;
+    isComplete.value = true;
+  }
+}
+
+async function runV2Calibrate() {
+  if (!calibrateModelFile.value || !calibrateActualsDir.value || !calibrateOutputPath.value) {
+    addStatus('Please provide model file, actuals directory, and output path', 'error');
+    return;
+  }
+
+  resetProgress();
+  isRunning.value = true;
+  terminalExpanded.value = true;
+
+  const args = [];
+
+  if (operationsForecastType.value === 'demand-regional' || operationsForecastType.value === 'demand-zonal') {
+    args.push('v2:calibrate', '-m', calibrateModelFile.value, '-d', calibrateActualsDir.value, '--days', calibrateDays.value.toString(), '-o', calibrateOutputPath.value);
+  } else if (operationsForecastType.value === 'cfac') {
+    args.push('v2:cfac-calibrate', '-m', calibrateModelFile.value, '-a', calibrateActualsDir.value, '--days', calibrateDays.value.toString(), '-o', calibrateOutputPath.value);
+  }
+
+  try {
+    const result = await window.electronAPI.runCommand(args);
+    if (result.code === 0) {
+      addStatus('Calibration completed successfully', 'success');
+      await loadCalibrationFiles(); // Refresh available calibrations
+    } else {
+      addStatus(`Calibration failed: ${result.stderr || result.error}`, 'error');
+    }
+  } catch (error: any) {
+    addStatus(`Error: ${error.message}`, 'error');
+  } finally {
+    isRunning.value = false;
+    isComplete.value = true;
+  }
+}
+
+async function runV2Forecast() {
+  if (!forecastModelFile.value || !forecastCalibrationFile.value || !forecastStartDate.value || !forecastEndDate.value || !forecastOutputPath.value) {
+    addStatus('Please provide all required fields', 'error');
+    return;
+  }
+
+  resetProgress();
+  isRunning.value = true;
+  terminalExpanded.value = true;
+
+  const args = [];
+
+  if (operationsForecastType.value === 'demand-regional' || operationsForecastType.value === 'demand-zonal') {
+    args.push('v2:forecast', '-m', forecastModelFile.value, '-c', forecastCalibrationFile.value, '-s', forecastStartDate.value, '-e', forecastEndDate.value, '-o', forecastOutputPath.value);
+  } else if (operationsForecastType.value === 'cfac') {
+    args.push('v2:cfac-forecast', '-m', forecastModelFile.value, '-c', forecastCalibrationFile.value, '-s', forecastStartDate.value, '-e', forecastEndDate.value, '-o', forecastOutputPath.value);
+  }
+
+  try {
+    const result = await window.electronAPI.runCommand(args);
+    if (result.code === 0) {
+      addStatus('Forecast completed successfully', 'success');
+    } else {
+      addStatus(`Forecast failed: ${result.stderr || result.error}`, 'error');
+    }
+  } catch (error: any) {
+    addStatus(`Error: ${error.message}`, 'error');
+  } finally {
+    isRunning.value = false;
+    isComplete.value = true;
+  }
+}
+
+// ============ MODELS TAB FILE OPERATIONS ============
+
+async function runCalibrationForFile(modelPath: string) {
+  if (!confirm('Run calibration for this model? This will create a new calibration file.')) {
+    return;
+  }
+
+  const calibDays = prompt('Enter calibration period (days):', '7');
+  if (!calibDays || isNaN(parseInt(calibDays))) return;
+
+  const actualsDir = prompt('Enter actuals data directory:', globalDemandCsvPath.value || globalCfacCsvPath.value);
+  if (!actualsDir) return;
+
+  const outputPath = modelPath.replace('.vfm', '_calibration.json');
+
+  resetProgress();
+  isRunning.value = true;
+  terminalExpanded.value = true;
+
+  const args = [];
+  if (modelPath.includes('demand') || modelPath.includes('regional') || modelPath.includes('zonal')) {
+    args.push('v2:calibrate', '-m', modelPath, '-d', actualsDir, '--days', calibDays, '-o', outputPath);
+  } else {
+    args.push('v2:cfac-calibrate', '-m', modelPath, '-a', actualsDir, '--days', calibDays, '-o', outputPath);
+  }
+
+  try {
+    const result = await window.electronAPI.runCommand(args);
+    if (result.code === 0) {
+      addStatus('Calibration completed successfully', 'success');
+      await loadCalibrationFiles();
+    } else {
+      addStatus(`Calibration failed: ${result.stderr || result.error}`, 'error');
+    }
+  } catch (error: any) {
+    addStatus(`Error: ${error.message}`, 'error');
+  } finally {
+    isRunning.value = false;
+    isComplete.value = true;
+  }
+}
+
+async function deleteSelectedFile() {
+  const filePath = selectedVfmFile.value || selectedCalibrationFile.value;
+  if (!filePath) return;
+
+  const fileName = filePath.split(/[\\/]/).pop();
+  if (!confirm(`Delete ${fileName}? This action cannot be undone.`)) {
+    return;
+  }
+
+  try {
+    const result = await window.electronAPI.deleteFile(filePath);
+    if (result.success) {
+      alert('File deleted successfully');
+      selectedVfmFile.value = null;
+      selectedCalibrationFile.value = null;
+      await loadVfmFiles();
+      await loadCalibrationFiles();
+    } else {
+      alert('Failed to delete file: ' + result.error);
+    }
+  } catch (error: any) {
+    alert('Error deleting file: ' + error.message);
+  }
+}
+
+// ============ V2 SCHEDULER FUNCTIONS ============
+
+// Load file stats to get modification time
+async function loadFileStats(filePath: string): Promise<number | null> {
+  if (!filePath) return null;
+  try {
+    const stats = await window.electronAPI.getFileStats(filePath);
+    return stats.exists && stats.modified ? stats.modified : null;
+  } catch (error: any) {
+    console.error('Failed to get file stats:', error);
+    return null;
+  }
+}
+
+// Load calibration file stats (for age calculation)
+async function loadCalibrationStats() {
+  schedulerV2DemandCalibrationModified.value = await loadFileStats(schedulerV2DemandCalibration.value);
+  schedulerV2CfacCalibrationModified.value = await loadFileStats(schedulerV2CfacCalibration.value);
+}
+
+// Refresh demand calibration
+async function refreshDemandCalibration() {
+  if (!schedulerV2DemandModel.value) {
+    addSchedulerStatus('No demand model selected', 'error');
+    return;
+  }
+
+  addSchedulerStatus('Refreshing demand calibration...', 'info');
+  schedulerIsRunning.value = true;
+
+  try {
+    const calibDays = schedulerV2AutoCalibrateStalenessHours.value / 24; // Convert hours to days
+    const outputPath = schedulerV2DemandCalibration.value || `models/demand_calibration_${new Date().toISOString().split('T')[0]}.json`;
+
+    const args = [
+      'v2:calibrate',
+      '-m', schedulerV2DemandModel.value,
+      '-d', globalDemandCsvPath.value,
+      '--days', String(Math.max(7, Math.floor(calibDays))),
+      '-o', outputPath
+    ];
+
+    const result = await window.electronAPI.runCommand(args);
+
+    if (result.code === 0) {
+      schedulerV2DemandCalibration.value = outputPath;
+      await loadCalibrationStats();
+      addSchedulerStatus('Demand calibration refreshed successfully', 'success');
+    } else {
+      addSchedulerStatus(`Demand calibration failed: ${result.stderr || result.error}`, 'error');
+    }
+  } catch (error: any) {
+    addSchedulerStatus(`Error refreshing demand calibration: ${error.message}`, 'error');
+  } finally {
+    schedulerIsRunning.value = false;
+  }
+}
+
+// Refresh CFAC calibration
+async function refreshCfacCalibration() {
+  if (!schedulerV2CfacModel.value) {
+    addSchedulerStatus('No CFAC model selected', 'error');
+    return;
+  }
+
+  addSchedulerStatus('Refreshing CFAC calibration...', 'info');
+  schedulerIsRunning.value = true;
+
+  try {
+    const calibDays = Math.max(14, Math.floor(schedulerV2AutoCalibrateStalenessHours.value / 24)); // Convert hours to days
+    const outputPath = schedulerV2CfacCalibration.value || `models/cfac_calibration_${new Date().toISOString().split('T')[0]}.json`;
+
+    const args = [
+      'v2:cfac-calibrate',
+      '-m', schedulerV2CfacModel.value,
+      '-a', globalCfacCsvPath.value,
+      '--days', String(calibDays),
+      '-o', outputPath
+    ];
+
+    const result = await window.electronAPI.runCommand(args);
+
+    if (result.code === 0) {
+      schedulerV2CfacCalibration.value = outputPath;
+      await loadCalibrationStats();
+      addSchedulerStatus('CFAC calibration refreshed successfully', 'success');
+    } else {
+      addSchedulerStatus(`CFAC calibration failed: ${result.stderr || result.error}`, 'error');
+    }
+  } catch (error: any) {
+    addSchedulerStatus(`Error refreshing CFAC calibration: ${error.message}`, 'error');
+  } finally {
+    schedulerIsRunning.value = false;
+  }
+}
+
 async function runSchedulerManual() {
   if (!manualRunDate.value) {
     addSchedulerStatus('Please select a start date', 'error');
@@ -2616,6 +3116,33 @@ async function runSchedulerManual() {
     } catch (error: any) {
       addSchedulerStatus(`Auto-import warning: ${error.message}`, 'error');
       // Continue with scheduler run even if import fails
+    }
+  }
+
+  // V2 SCHEDULER: Auto-calibrate if enabled and stale
+  if (schedulerV2AutoCalibrate.value) {
+    await loadCalibrationStats();
+
+    // Check demand calibration staleness
+    const demandAge = schedulerV2DemandCalibrationAge.value;
+    if (demandAge === null || demandAge > schedulerV2AutoCalibrateStalenessHours.value) {
+      if (schedulerV2DemandModel.value) {
+        addSchedulerStatus(`Demand calibration is stale (${demandAge === null ? 'missing' : demandAge + 'h old'}). Auto-calibrating...`, 'info');
+        await refreshDemandCalibration();
+      }
+    } else {
+      addSchedulerStatus(`Demand calibration is fresh (${demandAge}h old)`, 'info');
+    }
+
+    // Check CFAC calibration staleness
+    const cfacAge = schedulerV2CfacCalibrationAge.value;
+    if (cfacAge === null || cfacAge > schedulerV2AutoCalibrateStalenessHours.value) {
+      if (schedulerV2CfacModel.value) {
+        addSchedulerStatus(`CFAC calibration is stale (${cfacAge === null ? 'missing' : cfacAge + 'h old'}). Auto-calibrating...`, 'info');
+        await refreshCfacCalibration();
+      }
+    } else {
+      addSchedulerStatus(`CFAC calibration is fresh (${cfacAge}h old)`, 'info');
     }
   }
 
@@ -2683,6 +3210,7 @@ async function runSchedulerManual() {
       overwrite: schedulerOverwrite.value,
       suffix: schedulerSuffix.value || null,
       outputDir: globalSchedulerOutputDir.value,
+      geography: schedulerConfig.value.demandGeography,  // Pass geography mode
       // Note: Model options (useXgboost, asymmetricLoss, biasCorrection) removed - read from forecast_config.json
       weatherCacheDir: globalWeatherCacheDir.value,
     });
@@ -2776,6 +3304,17 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
       <nav class="sidebar-nav">
         <button
           class="nav-item"
+          :class="{ active: activeTab === 'operations' }"
+          @click="activeTab = 'operations'; loadVfmFiles(); loadCalibrationFiles()"
+          :disabled="isRunning || schedulerIsRunning"
+        >
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+          </svg>
+          <span class="nav-text">Operations</span>
+        </button>
+        <button
+          class="nav-item"
           :class="{ active: activeTab === 'manual' }"
           @click="activeTab = 'manual'; loadTrainingInstances()"
           :disabled="isRunning || schedulerIsRunning"
@@ -2783,7 +3322,7 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
           </svg>
-          <span class="nav-text">Manual Forecast</span>
+          <span class="nav-text">Manual (V1)</span>
         </button>
         <button
           class="nav-item"
@@ -2841,6 +3380,147 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 
     <!-- Main Content Area -->
     <main class="main-content">
+      <!-- ============ OPERATIONS TAB (V2) ============ -->
+      <div v-if="activeTab === 'operations'" class="tab-content">
+        <h1 class="page-title">Operations</h1>
+        <p class="page-subtitle">Train, Calibrate, and Forecast using V2 architecture</p>
+
+        <!-- Forecast Type Selector -->
+        <section class="card" style="margin-bottom: 20px;">
+          <h2>Forecast Type</h2>
+          <div class="source-toggle">
+            <label class="radio-label">
+              <input type="radio" v-model="operationsForecastType" value="demand-regional" :disabled="isRunning" />
+              <span>Demand (Regional)</span>
+            </label>
+            <label class="radio-label">
+              <input type="radio" v-model="operationsForecastType" value="demand-zonal" :disabled="isRunning" />
+              <span>Demand (Zonal)</span>
+            </label>
+            <label class="radio-label">
+              <input type="radio" v-model="operationsForecastType" value="cfac" :disabled="isRunning" />
+              <span>CFAC</span>
+            </label>
+          </div>
+        </section>
+
+        <!-- Three Panels -->
+        <div class="content-grid">
+          <!-- TRAIN Panel -->
+          <div class="grid-column">
+            <section class="card">
+              <h2>TRAIN</h2>
+              <div class="form-group">
+                <label>Data Directory</label>
+                <div class="input-row">
+                  <input type="text" v-model="trainDataDir" :disabled="isRunning" placeholder="e.g., Data Samples/Demand" />
+                  <button @click="selectDirectory('trainDataDir')" :disabled="isRunning" class="btn btn-sm">Browse</button>
+                </div>
+              </div>
+              <div class="form-group">
+                <label>Training Days</label>
+                <input type="number" v-model.number="trainTrainingDays" :disabled="isRunning" min="30" max="365" />
+                <p class="hint">Default: 90 for demand, 120 for CFAC</p>
+              </div>
+              <div class="form-group">
+                <label>Output (.vfm file)</label>
+                <div class="input-row">
+                  <input type="text" v-model="trainOutputPath" :disabled="isRunning" placeholder="models/model.vfm" />
+                  <button @click="selectSaveFile('trainOutputPath')" :disabled="isRunning" class="btn btn-sm">Save As</button>
+                </div>
+              </div>
+              <button @click="runV2Train" :disabled="isRunning" class="btn btn-primary" style="width: 100%; margin-top: 16px;">
+                <span v-if="isRunning">Running...</span>
+                <span v-else>Run Training</span>
+              </button>
+            </section>
+          </div>
+
+          <!-- CALIBRATE Panel -->
+          <div class="grid-column">
+            <section class="card">
+              <h2>CALIBRATE</h2>
+              <div class="form-group">
+                <label>Model File</label>
+                <select v-model="calibrateModelFile" :disabled="isRunning" class="calibrator-dropdown-full">
+                  <option value="">-- Select Model --</option>
+                  <option v-for="file in availableVfmFiles" :key="file.path" :value="file.path">
+                    {{ file.name }} ({{ new Date(file.modified).toLocaleDateString() }})
+                  </option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Actuals Directory</label>
+                <div class="input-row">
+                  <input type="text" v-model="calibrateActualsDir" :disabled="isRunning" placeholder="Data Samples/Demand" />
+                  <button @click="selectDirectory('calibrateActualsDir')" :disabled="isRunning" class="btn btn-sm">Browse</button>
+                </div>
+              </div>
+              <div class="form-group">
+                <label>Calibration Days</label>
+                <input type="number" v-model.number="calibrateDays" :disabled="isRunning" min="3" max="30" />
+                <p class="hint">Default: 7 for demand, 14 for CFAC</p>
+              </div>
+              <div class="form-group">
+                <label>Output (calibration.json)</label>
+                <div class="input-row">
+                  <input type="text" v-model="calibrateOutputPath" :disabled="isRunning" placeholder="models/calibration.json" />
+                  <button @click="selectSaveFile('calibrateOutputPath')" :disabled="isRunning" class="btn btn-sm">Save As</button>
+                </div>
+              </div>
+              <button @click="runV2Calibrate" :disabled="isRunning" class="btn btn-primary" style="width: 100%; margin-top: 16px;">
+                <span v-if="isRunning">Running...</span>
+                <span v-else>Run Calibration</span>
+              </button>
+            </section>
+          </div>
+
+          <!-- FORECAST Panel -->
+          <div class="grid-column">
+            <section class="card">
+              <h2>FORECAST</h2>
+              <div class="form-group">
+                <label>Model File</label>
+                <select v-model="forecastModelFile" :disabled="isRunning" class="calibrator-dropdown-full">
+                  <option value="">-- Select Model --</option>
+                  <option v-for="file in availableVfmFiles" :key="file.path" :value="file.path">
+                    {{ file.name }} ({{ new Date(file.modified).toLocaleDateString() }})
+                  </option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Calibration File</label>
+                <select v-model="forecastCalibrationFile" :disabled="isRunning" class="calibrator-dropdown-full">
+                  <option value="">-- Select Calibration --</option>
+                  <option v-for="file in availableCalibrationFiles" :key="file.path" :value="file.path">
+                    {{ file.name }} ({{ new Date(file.modified).toLocaleDateString() }})
+                  </option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Start Date</label>
+                <input type="date" v-model="forecastStartDate" :disabled="isRunning" />
+              </div>
+              <div class="form-group">
+                <label>End Date</label>
+                <input type="date" v-model="forecastEndDate" :disabled="isRunning" />
+              </div>
+              <div class="form-group">
+                <label>Output (.csv file)</label>
+                <div class="input-row">
+                  <input type="text" v-model="forecastOutputPath" :disabled="isRunning" placeholder="output/forecast.csv" />
+                  <button @click="selectSaveFile('forecastOutputPath')" :disabled="isRunning" class="btn btn-sm">Save As</button>
+                </div>
+              </div>
+              <button @click="runV2Forecast" :disabled="isRunning" class="btn btn-primary" style="width: 100%; margin-top: 16px;">
+                <span v-if="isRunning">Running...</span>
+                <span v-else>Run Forecast</span>
+              </button>
+            </section>
+          </div>
+        </div>
+      </div><!-- End Operations Tab -->
+
       <!-- ============ MANUAL FORECAST TAB ============ -->
       <div v-if="activeTab === 'manual'" class="tab-content">
 
@@ -3093,34 +3773,74 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
         <h1 class="page-title">Scheduler</h1>
         <p class="page-subtitle">Run manual forecasts and configure automated scheduling</p>
 
-        <!-- Active Model Card -->
+        <!-- Active Model + Calibration Card (V2) -->
         <section class="card active-model-card">
           <div class="active-model-header">
-            <h2>Active Model</h2>
-            <span v-if="activeTrainingInstance" class="status-indicator active" title="Model ready for scheduler">●</span>
+            <h2>Active Model & Calibration (V2)</h2>
+            <span v-if="schedulerV2DemandModel || schedulerV2CfacModel" class="status-indicator active" title="Models configured">●</span>
           </div>
 
-          <div v-if="activeTrainingInstance" class="active-model-details">
-            <div class="model-name-display">
-              {{ activeTrainingInstance.name || 'Training Instance' }} - {{ formatInstanceDateShort(activeTrainingInstance.trainedAt) }}
+          <!-- Demand Model -->
+          <div class="model-calibration-row">
+            <div class="model-info">
+              <label class="model-label">Demand Model</label>
+              <select v-model="schedulerV2DemandModel" class="model-select" :disabled="schedulerIsRunning">
+                <option value="">-- Select Model --</option>
+                <option v-for="file in availableVfmFiles.filter(f => f.name.includes('demand'))" :key="file.path" :value="file.path">
+                  {{ file.name }}
+                </option>
+              </select>
             </div>
-            <div class="model-metrics-display">
-              <span v-if="activeTrainingInstance.avgMape">
-                MAPE: {{ activeTrainingInstance.avgMape.toFixed(1) }}%
-              </span>
-            </div>
-            <div v-if="activeTrainingInstance.dateRangeStart && activeTrainingInstance.dateRangeEnd" class="training-period-display">
-              Training Period: {{ activeTrainingInstance.dateRangeStart }} to {{ activeTrainingInstance.dateRangeEnd }}
+            <div class="calibration-info">
+              <label class="model-label">Calibration</label>
+              <select v-model="schedulerV2DemandCalibration" class="model-select" :disabled="schedulerIsRunning">
+                <option value="">-- Select Calibration --</option>
+                <option v-for="file in availableCalibrationFiles.filter(f => f.name.includes('demand'))" :key="file.path" :value="file.path">
+                  {{ file.name }}
+                </option>
+              </select>
+              <span v-if="schedulerV2DemandCalibration" class="calib-age">{{ schedulerV2DemandCalibrationAgeFormatted }}</span>
+              <button @click="refreshDemandCalibration" class="btn btn-sm btn-secondary" :disabled="schedulerIsRunning || !schedulerV2DemandModel">
+                Refresh Now
+              </button>
             </div>
           </div>
 
-          <div v-else class="no-model-selected">
-            <p>No model selected for scheduler</p>
+          <!-- CFAC Model -->
+          <div class="model-calibration-row">
+            <div class="model-info">
+              <label class="model-label">CFAC Model</label>
+              <select v-model="schedulerV2CfacModel" class="model-select" :disabled="schedulerIsRunning">
+                <option value="">-- Select Model --</option>
+                <option v-for="file in availableVfmFiles.filter(f => f.name.includes('cfac'))" :key="file.path" :value="file.path">
+                  {{ file.name }}
+                </option>
+              </select>
+            </div>
+            <div class="calibration-info">
+              <label class="model-label">Calibration</label>
+              <select v-model="schedulerV2CfacCalibration" class="model-select" :disabled="schedulerIsRunning">
+                <option value="">-- Select Calibration --</option>
+                <option v-for="file in availableCalibrationFiles.filter(f => f.name.includes('cfac'))" :key="file.path" :value="file.path">
+                  {{ file.name }}
+                </option>
+              </select>
+              <span v-if="schedulerV2CfacCalibration" class="calib-age">{{ schedulerV2CfacCalibrationAgeFormatted }}</span>
+              <button @click="refreshCfacCalibration" class="btn btn-sm btn-secondary" :disabled="schedulerIsRunning || !schedulerV2CfacModel">
+                Refresh Now
+              </button>
+            </div>
           </div>
 
-          <button @click="activeTab = 'models'" class="btn" :class="activeTrainingInstance ? 'btn-outline' : 'btn-primary'">
-            {{ activeTrainingInstance ? 'Change Model' : 'Select Model' }} →
-          </button>
+          <!-- Auto-Calibrate Settings -->
+          <div class="auto-calibrate-row">
+            <label class="checkbox-label">
+              <input type="checkbox" v-model="schedulerV2AutoCalibrate" :disabled="schedulerIsRunning" />
+              <span>Auto-calibrate when older than</span>
+            </label>
+            <input type="number" v-model="schedulerV2AutoCalibrateStalenessHours" min="1" max="168" style="width: 70px;" :disabled="schedulerIsRunning || !schedulerV2AutoCalibrate" />
+            <span>hours</span>
+          </div>
         </section>
 
         <!-- Manual Run Section - Full Width -->
@@ -3518,11 +4238,34 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
         <div style="width: 320px; min-width: 280px; background: #16213e; border-right: 1px solid #0f3460; display: flex; flex-direction: column;">
 
           <!-- Header -->
-          <div style="padding: 16px 20px; border-bottom: 1px solid #0f3460; display: flex; justify-content: space-between; align-items: center;">
-            <h2 style="margin: 0; font-size: 18px; font-weight: 600; color: #e94560;">Trained Instances</h2>
-            <div style="display: flex; gap: 8px;">
-              <button @click="loadModels" class="btn btn-secondary btn-sm" :disabled="modelsLoading" style="padding: 6px 12px;">
+          <div style="padding: 16px 20px; border-bottom: 1px solid #0f3460;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+              <h2 style="margin: 0; font-size: 18px; font-weight: 600; color: #e94560;">Model Management</h2>
+              <button @click="loadModels(); loadVfmFiles(); loadCalibrationFiles()" class="btn btn-secondary btn-sm" :disabled="modelsLoading" style="padding: 6px 12px;">
                 {{ modelsLoading ? 'Loading...' : 'Refresh' }}
+              </button>
+            </div>
+            <!-- View Mode Toggle -->
+            <div style="display: flex; gap: 8px; background: #1a1a2e; border-radius: 6px; padding: 4px;">
+              <button
+                @click="modelsViewMode = 'instances'"
+                style="flex: 1; padding: 8px; border: none; border-radius: 4px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s;"
+                :style="{
+                  background: modelsViewMode === 'instances' ? '#e94560' : 'transparent',
+                  color: modelsViewMode === 'instances' ? '#fff' : '#94a3b8'
+                }"
+              >
+                Instances
+              </button>
+              <button
+                @click="modelsViewMode = 'files'"
+                style="flex: 1; padding: 8px; border: none; border-radius: 4px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s;"
+                :style="{
+                  background: modelsViewMode === 'files' ? '#e94560' : 'transparent',
+                  color: modelsViewMode === 'files' ? '#fff' : '#94a3b8'
+                }"
+              >
+                Files
               </button>
             </div>
           </div>
@@ -3544,8 +4287,8 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
             </select>
           </div>
 
-          <!-- Instances List -->
-          <div style="flex: 1; overflow-y: auto; padding: 12px;">
+          <!-- Instances List (Instances View) -->
+          <div v-if="modelsViewMode === 'instances'" style="flex: 1; overflow-y: auto; padding: 12px;">
 
             <!-- Loading State -->
             <div v-if="modelsLoading" style="text-align: center; padding: 40px; color: #94a3b8;">
@@ -3607,13 +4350,70 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
               </div>
             </div>
           </div>
+
+          <!-- Files List (Files View) -->
+          <div v-else-if="modelsViewMode === 'files'" style="flex: 1; overflow-y: auto; padding: 12px;">
+            <!-- Model Files Section -->
+            <div style="margin-bottom: 24px;">
+              <h3 style="margin: 0 0 12px 0; font-size: 14px; font-weight: 600; color: #94a3b8; text-transform: uppercase;">Model Files (.vfm)</h3>
+
+              <div v-if="availableVfmFiles.length === 0" style="text-align: center; padding: 20px; color: #64748b; background: #1a1a2e; border-radius: 8px;">
+                <p style="font-size: 13px;">No .vfm files found</p>
+              </div>
+
+              <div v-else style="display: flex; flex-direction: column; gap: 8px;">
+                <div
+                  v-for="file in availableVfmFiles"
+                  :key="file.path"
+                  @click="selectedVfmFile = file.path"
+                  style="padding: 12px; border-radius: 6px; cursor: pointer; transition: all 0.2s;"
+                  :style="{
+                    background: selectedVfmFile === file.path ? '#e94560' : '#1a1a2e',
+                    border: selectedVfmFile === file.path ? '1px solid #e94560' : '1px solid #0f3460'
+                  }"
+                >
+                  <div style="font-size: 13px; font-weight: 600; margin-bottom: 4px;">{{ file.name }}</div>
+                  <div style="font-size: 11px; color: #94a3b8;">
+                    {{ (file.size / 1024).toFixed(1) }} KB • {{ new Date(file.modified).toLocaleDateString() }}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Calibration Files Section -->
+            <div>
+              <h3 style="margin: 0 0 12px 0; font-size: 14px; font-weight: 600; color: #94a3b8; text-transform: uppercase;">Calibration Files (.json)</h3>
+
+              <div v-if="availableCalibrationFiles.length === 0" style="text-align: center; padding: 20px; color: #64748b; background: #1a1a2e; border-radius: 8px;">
+                <p style="font-size: 13px;">No calibration files found</p>
+              </div>
+
+              <div v-else style="display: flex; flex-direction: column; gap: 8px;">
+                <div
+                  v-for="file in availableCalibrationFiles"
+                  :key="file.path"
+                  @click="selectedCalibrationFile = file.path"
+                  style="padding: 12px; border-radius: 6px; cursor: pointer; transition: all 0.2s;"
+                  :style="{
+                    background: selectedCalibrationFile === file.path ? '#6366f1' : '#1a1a2e',
+                    border: selectedCalibrationFile === file.path ? '1px solid #6366f1' : '1px solid #0f3460'
+                  }"
+                >
+                  <div style="font-size: 13px; font-weight: 600; margin-bottom: 4px;">{{ file.name }}</div>
+                  <div style="font-size: 11px; color: #94a3b8;">
+                    {{ (file.size / 1024).toFixed(1) }} KB • {{ new Date(file.modified).toLocaleDateString() }}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
 
-        <!-- RIGHT PANEL: Instance Details -->
+        <!-- RIGHT PANEL: Instance/File Details -->
         <div style="flex: 1; background: #1a1a2e; display: flex; flex-direction: column; overflow: hidden;">
 
-          <!-- No Selection State -->
-          <div v-if="!selectedInstance" style="flex: 1; display: flex; align-items: center; justify-content: center; color: #64748b;">
+          <!-- No Selection State (Instances) -->
+          <div v-if="modelsViewMode === 'instances' && !selectedInstance" style="flex: 1; display: flex; align-items: center; justify-content: center; color: #64748b;">
             <div style="text-align: center;">
               <p style="font-size: 48px; margin-bottom: 16px;">📊</p>
               <p style="font-size: 18px; font-weight: 500;">Select an instance to view details</p>
@@ -3621,8 +4421,148 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
             </div>
           </div>
 
-          <!-- Instance Details -->
-          <div v-else style="display: flex; flex-direction: column; height: 100%;">
+          <!-- No Selection State (Files) -->
+          <div v-else-if="modelsViewMode === 'files' && !selectedVfmFile && !selectedCalibrationFile" style="flex: 1; display: flex; align-items: center; justify-content: center; color: #64748b;">
+            <div style="text-align: center;">
+              <p style="font-size: 48px; margin-bottom: 16px;">📁</p>
+              <p style="font-size: 18px; font-weight: 500;">Select a file to view details</p>
+              <p style="font-size: 14px; margin-top: 8px;">Click on any .vfm or calibration file from the left panel</p>
+            </div>
+          </div>
+
+          <!-- File Details (Files View) -->
+          <div v-else-if="modelsViewMode === 'files' && (selectedVfmFile || selectedCalibrationFile)" style="display: flex; flex-direction: column; height: 100%;">
+            <div style="padding: 20px 24px; background: #16213e; border-bottom: 1px solid #0f3460;">
+              <h2 style="margin: 0 0 8px 0; font-size: 20px; font-weight: 700; color: #e94560;">
+                {{ selectedVfmFile ? availableVfmFiles.find(f => f.path === selectedVfmFile)?.name : availableCalibrationFiles.find(f => f.path === selectedCalibrationFile)?.name }}
+              </h2>
+              <p style="margin: 0; font-size: 13px; color: #94a3b8;">
+                {{ selectedVfmFile ? 'Model File' : 'Calibration File' }}
+              </p>
+            </div>
+
+            <div style="padding: 24px; overflow-y: auto;">
+              <!-- File Info -->
+              <div style="margin-bottom: 24px; padding: 20px; background: #16213e; border-radius: 8px; border: 1px solid #0f3460;">
+                <h4 style="margin: 0 0 16px 0; font-size: 14px; color: #94a3b8; text-transform: uppercase;">File Information</h4>
+                <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px;">
+                  <div>
+                    <div style="font-size: 11px; color: #94a3b8; margin-bottom: 4px;">File Path</div>
+                    <div style="font-size: 13px; font-weight: 600; color: #e2e8f0; word-break: break-all;">
+                      {{ selectedVfmFile || selectedCalibrationFile }}
+                    </div>
+                  </div>
+                  <div>
+                    <div style="font-size: 11px; color: #94a3b8; margin-bottom: 4px;">Size</div>
+                    <div style="font-size: 13px; font-weight: 600; color: #e2e8f0;">
+                      {{ selectedVfmFile
+                        ? ((availableVfmFiles.find(f => f.path === selectedVfmFile)?.size || 0) / 1024).toFixed(1) + ' KB'
+                        : ((availableCalibrationFiles.find(f => f.path === selectedCalibrationFile)?.size || 0) / 1024).toFixed(1) + ' KB'
+                      }}
+                    </div>
+                  </div>
+                  <div>
+                    <div style="font-size: 11px; color: #94a3b8; margin-bottom: 4px;">Last Modified</div>
+                    <div style="font-size: 13px; font-weight: 600; color: #e2e8f0;">
+                      {{ selectedVfmFile
+                        ? new Date(availableVfmFiles.find(f => f.path === selectedVfmFile)?.modified || '').toLocaleString()
+                        : new Date(availableCalibrationFiles.find(f => f.path === selectedCalibrationFile)?.modified || '').toLocaleString()
+                      }}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Model Metrics (for .vfm files only) -->
+              <div v-if="selectedVfmFile && selectedVfmFileData && selectedVfmFileData.metrics" style="margin-bottom: 24px;">
+                <!-- Overall MAPE -->
+                <div v-if="selectedVfmFileData.metrics.overallMape !== undefined" style="margin-bottom: 24px; padding: 24px; background: linear-gradient(135deg, #16213e 0%, #0f3460 100%); border-radius: 12px;">
+                  <div style="display: flex; align-items: center; gap: 24px;">
+                    <div>
+                      <div style="font-size: 12px; color: #94a3b8; text-transform: uppercase; margin-bottom: 4px;">Overall MAPE</div>
+                      <div style="font-size: 42px; font-weight: 800;" :style="{ color: selectedVfmFileData.metrics.overallMape < 3 ? '#10b981' : selectedVfmFileData.metrics.overallMape < 5 ? '#f59e0b' : '#ef4444' }">
+                        {{ selectedVfmFileData.metrics.overallMape.toFixed(2) }}%
+                      </div>
+                    </div>
+                    <div style="color: #94a3b8;">
+                      <div style="font-size: 13px;">{{ selectedVfmFileData.entityType || 'Model' }}</div>
+                      <div style="font-size: 11px;">{{ selectedVfmFileData.geography || '' }}</div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Per-Zone MAPE (for demand zonal models) -->
+                <div v-if="selectedVfmFileData.metrics.perZoneMape && Object.keys(selectedVfmFileData.metrics.perZoneMape).length > 0" style="margin-bottom: 24px;">
+                  <h4 style="margin: 0 0 16px 0; font-size: 14px; color: #94a3b8; text-transform: uppercase;">Per-Zone Performance</h4>
+                  <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px;">
+                    <div v-for="(mape, zone) in selectedVfmFileData.metrics.perZoneMape" :key="zone"
+                      style="padding: 16px; background: #16213e; border-radius: 8px; border-left: 3px solid;"
+                      :style="{ borderLeftColor: mape < 5 ? '#10b981' : mape < 10 ? '#f59e0b' : '#ef4444' }">
+                      <div style="font-size: 11px; color: #94a3b8; margin-bottom: 4px;">{{ zone }}</div>
+                      <div style="font-size: 20px; font-weight: 700;" :style="{ color: mape < 5 ? '#10b981' : mape < 10 ? '#f59e0b' : '#ef4444' }">
+                        {{ mape.toFixed(2) }}%
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Per-Region MAPE (for demand regional models) -->
+                <div v-if="selectedVfmFileData.metrics.perRegionMape && Object.keys(selectedVfmFileData.metrics.perRegionMape).length > 0" style="margin-bottom: 24px;">
+                  <h4 style="margin: 0 0 16px 0; font-size: 14px; color: #94a3b8; text-transform: uppercase;">Per-Region Performance</h4>
+                  <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px;">
+                    <div v-for="(mape, region) in selectedVfmFileData.metrics.perRegionMape" :key="region"
+                      style="padding: 16px; background: #16213e; border-radius: 8px; border-left: 3px solid;"
+                      :style="{ borderLeftColor: mape < 5 ? '#10b981' : mape < 10 ? '#f59e0b' : '#ef4444' }">
+                      <div style="font-size: 11px; color: #94a3b8; margin-bottom: 4px;">{{ region }}</div>
+                      <div style="font-size: 20px; font-weight: 700;" :style="{ color: mape < 5 ? '#10b981' : mape < 10 ? '#f59e0b' : '#ef4444' }">
+                        {{ mape.toFixed(2) }}%
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Per-Station MAPE (for CFAC models) -->
+                <div v-if="selectedVfmFileData.metrics.perStationMape && Object.keys(selectedVfmFileData.metrics.perStationMape).length > 0" style="margin-bottom: 24px;">
+                  <h4 style="margin: 0 0 16px 0; font-size: 14px; color: #94a3b8; text-transform: uppercase;">Per-Station Performance</h4>
+                  <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; max-height: 400px; overflow-y: auto;">
+                    <div v-for="(mape, station) in selectedVfmFileData.metrics.perStationMape" :key="station"
+                      style="padding: 16px; background: #16213e; border-radius: 8px; border-left: 3px solid;"
+                      :style="{ borderLeftColor: mape < 20 ? '#10b981' : mape < 40 ? '#f59e0b' : '#ef4444' }">
+                      <div style="font-size: 11px; color: #94a3b8; margin-bottom: 4px;">{{ station }}</div>
+                      <div style="font-size: 20px; font-weight: 700;" :style="{ color: mape < 20 ? '#10b981' : mape < 40 ? '#f59e0b' : '#ef4444' }">
+                        {{ mape.toFixed(2) }}%
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Loading State -->
+                <div v-if="loadingVfmFile" style="text-align: center; padding: 40px; color: #64748b;">
+                  <p>Loading model metrics...</p>
+                </div>
+              </div>
+
+              <!-- Actions -->
+              <div style="display: flex; gap: 12px;">
+                <button
+                  v-if="selectedVfmFile"
+                  @click="runCalibrationForFile(selectedVfmFile)"
+                  style="padding: 10px 20px; border-radius: 8px; font-weight: 600; font-size: 14px; border: none; background: #6366f1; color: white; cursor: pointer;"
+                >
+                  Calibrate Now
+                </button>
+                <button
+                  @click="deleteSelectedFile"
+                  style="padding: 10px 20px; border-radius: 8px; font-weight: 600; font-size: 14px; border: 1px solid #ef4444; background: transparent; color: #ef4444; cursor: pointer;"
+                >
+                  Delete File
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Instance Details (Instances View) -->
+          <div v-else-if="modelsViewMode === 'instances' && selectedInstance" style="display: flex; flex-direction: column; height: 100%;">
 
             <!-- Detail Header -->
             <div style="padding: 20px 24px; background: #16213e; border-bottom: 1px solid #0f3460;">
@@ -5028,6 +5968,488 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
                   </div>
                 </div>
               </div>
+
+              <!-- ========== V2 CONFIGURATION SECTIONS ========== -->
+
+              <!-- Demand V2: Level Model -->
+              <div class="config-section">
+                <h3>Demand V2: Level Model</h3>
+                <p class="section-hint">Level forecasting (overall magnitude) settings</p>
+                <div class="form-group">
+                  <label>Level Model Type</label>
+                  <select
+                    v-model="globalConfig.demand.level.model"
+                    @change="markConfigDirty"
+                    class="path-input"
+                  >
+                    <option value="xgboost">XGBoost</option>
+                    <option value="linear">Linear Regression</option>
+                  </select>
+                </div>
+                <div class="form-group" v-if="globalConfig.demand.level.model === 'xgboost'">
+                  <label>Max Depth</label>
+                  <input
+                    type="number"
+                    v-model.number="globalConfig.demand.level.maxDepth"
+                    @input="markConfigDirty"
+                    min="3"
+                    max="10"
+                    class="path-input"
+                  />
+                  <p class="field-hint">Tree depth (3-10)</p>
+                </div>
+                <div class="form-group" v-if="globalConfig.demand.level.model === 'xgboost'">
+                  <label>N Estimators</label>
+                  <input
+                    type="number"
+                    v-model.number="globalConfig.demand.level.nEstimators"
+                    @input="markConfigDirty"
+                    min="50"
+                    max="500"
+                    step="10"
+                    class="path-input"
+                  />
+                  <p class="field-hint">Number of trees (50-500)</p>
+                </div>
+              </div>
+
+              <!-- Demand V2: Shape Model -->
+              <div class="config-section">
+                <h3>Demand V2: Shape Model</h3>
+                <p class="section-hint">Shape tuning (hourly pattern) settings</p>
+                <div class="form-group">
+                  <label>Archetype Count</label>
+                  <select
+                    v-model.number="globalConfig.demand.shape.archetypeCount"
+                    @change="markConfigDirty"
+                    class="path-input"
+                  >
+                    <option :value="1">1</option>
+                    <option :value="2">2</option>
+                    <option :value="3">3</option>
+                    <option :value="4">4</option>
+                    <option :value="5">5</option>
+                  </select>
+                  <p class="field-hint">Number of representative patterns per area × dayType</p>
+                </div>
+                <div class="form-group">
+                  <label>Archetype Blending ({{ (globalConfig.demand.shape.archetypeBlending * 100).toFixed(0) }}%)</label>
+                  <input
+                    type="range"
+                    v-model.number="globalConfig.demand.shape.archetypeBlending"
+                    @input="markConfigDirty"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    class="range-input"
+                  />
+                  <p class="field-hint">Smooth transition between archetypes (0.0-1.0)</p>
+                </div>
+                <div class="form-group">
+                  <label>Weather Influence ({{ globalConfig.demand.shape.weatherInfluence.toFixed(1) }}x)</label>
+                  <input
+                    type="range"
+                    v-model.number="globalConfig.demand.shape.weatherInfluence"
+                    @input="markConfigDirty"
+                    min="0"
+                    max="2"
+                    step="0.1"
+                    class="range-input"
+                  />
+                  <p class="field-hint">Weather's effect on shape selection (0.0-2.0)</p>
+                </div>
+                <div class="form-group">
+                  <label>Peak Bias ({{ (globalConfig.demand.shape.peakBias * 100).toFixed(0) }}%)</label>
+                  <input
+                    type="range"
+                    v-model.number="globalConfig.demand.shape.peakBias"
+                    @input="markConfigDirty"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    class="range-input"
+                  />
+                  <p class="field-hint">Bias toward high-load archetypes (0.0-1.0)</p>
+                </div>
+                <div class="form-group">
+                  <label>Confidence Threshold ({{ globalConfig.demand.shape.confidenceThreshold }}%)</label>
+                  <input
+                    type="range"
+                    v-model.number="globalConfig.demand.shape.confidenceThreshold"
+                    @input="markConfigDirty"
+                    min="0"
+                    max="100"
+                    step="5"
+                    class="range-input"
+                  />
+                  <p class="field-hint">Minimum confidence for archetype selection (0-100%)</p>
+                </div>
+                <div class="form-group">
+                  <label>Adjustment Model</label>
+                  <select
+                    v-model="globalConfig.demand.shape.adjustmentModel"
+                    @change="markConfigDirty"
+                    class="path-input"
+                  >
+                    <option value="linear">Linear</option>
+                    <option value="spline">Spline</option>
+                  </select>
+                  <p class="field-hint">How to apply weather-driven adjustments</p>
+                </div>
+              </div>
+
+              <!-- Demand V2: Calibration -->
+              <div class="config-section">
+                <h3>Demand V2: Calibration</h3>
+                <div class="form-group">
+                  <label>Calibration Days</label>
+                  <input
+                    type="number"
+                    v-model.number="globalConfig.demand.calibration.days"
+                    @input="markConfigDirty"
+                    min="3"
+                    max="14"
+                    class="path-input"
+                  />
+                  <p class="field-hint">Recent history for calibration (3-14 days)</p>
+                </div>
+                <div class="form-group">
+                  <label>Level Clamp (Min)</label>
+                  <input
+                    type="number"
+                    v-model.number="globalConfig.demand.calibration.levelClamp[0]"
+                    @input="markConfigDirty"
+                    min="0.5"
+                    max="1.0"
+                    step="0.01"
+                    class="path-input"
+                  />
+                  <p class="field-hint">Minimum level scale (0.90 = 10% down)</p>
+                </div>
+                <div class="form-group">
+                  <label>Level Clamp (Max)</label>
+                  <input
+                    type="number"
+                    v-model.number="globalConfig.demand.calibration.levelClamp[1]"
+                    @input="markConfigDirty"
+                    min="1.0"
+                    max="1.5"
+                    step="0.01"
+                    class="path-input"
+                  />
+                  <p class="field-hint">Maximum level scale (1.10 = 10% up)</p>
+                </div>
+                <div class="form-group">
+                  <label>Shape Clamp (Min)</label>
+                  <input
+                    type="number"
+                    v-model.number="globalConfig.demand.calibration.shapeClamp[0]"
+                    @input="markConfigDirty"
+                    min="0.5"
+                    max="1.0"
+                    step="0.01"
+                    class="path-input"
+                  />
+                  <p class="field-hint">Minimum shape scale (0.88 = 12% down)</p>
+                </div>
+                <div class="form-group">
+                  <label>Shape Clamp (Max)</label>
+                  <input
+                    type="number"
+                    v-model.number="globalConfig.demand.calibration.shapeClamp[1]"
+                    @input="markConfigDirty"
+                    min="1.0"
+                    max="1.5"
+                    step="0.01"
+                    class="path-input"
+                  />
+                  <p class="field-hint">Maximum shape scale (1.12 = 12% up)</p>
+                </div>
+                <div class="form-group">
+                  <label>Peak Bias ({{ (globalConfig.demand.calibration.peakBias * 100).toFixed(0) }}%)</label>
+                  <input
+                    type="range"
+                    v-model.number="globalConfig.demand.calibration.peakBias"
+                    @input="markConfigDirty"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    class="range-input"
+                  />
+                  <p class="field-hint">Reduce peak crushing during calibration (0.0-1.0)</p>
+                </div>
+              </div>
+
+              <!-- Demand V2: Training -->
+              <div class="config-section">
+                <h3>Demand V2: Training</h3>
+                <div class="form-group">
+                  <label>Training Days</label>
+                  <input
+                    type="number"
+                    v-model.number="globalConfig.demand.training.days"
+                    @input="markConfigDirty"
+                    min="30"
+                    max="180"
+                    class="path-input"
+                  />
+                  <p class="field-hint">Historical data for model training (30-180 days)</p>
+                </div>
+                <div class="form-group">
+                  <label>Lag Warmup Days</label>
+                  <input
+                    type="number"
+                    v-model.number="globalConfig.demand.training.lagWarmupDays"
+                    @input="markConfigDirty"
+                    min="7"
+                    max="14"
+                    class="path-input"
+                  />
+                  <p class="field-hint">Days reserved for lag features (7-14)</p>
+                </div>
+              </div>
+
+              <!-- CFAC V2: Solar -->
+              <div class="config-section">
+                <h3>CFAC V2: Solar</h3>
+                <div class="form-group">
+                  <label>Solar Alpha ({{ globalConfig.cfac.solar.solarAlpha.toFixed(2) }})</label>
+                  <input
+                    type="range"
+                    v-model.number="globalConfig.cfac.solar.solarAlpha"
+                    @input="markConfigDirty"
+                    min="0.5"
+                    max="0.8"
+                    step="0.01"
+                    class="range-input"
+                  />
+                  <p class="field-hint">Asymmetric loss parameter (0.5-0.8, higher = penalize under-predictions more)</p>
+                </div>
+                <div class="form-group">
+                  <label>Temperature Coefficient</label>
+                  <input
+                    type="number"
+                    v-model.number="globalConfig.cfac.solar.tempCoefficient"
+                    @input="markConfigDirty"
+                    min="-0.01"
+                    max="0.01"
+                    step="0.001"
+                    class="path-input"
+                  />
+                  <p class="field-hint">Panel efficiency vs temperature (-0.01 to 0.01)</p>
+                </div>
+                <div class="form-group">
+                  <label>Scale Clamp (Min)</label>
+                  <input
+                    type="number"
+                    v-model.number="globalConfig.cfac.solar.solarScaleClamp[0]"
+                    @input="markConfigDirty"
+                    min="0.3"
+                    max="1.0"
+                    step="0.05"
+                    class="path-input"
+                  />
+                  <p class="field-hint">Minimum solar calibration scale (0.50)</p>
+                </div>
+                <div class="form-group">
+                  <label>Scale Clamp (Max)</label>
+                  <input
+                    type="number"
+                    v-model.number="globalConfig.cfac.solar.solarScaleClamp[1]"
+                    @input="markConfigDirty"
+                    min="1.0"
+                    max="2.0"
+                    step="0.05"
+                    class="path-input"
+                  />
+                  <p class="field-hint">Maximum solar calibration scale (1.50)</p>
+                </div>
+              </div>
+
+              <!-- CFAC V2: Wind -->
+              <div class="config-section">
+                <h3>CFAC V2: Wind</h3>
+                <div class="toggle-group">
+                  <label class="toggle">
+                    <input
+                      type="checkbox"
+                      v-model="globalConfig.cfac.wind.perStationCalibration"
+                      @change="markConfigDirty"
+                    />
+                    <span class="toggle-slider"></span>
+                    <span class="toggle-label">Per-Station Calibration</span>
+                  </label>
+                  <p class="field-hint">Individual calibration for each wind station</p>
+                </div>
+                <div class="form-group">
+                  <label>Scale Clamp (Min)</label>
+                  <input
+                    type="number"
+                    v-model.number="globalConfig.cfac.wind.windScaleClamp[0]"
+                    @input="markConfigDirty"
+                    min="0.3"
+                    max="1.0"
+                    step="0.05"
+                    class="path-input"
+                  />
+                  <p class="field-hint">Minimum wind calibration scale (0.50)</p>
+                </div>
+                <div class="form-group">
+                  <label>Scale Clamp (Max)</label>
+                  <input
+                    type="number"
+                    v-model.number="globalConfig.cfac.wind.windScaleClamp[1]"
+                    @input="markConfigDirty"
+                    min="1.0"
+                    max="3.0"
+                    step="0.1"
+                    class="path-input"
+                  />
+                  <p class="field-hint">Maximum wind calibration scale (2.00)</p>
+                </div>
+              </div>
+
+              <!-- CFAC V2: Training/Calibration -->
+              <div class="config-section">
+                <h3>CFAC V2: Training & Calibration</h3>
+                <div class="form-group">
+                  <label>CFAC Training Days</label>
+                  <input
+                    type="number"
+                    v-model.number="globalConfig.cfac.training.days"
+                    @input="markConfigDirty"
+                    min="60"
+                    max="180"
+                    class="path-input"
+                  />
+                  <p class="field-hint">Historical data for CFAC models (60-180 days)</p>
+                </div>
+                <div class="form-group">
+                  <label>CFAC Calibration Days</label>
+                  <input
+                    type="number"
+                    v-model.number="globalConfig.cfac.calibration.days"
+                    @input="markConfigDirty"
+                    min="7"
+                    max="30"
+                    class="path-input"
+                  />
+                  <p class="field-hint">Recent history for CFAC calibration (7-30 days)</p>
+                </div>
+              </div>
+
+              <!-- Lifecycle Settings -->
+              <div class="config-section">
+                <h3>Lifecycle Settings</h3>
+                <div class="form-group">
+                  <label>Demand Retrain Schedule</label>
+                  <select
+                    v-model="globalConfig.lifecycle.demandRetrainSchedule"
+                    @change="markConfigDirty"
+                    class="path-input"
+                  >
+                    <option value="7d">Every 7 days</option>
+                    <option value="14d">Every 14 days</option>
+                    <option value="30d">Every 30 days</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>CFAC Retrain Schedule</label>
+                  <select
+                    v-model="globalConfig.lifecycle.cfacRetrainSchedule"
+                    @change="markConfigDirty"
+                    class="path-input"
+                  >
+                    <option value="14d">Every 14 days</option>
+                    <option value="30d">Every 30 days</option>
+                    <option value="60d">Every 60 days</option>
+                  </select>
+                </div>
+                <div class="toggle-group">
+                  <label class="toggle">
+                    <input
+                      type="checkbox"
+                      v-model="globalConfig.lifecycle.autoRetrain"
+                      @change="markConfigDirty"
+                    />
+                    <span class="toggle-slider"></span>
+                    <span class="toggle-label">Auto Retrain</span>
+                  </label>
+                  <p class="field-hint">Automatically retrain when drift thresholds are exceeded</p>
+                </div>
+              </div>
+
+              <!-- Drift Thresholds -->
+              <div class="config-section">
+                <h3>Drift Thresholds</h3>
+                <p class="section-hint">Trigger retraining when model performance degrades</p>
+                <div class="form-group">
+                  <label>Level Drift Threshold ({{ (globalConfig.lifecycle.retrainTrigger.levelDriftThreshold * 100).toFixed(0) }}%)</label>
+                  <input
+                    type="range"
+                    v-model.number="globalConfig.lifecycle.retrainTrigger.levelDriftThreshold"
+                    @input="markConfigDirty"
+                    min="0.01"
+                    max="0.20"
+                    step="0.01"
+                    class="range-input"
+                  />
+                  <p class="field-hint">Demand level drift (1-20%)</p>
+                </div>
+                <div class="form-group">
+                  <label>Shape Drift Threshold ({{ (globalConfig.lifecycle.retrainTrigger.shapeDriftThreshold * 100).toFixed(0) }}%)</label>
+                  <input
+                    type="range"
+                    v-model.number="globalConfig.lifecycle.retrainTrigger.shapeDriftThreshold"
+                    @input="markConfigDirty"
+                    min="0.01"
+                    max="0.20"
+                    step="0.01"
+                    class="range-input"
+                  />
+                  <p class="field-hint">Demand shape drift (1-20%)</p>
+                </div>
+                <div class="form-group">
+                  <label>Solar Scale Drift ({{ (globalConfig.lifecycle.retrainTrigger.solarScaleDriftThreshold * 100).toFixed(0) }}%)</label>
+                  <input
+                    type="range"
+                    v-model.number="globalConfig.lifecycle.retrainTrigger.solarScaleDriftThreshold"
+                    @input="markConfigDirty"
+                    min="0.10"
+                    max="0.50"
+                    step="0.05"
+                    class="range-input"
+                  />
+                  <p class="field-hint">Solar calibration drift (10-50%)</p>
+                </div>
+                <div class="form-group">
+                  <label>Wind Bias Drift ({{ (globalConfig.lifecycle.retrainTrigger.windBiasDriftThreshold * 100).toFixed(0) }}%)</label>
+                  <input
+                    type="range"
+                    v-model.number="globalConfig.lifecycle.retrainTrigger.windBiasDriftThreshold"
+                    @input="markConfigDirty"
+                    min="0.05"
+                    max="0.20"
+                    step="0.01"
+                    class="range-input"
+                  />
+                  <p class="field-hint">Wind bias drift (5-20%)</p>
+                </div>
+                <div class="form-group">
+                  <label>Consecutive Cycles Over Threshold</label>
+                  <input
+                    type="number"
+                    v-model.number="globalConfig.lifecycle.retrainTrigger.consecutiveCyclesOverThreshold"
+                    @input="markConfigDirty"
+                    min="1"
+                    max="10"
+                    class="path-input"
+                  />
+                  <p class="field-hint">Number of consecutive cycles before triggering retrain (1-10)</p>
+                </div>
+              </div>
+
+              <!-- ========== END V2 CONFIGURATION SECTIONS ========== -->
             </div>
 
             <!-- Save/Reset Buttons -->
@@ -5075,8 +6497,8 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
           <span v-else>Generate Forecast</span>
         </button>
 
-        <!-- Terminal Toggle Area - Manual Tab -->
-        <div v-if="activeTab === 'manual'" class="terminal-toggle-area" @click="terminalExpanded = !terminalExpanded">
+        <!-- Terminal Toggle Area - Manual and Operations Tab -->
+        <div v-if="activeTab === 'manual' || activeTab === 'operations'" class="terminal-toggle-area" @click="terminalExpanded = !terminalExpanded">
           <span class="terminal-toggle">{{ terminalExpanded ? '▼' : '▲' }}</span>
           <span class="terminal-title">Terminal</span>
           <span v-if="isRunning" class="terminal-status running">
@@ -5124,8 +6546,8 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 
         <!-- Clear button -->
         <button
-          v-if="(activeTab === 'manual' && statusHistory.length > 0) || (activeTab === 'scheduler' && terminalPanelTab === 'terminal' && schedulerStatusHistory.length > 0)"
-          @click.stop="activeTab === 'manual' ? resetProgress() : (schedulerStatusHistory = [])"
+          v-if="((activeTab === 'manual' || activeTab === 'operations') && statusHistory.length > 0) || (activeTab === 'scheduler' && terminalPanelTab === 'terminal' && schedulerStatusHistory.length > 0)"
+          @click.stop="(activeTab === 'manual' || activeTab === 'operations') ? resetProgress() : (schedulerStatusHistory = [])"
           class="btn btn-text btn-sm"
         >
           Clear
@@ -5136,8 +6558,8 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
       </div>
 
       <div class="terminal-content" v-if="terminalExpanded">
-        <!-- Manual Forecast Progress -->
-        <template v-if="activeTab === 'manual'">
+        <!-- Manual Forecast Progress (also used for Operations tab) -->
+        <template v-if="activeTab === 'manual' || activeTab === 'operations'">
           <div class="progress-section" v-if="isRunning || isComplete">
             <div class="progress-bar-container">
               <div
@@ -5306,7 +6728,7 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
           </div>
         </template>
 
-        <div v-if="activeTab === 'manual' && !isRunning && !isComplete && statusHistory.length === 0"
+        <div v-if="(activeTab === 'manual' || activeTab === 'operations') && !isRunning && !isComplete && statusHistory.length === 0"
              class="terminal-empty">
           Ready. Configure options above and click the action button to begin.
         </div>
@@ -8683,6 +10105,76 @@ const cfacFilenamePreview = computed(() => generateOutputFilename('cfac'));
 
 .active-model-card .btn {
   width: 100%;
+}
+
+/* V2 Scheduler: Model and Calibration rows */
+.model-calibration-row {
+  display: grid;
+  grid-template-columns: 1fr 1.5fr;
+  gap: 16px;
+  margin-bottom: 16px;
+  padding: 12px;
+  background: var(--bg-primary);
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+}
+
+.model-info,
+.calibration-info {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.calibration-info {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.model-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.model-select {
+  padding: 8px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 0.9rem;
+}
+
+.calib-age {
+  padding: 6px 12px;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  background: var(--bg-secondary);
+  border-radius: 4px;
+  white-space: nowrap;
+  align-self: flex-end;
+}
+
+.auto-calibrate-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  background: var(--bg-primary);
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+}
+
+.auto-calibrate-row input[type="number"] {
+  padding: 6px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
 }
 
 /* Manual Run Card - Full Width */

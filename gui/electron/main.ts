@@ -1279,13 +1279,14 @@ ipcMain.handle('run-scheduler-manual', async (_event, options: {
   suffix?: string | null;
   outputDir?: string;
   weatherCacheDir?: string;
+  geography?: 'regional' | 'zonal' | 'both';
 }) => {
   const cliPath = getCliPath();
   const projectRoot = getProjectRoot();
 
   const { date, type, horizon, calibratorPath, trainingDays, endDate, verbose, pushGateway,
           useCalibrationId, useModelId, useDb, dataDbPath, maxIterations, refreshWeather, overwrite,
-          suffix, outputDir, weatherCacheDir } = options;
+          suffix, outputDir, weatherCacheDir, geography } = options;
 
   // Determine if this is a date range (backfill) or single date run
   const isBackfill = endDate && endDate !== date;
@@ -1361,8 +1362,12 @@ ipcMain.handle('run-scheduler-manual', async (_event, options: {
     args.push('--output', outputDir);
   }
 
+  // Add geography mode
+  if (geography) {
+    args.push('--geography', geography);
+  }
+
   // Note: --cache is not supported by scheduler commands (it uses its own weather cache logic)
-  // Note: Geography is read from forecast_config.json (demand.geography) - ensure config is saved before running
   // The weatherCacheDir setting is used by manual forecast commands instead
   // Note: Model options (--use-xgboost, --asymmetric-loss, --bias-correction) are read from forecast_config.json
 
@@ -2390,6 +2395,169 @@ ipcMain.handle('demand-calibration:save', async (_event, data: any, filename: st
   } catch (error: any) {
     console.error('Failed to save demand calibration:', error);
     return { success: false, error: error.message };
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// V2 OPERATIONS IPC HANDLERS (for GUI V2 Operations Tab)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// List .vfm model files
+ipcMain.handle('list-vfm-files', async (_event, directory?: string) => {
+  try {
+    const projectRoot = getProjectRoot();
+    const modelsDir = directory || path.join(projectRoot, 'models');
+
+    if (!fs.existsSync(modelsDir)) {
+      return [];
+    }
+
+    const files = fs.readdirSync(modelsDir)
+      .filter(file => file.endsWith('.vfm'))
+      .map(file => {
+        const filePath = path.join(modelsDir, file);
+        const stats = fs.statSync(filePath);
+        return {
+          name: file,
+          path: filePath,
+          size: stats.size,
+          modified: stats.mtime.toISOString()
+        };
+      })
+      .sort((a, b) => new Date(b.modified).getTime() - new Date(a.modified).getTime());
+
+    return files;
+  } catch (error: any) {
+    console.error('Failed to list .vfm files:', error);
+    return [];
+  }
+});
+
+// List calibration.json files
+ipcMain.handle('list-calibration-files', async (_event, directory?: string) => {
+  try {
+    const projectRoot = getProjectRoot();
+    const modelsDir = directory || path.join(projectRoot, 'models');
+
+    if (!fs.existsSync(modelsDir)) {
+      return [];
+    }
+
+    const files = fs.readdirSync(modelsDir)
+      .filter(file => file.includes('calibration') && file.endsWith('.json'))
+      .map(file => {
+        const filePath = path.join(modelsDir, file);
+        const stats = fs.statSync(filePath);
+        return {
+          name: file,
+          path: filePath,
+          size: stats.size,
+          modified: stats.mtime.toISOString()
+        };
+      })
+      .sort((a, b) => new Date(b.modified).getTime() - new Date(a.modified).getTime());
+
+    return files;
+  } catch (error: any) {
+    console.error('Failed to list calibration files:', error);
+    return [];
+  }
+});
+
+// Delete a file (.vfm or calibration.json)
+ipcMain.handle('delete-file', async (_event, filePath: string) => {
+  try {
+    if (!fs.existsSync(filePath)) {
+      return { success: false, error: 'File not found' };
+    }
+
+    // Security check: only allow deleting .vfm and calibration .json files
+    const fileName = path.basename(filePath);
+    const isVfm = fileName.endsWith('.vfm');
+    const isCalibration = fileName.includes('calibration') && fileName.endsWith('.json');
+
+    if (!isVfm && !isCalibration) {
+      return { success: false, error: 'Can only delete .vfm and calibration.json files' };
+    }
+
+    fs.unlinkSync(filePath);
+    console.log('Deleted file:', filePath);
+
+    return { success: true };
+  } catch (error: any) {
+    console.error('Failed to delete file:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Read .vfm file contents (for Models Tab file view)
+ipcMain.handle('read-vfm-file', async (_event, filePath: string) => {
+  try {
+    if (!fs.existsSync(filePath)) {
+      return { success: false, error: 'File not found' };
+    }
+
+    // Security check: only allow reading .vfm files
+    if (!filePath.endsWith('.vfm')) {
+      return { success: false, error: 'Can only read .vfm files' };
+    }
+
+    // Use model-store-helper to deserialize the .vfm file
+    const projectRoot = getProjectRoot();
+    const helperPath = path.join(projectRoot, 'gui', 'helpers', 'model-store-helper.cjs');
+
+    if (!fs.existsSync(helperPath)) {
+      return { success: false, error: 'Model store helper not found' };
+    }
+
+    const { deserializeModel } = require(helperPath);
+    const modelData = deserializeModel(filePath);
+
+    if (!modelData) {
+      return { success: false, error: 'Failed to deserialize model file' };
+    }
+
+    // Extract relevant metrics for display
+    const result: any = {
+      success: true,
+      entityType: modelData.entityType || 'unknown',
+      geography: modelData.geography || 'unknown',
+      trainedAt: modelData.trainedAt,
+      trainingPeriod: modelData.trainingPeriod,
+      metrics: {}
+    };
+
+    // Extract per-area MAPE if available
+    if (modelData.metrics) {
+      result.metrics.overallMape = modelData.metrics.overallMape;
+      result.metrics.perZoneMape = modelData.metrics.perZoneMape;
+      result.metrics.perRegionMape = modelData.metrics.perRegionMape;
+      result.metrics.perStationMape = modelData.metrics.perStationMape;
+    }
+
+    return result;
+  } catch (error: any) {
+    console.error('Failed to read .vfm file:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Get file stats (for V2 Scheduler calibration age calculation)
+ipcMain.handle('get-file-stats', async (_event, filePath: string) => {
+  try {
+    if (!fs.existsSync(filePath)) {
+      return { exists: false };
+    }
+
+    const stats = fs.statSync(filePath);
+    return {
+      exists: true,
+      size: stats.size,
+      modified: stats.mtimeMs // milliseconds since epoch
+    };
+  } catch (error: any) {
+    console.error('Failed to get file stats:', error);
+    return { exists: false, error: error.message };
   }
 });
 

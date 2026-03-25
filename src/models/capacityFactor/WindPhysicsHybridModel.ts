@@ -27,7 +27,7 @@ import {
 } from '../../types/capacityFactor.js';
 import { WindPhysicsMRECModel, PhysicsMRECFactors } from './WindPhysicsMRECModel.js';
 import { CFacXGBoostRegressor } from './CFacXGBoostRegressor.js';
-import { getOptimalWindSpeed } from './WindWeatherHybridModel.js';
+import { getOptimalWindSpeed } from './legacy/WindWeatherHybridModel.js';
 
 export interface PhysicsHybridMetrics {
   stationCode: string;

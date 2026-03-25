@@ -98,6 +98,42 @@ export class ConfigService {
         runDays: [1, 2, 3, 4, 5, 6, 7],
         forecastTypes: ['demand', 'cfac'],
         horizons: ['daily', 'weekly']
+      },
+
+      v2: {
+        demand: {
+          trainingDays: 90,
+          lagWarmupDays: 7,
+          calibrationDays: 7,
+          shapeClusters: 4,
+          levelFeatures: [
+            'hour', 'dayOfWeek', 'isWeekend', 'isHoliday', 'month',
+            'hourSin', 'hourCos', 'dayOfWeekSin', 'dayOfWeekCos',
+            'temp', 'dew', 'precip', 'windgust', 'windspeed', 'cloudcover',
+            'relativeHumidity', 'heatIndex', 'cdh',
+            'tempLag1h', 'tempLag24h', 'tempRolling24h'
+          ],
+          smoothingThreshold: 50,
+          defaultModelPath: '',
+          defaultCalibrationPath: ''
+        },
+        cfac: {
+          trainingDays: 120,
+          calibrationDays: 14,
+          solarAlpha: 0.65,
+          windScaleClamp: [0.5, 2.0],
+          solarScaleClamp: [0.5, 1.5],
+          tempCoefficient: 0.004,
+          confidenceThreshold: 50,
+          defaultModelPath: '',
+          defaultCalibrationPath: '',
+          retrainMonitor: {
+            enabled: true,
+            mapeThresholdWind: 80,
+            mapeThresholdSolar: 25,
+            staleCacheHours: 24
+          }
+        }
       }
     };
   }
@@ -504,6 +540,22 @@ export class ConfigService {
   private mergeWithDefaults(loaded: Partial<GlobalForecastConfig>): GlobalForecastConfig {
     const defaults = ConfigService.getDefaults();
 
+    // Deep merge v2 config if present
+    let v2Config = defaults.v2;
+    if (loaded.v2) {
+      v2Config = {
+        demand: { ...defaults.v2!.demand, ...loaded.v2.demand },
+        cfac: {
+          ...defaults.v2!.cfac,
+          ...loaded.v2.cfac,
+          retrainMonitor: {
+            ...defaults.v2!.cfac.retrainMonitor,
+            ...loaded.v2.cfac?.retrainMonitor
+          }
+        }
+      };
+    }
+
     return {
       version: loaded.version ?? defaults.version,
       paths: { ...defaults.paths, ...loaded.paths },
@@ -514,7 +566,9 @@ export class ConfigService {
       weather: { ...defaults.weather, ...loaded.weather },
       output: { ...defaults.output, ...loaded.output },
       gateway: { ...defaults.gateway, ...loaded.gateway },
-      scheduler: { ...defaults.scheduler, ...loaded.scheduler }
+      scheduler: { ...defaults.scheduler, ...loaded.scheduler },
+      modelSelection: loaded.modelSelection ? { ...loaded.modelSelection } : undefined,
+      v2: v2Config
     };
   }
 
@@ -523,6 +577,33 @@ export class ConfigService {
    */
   getConfigPath(): string {
     return this.configPath;
+  }
+
+  /**
+   * Get V2 demand configuration with defaults
+   */
+  getV2DemandConfig() {
+    const config = this.get();
+    const defaults = ConfigService.getDefaults();
+    return config.v2?.demand ?? defaults.v2!.demand;
+  }
+
+  /**
+   * Get V2 CFAC configuration with defaults
+   */
+  getV2CfacConfig() {
+    const config = this.get();
+    const defaults = ConfigService.getDefaults();
+    return config.v2?.cfac ?? defaults.v2!.cfac;
+  }
+
+  /**
+   * Get V2 retrain monitor configuration with defaults
+   */
+  getV2RetrainMonitorConfig() {
+    const config = this.get();
+    const defaults = ConfigService.getDefaults();
+    return config.v2?.cfac.retrainMonitor ?? defaults.v2!.cfac.retrainMonitor;
   }
 }
 

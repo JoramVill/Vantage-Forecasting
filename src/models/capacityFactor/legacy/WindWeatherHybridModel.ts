@@ -24,9 +24,9 @@ import {
   MRECCalibrationData,
   CFacWeatherFeatures,
   CFacTrainingSample,
-} from '../../types/capacityFactor.js';
+} from '../../../types/capacityFactor.js';
 import { WindMRECModel } from './WindMRECModel.js';
-import { CFacXGBoostRegressor } from './CFacXGBoostRegressor.js';
+import { CFacXGBoostRegressor } from '../CFacXGBoostRegressor.js';
 
 /**
  * Optimal wind height configuration per station

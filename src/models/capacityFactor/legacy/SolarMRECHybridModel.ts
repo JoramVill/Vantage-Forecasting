@@ -10,8 +10,8 @@
  * - Weather effects beyond irradiance (via ML residual)
  */
 
-import { SolarMRECModel, SolarMRECCalibrationData, SolarMRECFactors } from './SolarMRECModel.js';
-import { CFacTrainingSample, CFacWeatherFeatures } from '../../types/capacityFactor.js';
+import { SolarMRECModel, SolarMRECCalibrationData, SolarMRECFactors } from '../SolarMRECModel.js';
+import { CFacTrainingSample, CFacWeatherFeatures } from '../../../types/capacityFactor.js';
 import MultivariateLinearRegression from 'ml-regression-multivariate-linear';
 
 export interface SolarMRECHybridFactors extends SolarMRECFactors {

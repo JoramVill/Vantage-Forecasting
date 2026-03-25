@@ -1,7 +1,7 @@
 ---
 Status: Active
-Last-Updated: 2026-03-22
-Updated-By: codebase-documenter
+Last-Updated: 2026-03-25
+Updated-By: Claude Code
 ---
 
 # CLAUDE.md - Vantage Forecaster
@@ -292,12 +292,32 @@ See `Documents/DEPLOYMENT_GUIDE.md` for full deployment documentation.
 - Wind: ~73% MAPE (4-Tier Hybrid on test data)
 - Solar: ~16% MAPE (Physics+ML with per-station calibration)
 
-### Demand Forecasting
+### Demand Forecasting (V2 Architecture)
+
+**V2 uses Level × Shape architecture:**
+- **Level Model**: XGBoost predicts daily total demand (weather + calendar + lags)
+- **Shape Model**: ProfileLibrary + ShapeAdjuster predicts 24-hour shape
+- **Final**: `dailyTotal × shape24h` produces hourly forecast
+
 | Command | Description |
 |---------|-------------|
-| `train` | Train XGBoost/Regression on demand + weather |
-| `forecast` | Generate demand forecasts (regional or zonal) |
+| `forecast` | **DEFAULT** - V2 demand forecast (auto-detects model/calibration) |
+| `v2:train` | Train V2 model (Level + Shape) and save to .vfm file |
+| `v2:calibrate` | Calibrate V2 model with recent actuals, save .json |
+| `v2:forecast` | Explicit V2 forecast with model/calibration paths |
 | `evaluate` | Compare forecast vs actual |
+| `v1:forecast` | [DEPRECATED] Legacy HybridModel forecast |
+
+**Quick Start (V2):**
+```bash
+# Option 1: Full pipeline
+node dist/index.js v2:train -d "Data Samples/Demand" -o models/demand.vfm
+node dist/index.js v2:calibrate -m models/demand.vfm -d "Data Samples/Demand" -o models/calibration.json
+node dist/index.js forecast -s 2026-03-01 -e 2026-03-30 -o output/forecast.csv
+
+# Option 2: Auto-detect (if models exist)
+node dist/index.js forecast -s 2026-03-01 -e 2026-03-30 -o output/forecast.csv --zonal
+```
 
 ### Configuration Management
 | Command | Description |
